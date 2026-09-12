@@ -241,6 +241,9 @@ void OnCommandWord(HWND hwnd, int id)
     }
 }
 
+/* 定义在 WndProc 之后，这里前置声明，避免 C3861。 */
+int TrayMenuCommand(int id);
+
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
     switch (msg)

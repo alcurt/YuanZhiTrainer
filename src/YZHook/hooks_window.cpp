@@ -382,11 +382,13 @@ bool WindowHooksInstall(bool enableNow)
         return true;
 
     bool ok = true;
-    ok = HookAttach("window", L"user32.dll", "SetWindowPos", reinterpret_cast<void*>(&Hook_SetWindowPos), enableNow) && ok;
-    ok = HookAttach("window", L"user32.dll", "MoveWindow", reinterpret_cast<void*>(&Hook_MoveWindow), enableNow) && ok;
-    ok = HookAttach("window", L"user32.dll", "ShowWindow", reinterpret_cast<void*>(&Hook_ShowWindow), enableNow) && ok;
-    ok = HookAttach("window", L"user32.dll", "SetWindowLongW", reinterpret_cast<void*>(&Hook_SetWindowLongW), enableNow) && ok;
-    ok = HookAttach("window", L"user32.dll", "SetWindowLongA", reinterpret_cast<void*>(&Hook_SetWindowLongA), enableNow) && ok;
+
+    /* 两阶段安装，理由同 CaptureHooksInstall：绝不能在 g_real* 为空时让钩子生效。 */
+    ok = HookAttach("window", L"user32.dll", "SetWindowPos", reinterpret_cast<void*>(&Hook_SetWindowPos), false) && ok;
+    ok = HookAttach("window", L"user32.dll", "MoveWindow", reinterpret_cast<void*>(&Hook_MoveWindow), false) && ok;
+    ok = HookAttach("window", L"user32.dll", "ShowWindow", reinterpret_cast<void*>(&Hook_ShowWindow), false) && ok;
+    ok = HookAttach("window", L"user32.dll", "SetWindowLongW", reinterpret_cast<void*>(&Hook_SetWindowLongW), false) && ok;
+    ok = HookAttach("window", L"user32.dll", "SetWindowLongA", reinterpret_cast<void*>(&Hook_SetWindowLongA), false) && ok;
 
     g_realSetWindowPos   = reinterpret_cast<PFN_SetWindowPos>(HookGetOriginal(reinterpret_cast<void*>(&Hook_SetWindowPos)));
     g_realMoveWindow     = reinterpret_cast<PFN_MoveWindow>(HookGetOriginal(reinterpret_cast<void*>(&Hook_MoveWindow)));
@@ -394,9 +396,16 @@ bool WindowHooksInstall(bool enableNow)
     g_realSetWindowLongW = reinterpret_cast<PFN_SetWindowLongW>(HookGetOriginal(reinterpret_cast<void*>(&Hook_SetWindowLongW)));
     g_realSetWindowLongA = reinterpret_cast<PFN_SetWindowLongA>(HookGetOriginal(reinterpret_cast<void*>(&Hook_SetWindowLongA)));
 
-    if (g_realSetWindowPos == nullptr || g_realShowWindow == nullptr)
+    if (g_realSetWindowPos == nullptr || g_realMoveWindow == nullptr || g_realShowWindow == nullptr ||
+        g_realSetWindowLongW == nullptr || g_realSetWindowLongA == nullptr)
     {
-        YZLOGE(L"WindowHooksInstall: 关键原始函数指针为空，取消窗口 hook");
+        YZLOGE(L"WindowHooksInstall: 原始函数指针不完整，窗口 hook 保持停用");
+        return false;
+    }
+
+    if (enableNow && !HookSetGroupEnabled("window", true))
+    {
+        YZLOGE(L"WindowHooksInstall: 启用窗口 hook 失败");
         return false;
     }
 

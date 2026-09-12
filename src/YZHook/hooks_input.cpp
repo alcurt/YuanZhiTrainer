@@ -288,16 +288,18 @@ bool InputHooksInstall(bool enableNow)
         return true;
 
     bool ok = true;
-    ok = HookAttach("input", L"user32.dll", "SetWindowsHookExW", reinterpret_cast<void*>(&Hook_SetWindowsHookExW), enableNow) && ok;
-    ok = HookAttach("input", L"user32.dll", "SetWindowsHookExA", reinterpret_cast<void*>(&Hook_SetWindowsHookExA), enableNow) && ok;
-    ok = HookAttach("input", L"user32.dll", "RegisterHotKey", reinterpret_cast<void*>(&Hook_RegisterHotKey), enableNow) && ok;
-    ok = HookAttach("input", L"user32.dll", "SystemParametersInfoW", reinterpret_cast<void*>(&Hook_SystemParametersInfoW), enableNow) && ok;
-    ok = HookAttach("input", L"user32.dll", "ClipCursor", reinterpret_cast<void*>(&Hook_ClipCursor), enableNow) && ok;
-    ok = HookAttach("input", L"user32.dll", "BlockInput", reinterpret_cast<void*>(&Hook_BlockInput), enableNow) && ok;
-    ok = HookAttach("input", L"user32.dll", "keybd_event", reinterpret_cast<void*>(&Hook_keybd_event), enableNow) && ok;
-    ok = HookAttach("input", L"user32.dll", "mouse_event", reinterpret_cast<void*>(&Hook_mouse_event), enableNow) && ok;
-    ok = HookAttach("input", L"user32.dll", "SendInput", reinterpret_cast<void*>(&Hook_SendInput), enableNow) && ok;
-    ok = HookAttach("input", L"user32.dll", "SetCursorPos", reinterpret_cast<void*>(&Hook_SetCursorPos), enableNow) && ok;
+
+    /* 两阶段安装，理由同 CaptureHooksInstall：绝不能在 g_real* 为空时让钩子生效。 */
+    ok = HookAttach("input", L"user32.dll", "SetWindowsHookExW", reinterpret_cast<void*>(&Hook_SetWindowsHookExW), false) && ok;
+    ok = HookAttach("input", L"user32.dll", "SetWindowsHookExA", reinterpret_cast<void*>(&Hook_SetWindowsHookExA), false) && ok;
+    ok = HookAttach("input", L"user32.dll", "RegisterHotKey", reinterpret_cast<void*>(&Hook_RegisterHotKey), false) && ok;
+    ok = HookAttach("input", L"user32.dll", "SystemParametersInfoW", reinterpret_cast<void*>(&Hook_SystemParametersInfoW), false) && ok;
+    ok = HookAttach("input", L"user32.dll", "ClipCursor", reinterpret_cast<void*>(&Hook_ClipCursor), false) && ok;
+    ok = HookAttach("input", L"user32.dll", "BlockInput", reinterpret_cast<void*>(&Hook_BlockInput), false) && ok;
+    ok = HookAttach("input", L"user32.dll", "keybd_event", reinterpret_cast<void*>(&Hook_keybd_event), false) && ok;
+    ok = HookAttach("input", L"user32.dll", "mouse_event", reinterpret_cast<void*>(&Hook_mouse_event), false) && ok;
+    ok = HookAttach("input", L"user32.dll", "SendInput", reinterpret_cast<void*>(&Hook_SendInput), false) && ok;
+    ok = HookAttach("input", L"user32.dll", "SetCursorPos", reinterpret_cast<void*>(&Hook_SetCursorPos), false) && ok;
 
     g_realSetWindowsHookExW     = reinterpret_cast<PFN_SetWindowsHookExW>(HookGetOriginal(reinterpret_cast<void*>(&Hook_SetWindowsHookExW)));
     g_realSetWindowsHookExA     = reinterpret_cast<PFN_SetWindowsHookExA>(HookGetOriginal(reinterpret_cast<void*>(&Hook_SetWindowsHookExA)));
@@ -310,9 +312,19 @@ bool InputHooksInstall(bool enableNow)
     g_realSendInput             = reinterpret_cast<PFN_SendInput>(HookGetOriginal(reinterpret_cast<void*>(&Hook_SendInput)));
     g_realSetCursorPos          = reinterpret_cast<PFN_SetCursorPos>(HookGetOriginal(reinterpret_cast<void*>(&Hook_SetCursorPos)));
 
-    if (g_realSetWindowsHookExW == nullptr)
+    if (g_realSetWindowsHookExW == nullptr || g_realSetWindowsHookExA == nullptr ||
+        g_realRegisterHotKey == nullptr || g_realSystemParametersInfoW == nullptr ||
+        g_realClipCursor == nullptr || g_realBlockInput == nullptr ||
+        g_realkeybd_event == nullptr || g_realmouse_event == nullptr ||
+        g_realSendInput == nullptr || g_realSetCursorPos == nullptr)
     {
-        YZLOGE(L"InputHooksInstall: SetWindowsHookExW 原始指针为空，取消输入 hook");
+        YZLOGE(L"InputHooksInstall: 原始函数指针不完整，输入 hook 保持停用");
+        return false;
+    }
+
+    if (enableNow && !HookSetGroupEnabled("input", true))
+    {
+        YZLOGE(L"InputHooksInstall: 启用输入 hook 失败");
         return false;
     }
 

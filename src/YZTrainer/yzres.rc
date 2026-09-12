@@ -1,0 +1,16 @@
+// Embedded payload resources.
+//
+// Keep this file ASCII-only: rc.exe decodes the file with the ANSI code page
+// unless a BOM or an explicit code page switch is present, and non-ASCII bytes
+// in comments can break parsing on some locales.
+//
+// The DLL is produced by the YZHook project (see the ProjectReference in
+// YZTrainer.vcxproj, which guarantees the DLL is linked before this file is
+// compiled). YZHOOK_X64 is defined per-platform in the vcxproj.
+#include "resource.h"
+
+#ifdef YZHOOK_X64
+IDR_HOOK_DLL RCDATA "..\\..\\dist\\x64\\YZHook.dll"
+#else
+IDR_HOOK_DLL RCDATA "..\\..\\dist\\Win32\\YZHook.dll"
+#endif

@@ -224,7 +224,7 @@ void CollectServices(ProbeData& data)
     }
 
     DWORD needed = 0, returned = 0, resume = 0;
-    EnumServicesStatusExW(scm, SC_ENUM_PROCESS_INFO, SERVICE_TYPE_DRIVER | SERVICE_TYPE_WIN32,
+    EnumServicesStatusExW(scm, SC_ENUM_PROCESS_INFO, SERVICE_DRIVER | SERVICE_WIN32,
                           SERVICE_STATE_ALL, nullptr, 0, &needed, &returned, &resume, nullptr);
     if (needed == 0)
     {
@@ -233,7 +233,7 @@ void CollectServices(ProbeData& data)
     }
 
     std::vector<BYTE> buffer(needed);
-    if (!EnumServicesStatusExW(scm, SC_ENUM_PROCESS_INFO, SERVICE_TYPE_DRIVER | SERVICE_TYPE_WIN32,
+    if (!EnumServicesStatusExW(scm, SC_ENUM_PROCESS_INFO, SERVICE_DRIVER | SERVICE_WIN32,
                                SERVICE_STATE_ALL, buffer.data(), needed, &needed, &returned,
                                &resume, nullptr))
     {

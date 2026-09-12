@@ -1,5 +1,7 @@
 #include "app.h"
 
+#include "payload.h"
+
 #include "yz_log.h"
 #include "yz_util.h"
 
@@ -79,8 +81,28 @@ bool IsProcessX86(DWORD pid, bool* outX86)
 
 std::wstring ResolveHookDllPath()
 {
+    /* 显式配置优先：留给"用外部 DLL 顶替内嵌载荷"的调试场景。 */
     if (!g_app.cfg.hookDllPath.empty())
+    {
+        g_app.hookDllSource = L"ini";
+        g_app.hookDllError.clear();
         return g_app.cfg.hookDllPath;
+    }
+
+    std::wstring err;
+    std::wstring extracted = PayloadEnsureHookDll(&err);
+    if (!extracted.empty())
+    {
+        g_app.hookDllSource = L"embedded";
+        g_app.hookDllError.clear();
+        return extracted;
+    }
+
+    /* 内嵌释放失败（磁盘只读、还原卡拦截等）时退回旧的同目录文件方式，
+       让开发机上"dist 里直接放 YZHook.dll"的用法继续可用。 */
+    g_app.hookDllSource = L"filedir";
+    g_app.hookDllError  = err;
+    YZLOGW(L"内嵌 Hook 释放失败，回退到同目录 YZHook.dll: %s", err.c_str());
     return yz::JoinPath(g_app.exeDir, L"YZHook.dll");
 }
 

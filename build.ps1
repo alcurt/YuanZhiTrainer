@@ -9,7 +9,7 @@
 
     产物统一输出到 dist\<Platform>\ ：
         YZTrainer.exe   主程序（需要管理员运行）
-        YZHook.dll      注入模块
+        YZHook.dll      注入模块（已内嵌进 exe，dist 下这份仅作回退/调试）
         YZProbe.exe     机房侦察工具
         YZSimTarget.exe 模拟远志学生端（仅本地测试用）
 #>
@@ -54,4 +54,4 @@ Get-ChildItem (Join-Path $root 'dist') -Recurse -Include *.exe, *.dll -ErrorActi
     Select-Object FullName, Length | Format-Table -AutoSize
 
 Write-Host ''
-Write-Host '提示：YZTrainer.exe 与 YZHook.dll 必须放在同一个目录；YZProbe.exe 建议单独带到机房运行。'
+Write-Host '提示：YZHook.dll 已内嵌进 YZTrainer.exe，单文件即可运行（运行时释放到 %ProgramData%\YZTrainer\cache）；YZProbe.exe 建议单独带到机房运行。'

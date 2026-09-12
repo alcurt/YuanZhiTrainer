@@ -10,7 +10,7 @@
     <VCProjectVersion>16.0</VCProjectVersion>
     <ProjectGuid>{6E1B2C4A-8F31-4E4B-9E1D-2A7C5F0B1A01}</ProjectGuid>
     <RootNamespace>YZTrainer</RootNamespace>
-    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+    <WindowsTargetPlatformVersion>10.0.22621.0</WindowsTargetPlatformVersion>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
   <PropertyGroup Label="Configuration">
@@ -62,6 +62,11 @@
       <OptimizeReferences>true</OptimizeReferences>
     </Link>
   </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Platform)'=='x64'">
+    <ResourceCompile>
+      <PreprocessorDefinitions>YZHOOK_X64;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ResourceCompile>
+  </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="config.cpp" />
     <ClCompile Include="injector.cpp" />
@@ -70,11 +75,28 @@
     <ClCompile Include="servicepanel.cpp" />
     <ClCompile Include="diag.cpp" />
     <ClCompile Include="main.cpp" />
+    <ClCompile Include="payload.cpp" />
     <ClCompile Include="..\common\yz_log.cpp" />
     <ClCompile Include="..\common\yz_util.cpp" />
   </ItemGroup>
   <ItemGroup>
 
+  </ItemGroup>
+  <ItemGroup>
+    <!-- AdditionalInputs 只是把"rc 依赖 DLL"这件事写进工程，方便人和 VS 看懂；
+         真正让增量构建正确重编资源的是 MSBuild 的读取跟踪（rc.exe 读过 YZHook.dll）。 -->
+    <ResourceCompile Include="yzres.rc">
+      <AdditionalInputs>$(ProjectDir)..\..\dist\$(Platform)\YZHook.dll</AdditionalInputs>
+    </ResourceCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <!-- 只为构建顺序：yzres.rc 里引用的 dist\$(Platform)\YZHook.dll 必须先链接出来。
+         LinkLibraryDependencies=false 保证不会把 Hook 的导入库链进主程序。 -->
+    <ProjectReference Include="..\YZHook\YZHook.vcxproj">
+      <Project>{6E1B2C4A-8F31-4E4B-9E1D-2A7C5F0B1A02}</Project>
+      <ReferenceOutputAssembly>false</ReferenceOutputAssembly>
+      <LinkLibraryDependencies>false</LinkLibraryDependencies>
+    </ProjectReference>
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>

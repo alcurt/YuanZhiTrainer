@@ -3,6 +3,8 @@
 //
 #include "app.h"
 
+#include "payload.h"
+
 #include "yz_log.h"
 #include "yz_util.h"
 
@@ -40,8 +42,11 @@ std::wstring StartupSummary()
 
     std::wstring text = yz::Format(L"YZTrainer %s 启动。管理权限: %s\r\n",
                                    YZ_VERSION_STR, elevated ? L"是" : L"否（注入可能失败）");
-    text += yz::Format(L"Hook DLL: %s (%s)\r\n", hookPath.c_str(),
+    text += yz::Format(L"Hook DLL: %s [来源=%s 内嵌资源=%u 字节] (%s)\r\n", hookPath.c_str(),
+                       g_app.hookDllSource.c_str(), PayloadEmbeddedSize(),
                        yz::FileExists(hookPath) ? L"存在" : L"缺失，请先编译 YZHook 工程");
+    if (!g_app.hookDllError.empty())
+        text += yz::Format(L"Hook DLL 释放失败原因: %s\r\n", g_app.hookDllError.c_str());
     text += yz::Format(L"配置: 窗口化=%d 解锁=%d 置顶=%d 防监视=%d 拦遥控=%d 宽度=%u%%\r\n",
                        (g_app.cfg.flags & YZ_FLAG_WINDOWIZE) ? 1 : 0,
                        (g_app.cfg.flags & YZ_FLAG_INPUT_UNLOCK) ? 1 : 0,
@@ -73,6 +78,8 @@ int WINAPI wWinMain(HINSTANCE hinst, HINSTANCE, LPWSTR, int)
     yz::LogSetLevel(g_app.cfg.logLevel);
     yz::LogSetSink(LogSinkProc, nullptr);
     YZLOGI(L"YZTrainer 启动，exeDir=%s", g_app.exeDir.c_str());
+    if (!PayloadCheckEmbedded())
+        YZLOGW(L"内嵌 Hook 自检未通过：资源缺失或架构与本进程不一致，将依赖外部 YZHook.dll");
 
     IpcStart();
 

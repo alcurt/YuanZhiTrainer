@@ -26,7 +26,7 @@ struct AppConfig
     int          logLevel;         /* 0..3 */
     bool         autoInject;       /* 是否自动注入/补注入 */
     std::wstring targetDir;        /* 远志安装目录，空=按进程路径自动判定 */
-    std::wstring hookDllPath;      /* 空=使用 exe 同目录 YZHook.dll */
+    std::wstring hookDllPath;      /* 空=用内嵌资源；填路径则强制使用该文件 */
     std::vector<std::wstring> processNames;
 };
 
@@ -37,6 +37,8 @@ struct AppRuntime
     HINSTANCE        hinst;
     std::wstring     exeDir;
     std::wstring     iniPath;
+    std::wstring     hookDllSource;  /* embedded / ini / filedir，诊断用 */
+    std::wstring     hookDllError;   /* 内嵌释放失败的原因原文 */
 
     HANDLE           pipe;
     CRITICAL_SECTION cs;

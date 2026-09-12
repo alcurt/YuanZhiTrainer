@@ -220,14 +220,19 @@ bool CaptureHooksInstall(bool enableNow)
         return true;
 
     bool ok = true;
-    ok = HookAttach("capture", L"user32.dll", "GetDC", reinterpret_cast<void*>(&Hook_GetDC), enableNow) && ok;
-    ok = HookAttach("capture", L"user32.dll", "GetWindowDC", reinterpret_cast<void*>(&Hook_GetWindowDC), enableNow) && ok;
-    ok = HookAttach("capture", L"user32.dll", "ReleaseDC", reinterpret_cast<void*>(&Hook_ReleaseDC), enableNow) && ok;
-    ok = HookAttach("capture", L"user32.dll", "PrintWindow", reinterpret_cast<void*>(&Hook_PrintWindow), enableNow) && ok;
-    ok = HookAttach("capture", L"gdi32.dll", "CreateDCW", reinterpret_cast<void*>(&Hook_CreateDCW), enableNow) && ok;
-    ok = HookAttach("capture", L"gdi32.dll", "DeleteDC", reinterpret_cast<void*>(&Hook_DeleteDC), enableNow) && ok;
-    ok = HookAttach("capture", L"gdi32.dll", "BitBlt", reinterpret_cast<void*>(&Hook_BitBlt), enableNow) && ok;
-    ok = HookAttach("capture", L"gdi32.dll", "StretchBlt", reinterpret_cast<void*>(&Hook_StretchBlt), enableNow) && ok;
+
+    /* 两阶段安装：先只创建（enableNow=false），等原始函数指针全部取回后再整组启用。
+       反过来的话，钩子在 g_real* 仍为空指针时就已经生效，目标进程此时调用
+       GetDC/BitBlt 就会跳进 detour 里的空指针，直接以 0xC0000005 崩掉宿主进程
+       （实测崩溃点：错误模块 unknown、错误偏移量 0x00000000）。 */
+    ok = HookAttach("capture", L"user32.dll", "GetDC", reinterpret_cast<void*>(&Hook_GetDC), false) && ok;
+    ok = HookAttach("capture", L"user32.dll", "GetWindowDC", reinterpret_cast<void*>(&Hook_GetWindowDC), false) && ok;
+    ok = HookAttach("capture", L"user32.dll", "ReleaseDC", reinterpret_cast<void*>(&Hook_ReleaseDC), false) && ok;
+    ok = HookAttach("capture", L"user32.dll", "PrintWindow", reinterpret_cast<void*>(&Hook_PrintWindow), false) && ok;
+    ok = HookAttach("capture", L"gdi32.dll", "CreateDCW", reinterpret_cast<void*>(&Hook_CreateDCW), false) && ok;
+    ok = HookAttach("capture", L"gdi32.dll", "DeleteDC", reinterpret_cast<void*>(&Hook_DeleteDC), false) && ok;
+    ok = HookAttach("capture", L"gdi32.dll", "BitBlt", reinterpret_cast<void*>(&Hook_BitBlt), false) && ok;
+    ok = HookAttach("capture", L"gdi32.dll", "StretchBlt", reinterpret_cast<void*>(&Hook_StretchBlt), false) && ok;
 
     g_realGetDC       = reinterpret_cast<PFN_GetDC>(HookGetOriginal(reinterpret_cast<void*>(&Hook_GetDC)));
     g_realGetWindowDC = reinterpret_cast<PFN_GetWindowDC>(HookGetOriginal(reinterpret_cast<void*>(&Hook_GetWindowDC)));
@@ -238,9 +243,20 @@ bool CaptureHooksInstall(bool enableNow)
     g_realStretchBlt  = reinterpret_cast<PFN_StretchBlt>(HookGetOriginal(reinterpret_cast<void*>(&Hook_StretchBlt)));
     g_realPrintWindow = reinterpret_cast<PFN_PrintWindow>(HookGetOriginal(reinterpret_cast<void*>(&Hook_PrintWindow)));
 
-    if (g_realBitBlt == nullptr || g_realGetDC == nullptr)
+    /* 只要有一个原指针没拿到，整组就保持停用：宁可功能不生效，也不能让任何
+       detour 在空指针上被调用（Hook_PrintWindow 还会用到 g_realBitBlt，
+       所以这里必须逐个检查，不能只查"关键"的两个）。 */
+    if (g_realGetDC == nullptr || g_realGetWindowDC == nullptr || g_realReleaseDC == nullptr ||
+        g_realCreateDCW == nullptr || g_realDeleteDC == nullptr || g_realBitBlt == nullptr ||
+        g_realStretchBlt == nullptr || g_realPrintWindow == nullptr)
     {
-        YZLOGE(L"CaptureHooksInstall: 关键原始函数指针为空，取消采集 hook");
+        YZLOGE(L"CaptureHooksInstall: 原始函数指针不完整，采集 hook 保持停用");
+        return false;
+    }
+
+    if (enableNow && !HookSetGroupEnabled("capture", true))
+    {
+        YZLOGE(L"CaptureHooksInstall: 启用采集 hook 失败");
         return false;
     }
 

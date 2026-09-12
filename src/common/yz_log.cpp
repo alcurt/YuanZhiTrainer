@@ -18,7 +18,7 @@ yz::LogSink      g_sink      = nullptr;
 void*            g_sinkCtx   = nullptr;
 int              g_fileIndex = 0;
 
-BOOL CALLBACK InitOnceProc(PINIT_ONCE, PVOID, PVOID)
+BOOL CALLBACK InitOnceProc(PINIT_ONCE, PVOID, PVOID*)
 {
     InitializeCriticalSection(&g_cs);
     return TRUE;

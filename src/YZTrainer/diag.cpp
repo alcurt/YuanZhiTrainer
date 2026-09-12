@@ -3,6 +3,8 @@
 //
 #include "app.h"
 
+#include "payload.h"
+
 #include "yz_log.h"
 #include "yz_util.h"
 
@@ -107,12 +109,12 @@ std::wstring ServiceDump()
     }
 
     DWORD needed = 0, returned = 0, resume = 0;
-    EnumServicesStatusExW(scm, SC_ENUM_PROCESS_INFO, SERVICE_TYPE_DRIVER | SERVICE_TYPE_WIN32,
+    EnumServicesStatusExW(scm, SC_ENUM_PROCESS_INFO, SERVICE_DRIVER | SERVICE_WIN32,
                           SERVICE_STATE_ALL, nullptr, 0, &needed, &returned, &resume, nullptr);
     if (needed != 0)
     {
         std::vector<BYTE> buffer(needed);
-        if (EnumServicesStatusExW(scm, SC_ENUM_PROCESS_INFO, SERVICE_TYPE_DRIVER | SERVICE_TYPE_WIN32,
+        if (EnumServicesStatusExW(scm, SC_ENUM_PROCESS_INFO, SERVICE_DRIVER | SERVICE_WIN32,
                                   SERVICE_STATE_ALL, buffer.data(), needed, &needed, &returned,
                                   &resume, nullptr))
         {
@@ -196,12 +198,16 @@ void ExportDiagnostics(HWND owner)
     std::wstring snapshot;
     snapshot += L"YZTrainer 诊断快照\r\n生成时间: " + yz::NowStampEx() + L"\r\n\r\n";
     snapshot += yz::Format(L"== 配置 ==\r\nFlags=0x%08X WindowPercent=%u AutoInject=%d\r\n"
-                           L"TargetDir=%s\r\nHookDll=%s\r\nExeDir=%s\r\n\r\n",
+                           L"TargetDir=%s\r\nHookDll=%s\r\n"
+                           L"HookDllSource=%s 内嵌资源=%u 字节\r\nExeDir=%s\r\n\r\n",
                            g_app.cfg.flags, g_app.cfg.windowPercent,
                            g_app.cfg.autoInject ? 1 : 0,
                            g_app.cfg.targetDir.c_str(),
                            ResolveHookDllPath().c_str(),
+                           g_app.hookDllSource.c_str(), PayloadEmbeddedSize(),
                            g_app.exeDir.c_str());
+    if (!g_app.hookDllError.empty())
+        snapshot += L"HookDllReleaseError=" + g_app.hookDllError + L"\r\n\r\n";
 
     DWORD clientPid = 0;
     bool connected = IpcIsConnected(&clientPid);

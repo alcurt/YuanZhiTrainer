@@ -1,5 +1,6 @@
 #include "hookmgr.h"
 
+#include "yz_log.h"
 #include "yz_util.h"
 
 #include <string>

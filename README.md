@@ -65,8 +65,8 @@ pwsh -File build.ps1 -Both
 
 | 文件 | 用途 |
 |---|---|
-| `YZTrainer.exe` | 主程序（清单要求管理员权限），与 `YZHook.dll` 必须同目录 |
-| `YZHook.dll` | 注入模块，不要单独运行 |
+| `YZTrainer.exe` | 主程序（清单要求管理员权限），已内嵌 YZHook.dll，单文件即可运行 |
+| `YZHook.dll` | 注入模块，运行时从 exe 资源释放；dist 下这份是回退/调试用，分发时不需要拷贝 |
 | `YZProbe.exe` | 机房侦察工具，只读，建议先跑它 |
 | `YZSimTarget.exe` | 模拟学生端，仅本地测试用 |
 
@@ -77,7 +77,7 @@ pwsh -File build.ps1 -Both
    * “远志相关进程”里哪个进程加载了 `Rmdesk.ads` / `PlayerGUI.dll` / `ExdHooks.dll`；
    * “疑似全屏/置顶窗口”里广播窗口的类名、样式与所属 PID；
    * “远志相关服务/驱动”的 ImagePath，确认文件过滤/网卡过滤驱动的真实名字。
-3. **机房实测**：把 `YZTrainer.exe` + `YZHook.dll` 拷到同一目录，管理员运行。教师广播时观察广播窗口是否变成可操作窗口；退出程序后所有 hook 会被卸载、被改写的策略值会还原。
+3. **机房实测**：只需把 `YZTrainer.exe` 单文件拷过去，管理员运行。教师广播时观察广播窗口是否变成可操作窗口；退出程序后所有 hook 会被卸载、被改写的策略值会还原。
 4. **出问题**：点“导出诊断包”，会把日志、配置、进程/窗口/服务快照打包到 `diag-<时间戳>\`，可带回分析。
 
 ## 界面与热键
@@ -98,7 +98,7 @@ WindowPercent=60   ; 窗口化后的宽度占屏幕百分比（20-100）
 LogLevel=2         ; 0=错误 1=警告 2=信息 3=调试
 AutoInject=1       ; 是否自动注入 / 客户端被服务重启后自动补注入
 TargetDir=         ; 远志安装目录，留空=自动判定
-HookDllPath=       ; 留空=使用 exe 同目录的 YZHook.dll
+HookDllPath=       ; 留空=用内嵌的 YZHook.dll；填路径可强制改用外部 DLL（调试用）
 ProcessNames=Yistart.exe;TEACHCMD.exe;PlayerGUI.exe;ExdPaintHelper.exe
 ```
 
@@ -106,7 +106,7 @@ ProcessNames=Yistart.exe;TEACHCMD.exe;PlayerGUI.exe;ExdPaintHelper.exe
 
 ## 实现要点
 
-* **注入**：主程序启用 `SeDebugPrivilege`，`CreateRemoteThread` + `LoadLibraryW` 把 `YZHook.dll` 注入目标进程；目标按“进程名 + 路径含 GYZY/YZinfo + 加载了 `.ads`/`PlayerGUI.dll`/`ExdHooks.dll`”打分选取；每 2 秒巡检，客户端被服务重启后自动补注入。
+* **注入**：主程序启用 `SeDebugPrivilege`，`CreateRemoteThread` + `LoadLibraryW` 把内嵌在 exe 资源里的 `YZHook.dll` 注入目标进程（释放到 `%ProgramData%\YZTrainer\cache\`、按内容哈希命名、先校验 PE 架构）；目标按“进程名 + 路径含 GYZY/YZinfo + 加载了 `.ads`/`PlayerGUI.dll`/`ExdHooks.dll`”打分选取；每 2 秒巡检，客户端被服务重启后自动补注入。
 * **窗口层**：hook `SetWindowPos` / `MoveWindow` / `ShowWindow` / `SetWindowLongA/W`，命中“本进程 + 无标题栏 + 覆盖整块显示器 + 置顶或 POPUP”的窗口后改写成 `WS_OVERLAPPEDWINDOW`，默认屏宽 60% 居中、不抢焦点；客户端每 3 秒抢回全屏时按 500ms 节流重新纠正。
 * **输入层**：拦截学生端安装键盘钩子的调用；`RegisterHotKey`、`SystemParametersInfoW`（屏保/快速任务切换）、`ClipCursor`、`BlockInput` 全部按开关放行或拦截；每秒强制 `ClipCursor(NULL)` 一次；被改写的 HKCU 策略值（任务管理器/锁屏/Win 键/GameDVR）在后台持续恢复，退出时还原原值。
 * **采集层**：跟踪进程内取得的屏幕 DC（`GetDC(NULL)`/`GetWindowDC`/`CreateDCW("DISPLAY")`），冻结时把 `BitBlt`/`StretchBlt`/`PrintWindow` 的源改为开启瞬间抓取的 DIB，从而只影响学生端自己抓屏，不影响你本地显示。
@@ -118,7 +118,7 @@ ProcessNames=Yistart.exe;TEACHCMD.exe;PlayerGUI.exe;ExdPaintHelper.exe
 1. 防监视目前覆盖 GDI 抓屏路径。若侦察报告显示学生端改用 `ExdDtDup.dll`（DXGI Desktop Duplication）抓屏，需要在 `hooks_capture.cpp` 追加 `IDXGIOutputDuplication::AcquireNextFrame` 的 COM vtable hook（计划中的下一步）。
 2. 若键鼠封锁来自内核驱动或 `WinIo.dll` 端口 I/O（即解除钩子后仍被锁），需要改用“指令层拦截”：在 `CmdProc.ads`/`NetControl.ads` 的分发点丢弃锁定类命令，命令标识需先用侦察报告与抓包确认。
 3. 注入需要管理员权限与足够完整性级别；若学生端以 SYSTEM 运行而你在受限账户下，会失败（机房默认管理员登录则不受影响）。
-4. `YZHook.dll` 与 `YZTrainer.exe` 目前是两个文件；如需单文件分发，可在构建脚本里把 DLL 以 RCDATA 资源嵌入并在运行时释放到 `%TEMP%`。
+4. 载荷已内嵌（RCDATA）：运行时释放到 `%ProgramData%\YZTrainer\cache\YZHook_<arch>_<hash>.dll`，复用前整文件比对；目录不可写时退 `%TEMP%\YZTrainer-cache\`，再失败才回退 exe 同目录的 `YZHook.dll`。释放出来的文件保留不删，便于排障。
 5. 防监视从设计上只影响学生端自己抓屏的路径，不会改动系统显示驱动。
 
 ## 许可与声明
