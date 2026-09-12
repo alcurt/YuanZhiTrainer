@@ -1,0 +1,19 @@
+# 构建产物
+dist/
+build/
+*.obj
+*.pdb
+*.ilk
+*.idb
+*.exp
+*.lib
+*.user
+*.aps
+.vs/
+
+# 探针输出
+YZProbe-report-*.json
+YZProbe-report-*.md
+
+# 诊断包
+diag-*/
