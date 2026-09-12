@@ -119,7 +119,25 @@ std::wstring ProbeToJson(const ProbeData& data)
             if (k != 0) j += L", ";
             j += L"\"" + JsonEscape(p.modules[k].name) + L"\"";
         }
-        j += L"]\n    }";
+        j += L"],\n      \"moduleExports\": {";
+        bool firstMod = true;
+        for (size_t k = 0; k < p.modules.size(); k++)
+        {
+            if (p.modules[k].exports.empty())
+                continue;
+            if (!firstMod)
+                j += L", ";
+            firstMod = false;
+            j += L"\"" + JsonEscape(p.modules[k].name) + L"\": [";
+            for (size_t e = 0; e < p.modules[k].exports.size(); e++)
+            {
+                if (e != 0)
+                    j += L", ";
+                j += L"\"" + JsonEscape(p.modules[k].exports[e]) + L"\"";
+            }
+            j += L"]";
+        }
+        j += L"}\n    }";
         if (i + 1 != data.processes.size()) j += L",";
         j += L"\n";
     }
@@ -230,6 +248,26 @@ std::wstring ProbeToMarkdown(const ProbeData& data)
         m += L"```\n\n";
     }
 
+    m += L"### 远志模块导出表（可用于确认可直接调用的入口）\n\n";
+    for (size_t i = 0; i < data.processes.size(); i++)
+    {
+        const ProbeProcess& p = data.processes[i];
+        if (!p.isYuanzhi)
+            continue;
+        for (size_t k = 0; k < p.modules.size(); k++)
+        {
+            if (p.modules[k].exports.empty())
+                continue;
+            m += L"**" + p.modules[k].name + L"**\n\n```\n";
+            for (size_t e = 0; e < p.modules[k].exports.size(); e++)
+            {
+                m += p.modules[k].exports[e];
+                m += (e + 1 == p.modules[k].exports.size()) ? L"\n" : L", ";
+            }
+            m += L"```\n\n";
+        }
+    }
+
     m += L"## 疑似全屏/置顶窗口（按进程排序）\n\n";
     m += L"| HWND | PID | 进程 | 类名 | 样式 | 置顶 | 无边框 | 覆盖整屏 | 可见 | 标题 |\n|---|---|---|---|---|---|---|---|---|---|\n";
     for (size_t i = 0; i < data.windows.size(); i++)
@@ -335,3 +373,4 @@ int wmain(int argc, wchar_t** argv)
     wprintf(L"  Markdown: %ls\n", mdPath.c_str());
     return 0;
 }
+

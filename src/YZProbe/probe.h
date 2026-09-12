@@ -11,6 +11,7 @@ struct ProbeModule
 {
     std::wstring name;
     std::wstring path;
+    std::vector<std::wstring> exports;
 };
 
 struct ProbeProcess
@@ -94,3 +95,5 @@ std::wstring ProbeToJson(const ProbeData& data);
 std::wstring ProbeToMarkdown(const ProbeData& data);
 
 bool ProbeIsYuanzhiPath(const std::wstring& path, const std::wstring& exeName);
+bool ProbeReadExports(const std::wstring& filePath, std::vector<std::wstring>& out);
+

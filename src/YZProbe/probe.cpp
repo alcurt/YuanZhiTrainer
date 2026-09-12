@@ -112,8 +112,20 @@ void CollectProcesses(ProbeData& data, bool includeAllModules)
                 }
             }
 
+            /* 远志模块的导出表：后续“调用对方自己的解锁入口”时要用 */
+            for (size_t i = 0; i < p.modules.size(); i++)
+            {
+                const std::wstring& modPath = p.modules[i].path;
+                if (modPath.empty())
+                    continue;
+                if (!yz::ContainsNoCase(modPath, L"YZinfo") && !yz::ContainsNoCase(modPath, L"GZYZ"))
+                    continue;
+                ProbeReadExports(modPath, p.modules[i].exports);
+            }
+
             data.processes.push_back(p);
         } while (Process32NextW(snap, &pe));
+
     }
     CloseHandle(snap);
 }
@@ -420,3 +432,110 @@ bool ProbeCollect(ProbeData& data, bool includeAllModules)
     return true;
 }
 
+
+/* ---- PE 导出表解析（只读文件，不加载模块） ---- */
+namespace
+{
+bool ReadWholeFile(const std::wstring& path, std::vector<BYTE>& out)
+{
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                           nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE)
+        return false;
+
+    LARGE_INTEGER size;
+    size.QuadPart = 0;
+    if (!GetFileSizeEx(h, &size) || size.QuadPart <= 0 || size.QuadPart > 128ll * 1024 * 1024)
+    {
+        CloseHandle(h);
+        return false;
+    }
+
+    out.resize(static_cast<size_t>(size.QuadPart));
+    DWORD read = 0;
+    bool ok = ReadFile(h, out.data(), static_cast<DWORD>(out.size()), &read, nullptr) != FALSE;
+    CloseHandle(h);
+    return ok && read == out.size();
+}
+
+DWORD RvaToOffset(const std::vector<BYTE>& data, DWORD rva)
+{
+    if (data.size() < sizeof(IMAGE_DOS_HEADER))
+        return 0;
+    const IMAGE_DOS_HEADER* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(data.data());
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE || dos->e_lfanew <= 0)
+        return 0;
+    size_t ntOff = static_cast<size_t>(dos->e_lfanew);
+    if (ntOff + sizeof(IMAGE_NT_HEADERS32) > data.size())
+        return 0;
+    const IMAGE_NT_HEADERS32* nt = reinterpret_cast<const IMAGE_NT_HEADERS32*>(data.data() + ntOff);
+    if (nt->Signature != IMAGE_NT_SIGNATURE)
+        return 0;
+
+    const IMAGE_SECTION_HEADER* sec = IMAGE_FIRST_SECTION(nt);
+    for (WORD i = 0; i < nt->FileHeader.NumberOfSections; i++)
+    {
+        DWORD va = sec[i].VirtualAddress;
+        DWORD vsize = sec[i].Misc.VirtualSize;
+        if (vsize == 0)
+            vsize = sec[i].SizeOfRawData;
+        if (rva >= va && rva < va + vsize)
+            return sec[i].PointerToRawData + (rva - va);
+    }
+    return 0;
+}
+} /* namespace */
+
+bool ProbeReadExports(const std::wstring& filePath, std::vector<std::wstring>& out)
+{
+    std::vector<BYTE> data;
+    if (!ReadWholeFile(filePath, data))
+        return false;
+
+    const IMAGE_DOS_HEADER* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(data.data());
+    size_t ntOff = static_cast<size_t>(dos->e_lfanew);
+    const IMAGE_NT_HEADERS32* nt32 = reinterpret_cast<const IMAGE_NT_HEADERS32*>(data.data() + ntOff);
+    bool is64 = nt32->FileHeader.Machine == IMAGE_FILE_MACHINE_AMD64 ||
+                nt32->FileHeader.Machine == IMAGE_FILE_MACHINE_ARM64;
+
+    DWORD exportRva = 0;
+    if (is64)
+    {
+        const IMAGE_NT_HEADERS64* nt64 = reinterpret_cast<const IMAGE_NT_HEADERS64*>(data.data() + ntOff);
+        exportRva = nt64->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress;
+    }
+    else
+    {
+        exportRva = nt32->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress;
+    }
+    if (exportRva == 0)
+        return false;
+
+    DWORD expOff = RvaToOffset(data, exportRva);
+    if (expOff == 0 || expOff + sizeof(IMAGE_EXPORT_DIRECTORY) > data.size())
+        return false;
+
+    const IMAGE_EXPORT_DIRECTORY* exp =
+        reinterpret_cast<const IMAGE_EXPORT_DIRECTORY*>(data.data() + expOff);
+    if (exp->NumberOfNames == 0 || exp->AddressOfNames == 0)
+        return false;
+
+    DWORD namesOff = RvaToOffset(data, exp->AddressOfNames);
+    if (namesOff == 0)
+        return false;
+
+    const DWORD* names = reinterpret_cast<const DWORD*>(data.data() + namesOff);
+    for (DWORD i = 0; i < exp->NumberOfNames && out.size() < 512; i++)
+    {
+        DWORD nameOff = RvaToOffset(data, names[i]);
+        if (nameOff == 0 || nameOff >= data.size())
+            continue;
+        const char* name = reinterpret_cast<const char*>(data.data() + nameOff);
+        size_t maxLen = data.size() - nameOff;
+        size_t len = strnlen_s(name, maxLen);
+        if (len == 0 || len == maxLen)
+            continue;
+        out.push_back(yz::Utf8ToWide(std::string(name, len)));
+    }
+    return !out.empty();
+}
