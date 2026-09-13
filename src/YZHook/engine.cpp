@@ -5,6 +5,7 @@
 #include "hooks_capture.h"
 #include "hooks_input.h"
 #include "hooks_window.h"
+#include "native_unhook.h"
 #include "policy.h"
 #include "yz_hook_state.h"
 
@@ -85,6 +86,12 @@ void ApplyEffectiveFlags()
         yzhook::CaptureFreeze();
     else if (!wantFrozen && yzhook::CaptureIsFrozen())
         yzhook::CaptureUnfreeze();
+
+    /* 解锁功能生效时，主动调用远志自己导出的卸载入口，拔掉"注入之前"就已经装好的
+       全局钩子（用户态没有受支持的 API 能摘别人的钩子，但远志自己给了入口）。
+       考试模式下 effective 已被清零，这里自然不会触发；函数内部一次性执行。 */
+    if ((effective & YZ_FLAG_INPUT_UNLOCK) != 0)
+        yzhook::NativeUnhookClientHooks(1500);
 }
 
 void ExamTick()

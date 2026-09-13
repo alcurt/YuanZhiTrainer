@@ -77,6 +77,139 @@ bool IsProcessX86(DWORD pid, bool* outX86)
     CloseHandle(h);
     return ok;
 }
+/* 与 YZHook 侧 IsCandidateWindow 用同一套判据，只是这里看的是别人的窗口：
+   无属主 + 无标题栏 + 非子窗口 + 非桌面壳类 + 覆盖整块显示器 + (POPUP 或置顶)。 */
+bool LooksBroadcastWindow(HWND hwnd)
+{
+    if (hwnd == nullptr || !IsWindow(hwnd) || !IsWindowVisible(hwnd))
+        return false;
+    if (GetWindow(hwnd, GW_OWNER) != nullptr)
+        return false;
+
+    const LONG style = GetWindowLongW(hwnd, GWL_STYLE);
+    if ((style & WS_CHILD) != 0)
+        return false;
+    if ((style & WS_CAPTION) == WS_CAPTION)
+        return false;
+
+    wchar_t cls[128] = {0};
+    if (GetClassNameW(hwnd, cls, 128) != 0)
+    {
+        static const wchar_t* const kSkip[] =
+        {
+            L"Progman", L"WorkerW", L"Shell_TrayWnd", L"Shell_SecondaryTrayWnd",
+            L"Button", L"Static", L"#32770"
+        };
+        for (size_t i = 0; i < sizeof(kSkip) / sizeof(kSkip[0]); i++)
+        {
+            if (_wcsicmp(cls, kSkip[i]) == 0)
+                return false;
+        }
+    }
+
+    const LONG ex = GetWindowLongW(hwnd, GWL_EXSTYLE);
+    if ((style & WS_POPUP) == 0 && (ex & WS_EX_TOPMOST) == 0)
+        return false;
+
+    RECT rc;
+    if (!GetWindowRect(hwnd, &rc))
+        return false;
+
+    HMONITOR mon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+    MONITORINFO mi;
+    mi.cbSize = sizeof(mi);
+    if (!GetMonitorInfoW(mon, &mi))
+        return false;
+
+    const int tol = 3;
+    return rc.left <= mi.rcMonitor.left + tol && rc.top <= mi.rcMonitor.top + tol &&
+           rc.right >= mi.rcMonitor.right - tol && rc.bottom >= mi.rcMonitor.bottom - tol;
+}
+
+struct WindowSearch
+{
+    DWORD pid;
+    int   area;      /* 多个候选时取面积最大的那个 */
+};
+
+BOOL CALLBACK BroadcastWindowProc(HWND hwnd, LPARAM lParam)
+{
+    WindowSearch* s = reinterpret_cast<WindowSearch*>(lParam);
+
+    DWORD pid = 0;
+    GetWindowThreadProcessId(hwnd, &pid);
+    if (pid == 0 || pid == GetCurrentProcessId())
+        return TRUE;
+    if (!LooksBroadcastWindow(hwnd))
+        return TRUE;
+
+    RECT rc;
+    if (!GetWindowRect(hwnd, &rc))
+        return TRUE;
+    const int area = (rc.right - rc.left) * (rc.bottom - rc.top);
+    if (area > s->area)
+    {
+        s->area = area;
+        s->pid  = pid;
+    }
+    return TRUE;
+}
+
+/* 找出正在全屏广播的窗口宿主 PID。
+   只认身份明确的进程（路径像远志，或名字在注入名单里），否则一个无关的全屏
+   播放器/游戏会被误判成"广播窗口"并把我们引到错误的进程上。 */
+DWORD FindBroadcastWindowPid(const AppConfig& cfg)
+{
+    WindowSearch s;
+    s.pid  = 0;
+    s.area = 0;
+    EnumWindows(BroadcastWindowProc, reinterpret_cast<LPARAM>(&s));
+    if (s.pid == 0)
+        return 0;
+
+    const std::wstring path = yz::GetProcessImagePath(s.pid);
+    const std::wstring name = yz::FileNameOf(path);
+    if (PathLooksYuanzhi(cfg, path) || NameInList(cfg, name))
+        return s.pid;
+    return 0;
+}
+
+/* 兜底识别：进程里加载了远志客户端模块（Rmdesk.ads / PlayerGUI.dll / ExdHooks.dll）。
+   代价是每个进程一次 Toolhelp 快照，所以只在"名字与路径都没命中"时才调用。 */
+bool ProcessHasYuanzhiModule(DWORD pid, std::wstring* whichOut)
+{
+    static const wchar_t* const kModules[] = { L"Rmdesk.ads", L"PlayerGUI.dll", L"ExdHooks.dll" };
+
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid);
+    if (snap == INVALID_HANDLE_VALUE)
+        return false;
+
+    MODULEENTRY32W me;
+    ZeroMemory(&me, sizeof(me));
+    me.dwSize = sizeof(me);
+
+    bool found = false;
+    if (Module32FirstW(snap, &me))
+    {
+        do
+        {
+            for (size_t i = 0; i < sizeof(kModules) / sizeof(kModules[0]); i++)
+            {
+                if (_wcsicmp(me.szModule, kModules[i]) == 0)
+                {
+                    if (whichOut != nullptr)
+                        *whichOut = me.szModule;
+                    found = true;
+                    break;
+                }
+            }
+            if (found)
+                break;
+        } while (Module32NextW(snap, &me));
+    }
+    CloseHandle(snap);
+    return found;
+}
 } /* namespace */
 
 std::wstring ResolveHookDllPath()
@@ -111,26 +244,73 @@ DWORD FindTargetProcess(const AppConfig& cfg)
     std::vector<ProcInfo> procs;
     EnumAllProcesses(procs);
 
-    DWORD best = 0;
-    int   bestScore = 0;
+    /* 第一路：正在全屏广播的窗口宿主。
+       教师端常规广播由 ExdHooks 驱动、窗口很可能由 ExdPaintHelper.exe 承载，
+       所以这一路权重最高：把 Hook 注进窗口宿主，窗口化才作用在真正的广播窗口上。 */
+    const DWORD windowPid = FindBroadcastWindowPid(cfg);
+
+    DWORD        best        = 0;
+    int          bestScore   = 0;
+    std::wstring bestName;
+    std::wstring bestReason;
 
     for (size_t i = 0; i < procs.size(); i++)
     {
         int score = 0;
+        std::wstring reason;
+
         if (PathLooksYuanzhi(cfg, procs[i].path))
+        {
             score += 2;
+            reason += L"安装路径 ";
+        }
         if (NameInList(cfg, procs[i].name))
+        {
             score += 3;
+            reason += L"进程名 ";
+        }
+        if (windowPid != 0 && procs[i].pid == windowPid)
+        {
+            score += 5;
+            reason += L"广播窗口宿主 ";
+        }
+
         if (score > bestScore)
         {
-            bestScore = score;
-            best      = procs[i].pid;
+            bestScore  = score;
+            best       = procs[i].pid;
+            bestName   = procs[i].name;
+            bestReason = reason;
         }
     }
 
-    if (bestScore < 3)
-        return 0;
-    return best;
+    if (bestScore >= 3 && best != 0)
+    {
+        /* 目标变化时才记一行，避免每 2 秒刷屏 */
+        static DWORD        s_lastLoggedPid = 0;
+        static std::wstring s_lastLoggedName;
+        if (best != s_lastLoggedPid || bestName != s_lastLoggedName)
+        {
+            s_lastLoggedPid  = best;
+            s_lastLoggedName = bestName;
+            YZLOGI(L"目标进程 pid=%u (%s) 命中: %s", best, bestName.c_str(), bestReason.c_str());
+        }
+        return best;
+    }
+
+    /* 第二路（兜底，代价高）：谁加载了远志客户端模块就注谁。
+       只有在进程名与安装路径都没识别出来时才走这里。 */
+    for (size_t i = 0; i < procs.size(); i++)
+    {
+        std::wstring which;
+        if (!ProcessHasYuanzhiModule(procs[i].pid, &which))
+            continue;
+        YZLOGI(L"目标进程 pid=%u (%s) 兜底命中: 已加载 %s",
+               procs[i].pid, procs[i].name.c_str(), which.c_str());
+        return procs[i].pid;
+    }
+
+    return 0;
 }
 
 bool InjectHookDll(DWORD pid, const std::wstring& dllPath, std::wstring* err)
