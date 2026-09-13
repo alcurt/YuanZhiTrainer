@@ -43,6 +43,11 @@ bool         EnablePrivilege(const wchar_t* name);
 DWORD        SessionIdOfCurrentProcess();
 bool         IsProcessAlive(DWORD pid);
 
+/* ---- 界面 / DPI ---- */
+UINT  GetWindowDpi(HWND hwnd);                    /* 取窗口 DPI；hwnd 可为 nullptr，失败回退 96 */
+int   ScaleForDpi(int value, UINT dpi);           /* value * dpi / 96 */
+HFONT CreateUiFontForDpi(UINT dpi);               /* 9pt 系统消息字体，按 DPI 换算高度 */
+
 /* ---- 杂项 ---- */
 unsigned long long Fnv1a64(const void* data, size_t len);
 } /* namespace yz */

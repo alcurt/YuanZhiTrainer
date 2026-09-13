@@ -33,6 +33,8 @@ struct ServiceInfo
 std::vector<ServiceInfo> g_services;
 HWND g_panel = nullptr;
 HWND g_list  = nullptr;
+UINT  g_panelDpi  = 96;          /* 面板所在显示器的 DPI */
+HFONT g_panelFont = nullptr;     /* 按 g_panelDpi 创建 */
 
 const wchar_t* StateText(DWORD state)
 {
@@ -225,48 +227,90 @@ void ControlSelected(bool start)
     FillList();
 }
 
+int PanelDp(int value)
+{
+    return yz::ScaleForDpi(value, g_panelDpi);
+}
+
+BOOL CALLBACK CollectPanelChildProc(HWND child, LPARAM lParam)
+{
+    reinterpret_cast<std::vector<HWND>*>(lParam)->push_back(child);
+    return TRUE;
+}
+
+/* 按当前 g_panelDpi 创建全部子控件；WM_CREATE 与 WM_DPICHANGED 都走这里。 */
+void CreatePanelChildren(HWND hwnd, HINSTANCE hinst)
+{
+    HFONT font = g_panelFont;
+
+    HWND label = CreateWindowExW(0, L"Static",
+        L"与远志相关的服务/驱动（只做临时停止与启动，不删除任何东西）：",
+        WS_CHILD | WS_VISIBLE, PanelDp(12), PanelDp(10), PanelDp(700), PanelDp(20),
+        hwnd, nullptr, hinst, nullptr);
+    SendMessageW(label, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+
+    g_list = CreateWindowExW(WS_EX_CLIENTEDGE, L"ListBox", L"",
+                             WS_CHILD | WS_VISIBLE | WS_VSCROLL | LBS_NOTIFY | WS_TABSTOP,
+                             PanelDp(12), PanelDp(36), PanelDp(700), PanelDp(300), hwnd,
+                             reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_LIST)), hinst, nullptr);
+    SendMessageW(g_list, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+
+    HWND warn = CreateWindowExW(0, L"Static",
+        L"警告：停止 NdisNetFilter 等网络过滤驱动可能触发学生端“离线锁定”，停止显示驱动可能使画面异常。"
+        L"重启电脑即可完全恢复。",
+        WS_CHILD | WS_VISIBLE, PanelDp(12), PanelDp(344), PanelDp(700), PanelDp(36), hwnd,
+        reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_LABEL_WARN)), hinst, nullptr);
+    SendMessageW(warn, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+
+    const wchar_t* texts[] = { L"刷新", L"停止选中", L"启动选中", L"关闭" };
+    const int ids[] = { IDC_BTN_REFRESH, IDC_BTN_STOP, IDC_BTN_START, IDC_BTN_CLOSE };
+    int x = PanelDp(12);
+    for (int i = 0; i < 4; i++)
+    {
+        HWND btn = CreateWindowExW(0, L"Button", texts[i],
+                                   WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                                   x, PanelDp(386), PanelDp(110), PanelDp(28), hwnd,
+                                   reinterpret_cast<HMENU>(static_cast<INT_PTR>(ids[i])), hinst, nullptr);
+        SendMessageW(btn, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+        x += PanelDp(120);
+    }
+
+    RefreshServices();
+    FillList();
+}
+
 LRESULT CALLBACK PanelProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
     switch (msg)
     {
     case WM_CREATE:
+        CreatePanelChildren(hwnd, reinterpret_cast<HINSTANCE>(GetWindowLongPtrW(hwnd, GWLP_HINSTANCE)));
+        return 0;
+
+    case WM_DPICHANGED:
         {
-            HINSTANCE hinst = reinterpret_cast<HINSTANCE>(GetWindowLongPtrW(hwnd, GWLP_HINSTANCE));
-            HFONT font = reinterpret_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
-
-            HWND label = CreateWindowExW(0, L"Static",
-                L"与远志相关的服务/驱动（只做临时停止与启动，不删除任何东西）：",
-                WS_CHILD | WS_VISIBLE, 12, 10, 700, 20, hwnd, nullptr, hinst, nullptr);
-            SendMessageW(label, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
-
-            g_list = CreateWindowExW(WS_EX_CLIENTEDGE, L"ListBox", L"",
-                                     WS_CHILD | WS_VISIBLE | WS_VSCROLL | LBS_NOTIFY | WS_TABSTOP,
-                                     12, 36, 700, 300, hwnd,
-                                     reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_LIST)), hinst, nullptr);
-            SendMessageW(g_list, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
-
-            HWND warn = CreateWindowExW(0, L"Static",
-                L"警告：停止 NdisNetFilter 等网络过滤驱动可能触发学生端“离线锁定”，停止显示驱动可能使画面异常。"
-                L"重启电脑即可完全恢复。",
-                WS_CHILD | WS_VISIBLE, 12, 344, 700, 36, hwnd,
-                reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_LABEL_WARN)), hinst, nullptr);
-            SendMessageW(warn, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
-
-            const wchar_t* texts[] = { L"刷新", L"停止选中", L"启动选中", L"关闭" };
-            const int ids[] = { IDC_BTN_REFRESH, IDC_BTN_STOP, IDC_BTN_START, IDC_BTN_CLOSE };
-            int x = 12;
-            for (int i = 0; i < 4; i++)
+            g_panelDpi = HIWORD(wParam);
+            if (g_panelFont != nullptr)
             {
-                HWND btn = CreateWindowExW(0, L"Button", texts[i],
-                                           WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                                           x, 386, 110, 28, hwnd,
-                                           reinterpret_cast<HMENU>(static_cast<INT_PTR>(ids[i])), hinst, nullptr);
-                SendMessageW(btn, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
-                x += 120;
+                DeleteObject(g_panelFont);
+                g_panelFont = nullptr;
+            }
+            g_panelFont = yz::CreateUiFontForDpi(g_panelDpi);
+
+            std::vector<HWND> children;
+            EnumChildWindows(hwnd, CollectPanelChildProc, reinterpret_cast<LPARAM>(&children));
+            for (size_t i = 0; i < children.size(); i++)
+                DestroyWindow(children[i]);
+            g_list = nullptr;
+
+            const RECT* want = reinterpret_cast<const RECT*>(lParam);
+            if (want != nullptr)
+            {
+                SetWindowPos(hwnd, nullptr, want->left, want->top,
+                             PanelDp(750), PanelDp(470), SWP_NOZORDER | SWP_NOACTIVATE);
             }
 
-            RefreshServices();
-            FillList();
+            CreatePanelChildren(hwnd, reinterpret_cast<HINSTANCE>(GetWindowLongPtrW(hwnd, GWLP_HINSTANCE)));
         }
         return 0;
 
@@ -298,6 +342,11 @@ LRESULT CALLBACK PanelProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     case WM_DESTROY:
         g_panel = nullptr;
         g_list  = nullptr;
+        if (g_panelFont != nullptr)
+        {
+            DeleteObject(g_panelFont);
+            g_panelFont = nullptr;
+        }
         return 0;
 
     default:
@@ -317,6 +366,15 @@ void ServicePanelShow(HWND owner)
         return;
     }
 
+    /* DPI：跟随主窗口所在显示器 */
+    g_panelDpi = yz::GetWindowDpi(owner != nullptr ? owner : g_app.hwndMain);
+    if (g_panelFont != nullptr)
+    {
+        DeleteObject(g_panelFont);
+        g_panelFont = nullptr;
+    }
+    g_panelFont = yz::CreateUiFontForDpi(g_panelDpi);
+
     WNDCLASSEXW wc;
     ZeroMemory(&wc, sizeof(wc));
     wc.cbSize        = sizeof(wc);
@@ -329,7 +387,8 @@ void ServicePanelShow(HWND owner)
 
     g_panel = CreateWindowExW(0, kPanelClass, L"YZTrainer - 服务/驱动面板",
                               WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
-                              CW_USEDEFAULT, CW_USEDEFAULT, 750, 470,
+                              CW_USEDEFAULT, CW_USEDEFAULT,
+                              yz::ScaleForDpi(750, g_panelDpi), yz::ScaleForDpi(470, g_panelDpi),
                               owner, nullptr, hinst, nullptr);
     if (g_panel != nullptr)
     {

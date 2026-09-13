@@ -6,6 +6,7 @@
 #include <wctype.h>
 
 #include <securitybaseapi.h>
+#include <string.h>
 
 #pragma comment(lib, "advapi32.lib")
 
@@ -365,6 +366,68 @@ bool IsProcessAlive(DWORD pid)
     bool alive = GetExitCodeProcess(h, &code) && code == STILL_ACTIVE;
     CloseHandle(h);
     return alive;
+}
+
+UINT GetWindowDpi(HWND hwnd)
+{
+    typedef UINT (WINAPI *PFN_GetDpiForWindow)(HWND);
+    static PFN_GetDpiForWindow s_getDpiForWindow = nullptr;
+    static bool               s_resolved         = false;
+    if (!s_resolved)
+    {
+        s_resolved = true;
+        HMODULE user32 = GetModuleHandleW(L"user32.dll");
+        if (user32 != nullptr)
+            s_getDpiForWindow =
+                reinterpret_cast<PFN_GetDpiForWindow>(GetProcAddress(user32, "GetDpiForWindow"));
+    }
+    if (s_getDpiForWindow != nullptr && hwnd != nullptr)
+    {
+        const UINT dpi = s_getDpiForWindow(hwnd);
+        if (dpi != 0)
+            return dpi;
+    }
+
+    /* 回退：桌面 DC 的 LOGPIXELSY。声明了 DPI 感知的进程会拿到系统 DPI。 */
+    UINT dpi = 96;
+    HDC dc = GetDC(nullptr);
+    if (dc != nullptr)
+    {
+        const int v = GetDeviceCaps(dc, LOGPIXELSY);
+        ReleaseDC(nullptr, dc);
+        if (v > 0)
+            dpi = static_cast<UINT>(v);
+    }
+    return dpi != 0 ? dpi : 96;
+}
+
+int ScaleForDpi(int value, UINT dpi)
+{
+    return MulDiv(value, static_cast<int>(dpi), 96);
+}
+
+HFONT CreateUiFontForDpi(UINT dpi)
+{
+    LOGFONTW lf;
+    ZeroMemory(&lf, sizeof(lf));
+
+    NONCLIENTMETRICSW ncm;
+    ncm.cbSize = sizeof(ncm);
+    if (SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0))
+    {
+        lf = ncm.lfMessageFont;   /* 取系统消息字体族（中文系统下是雅黑系） */
+    }
+    else
+    {
+        lf.lfHeight  = -12;
+        lf.lfWeight  = FW_NORMAL;
+        lf.lfCharSet = DEFAULT_CHARSET;
+        wcsncpy_s(lf.lfFaceName, LF_FACESIZE, L"MS Shell Dlg", _TRUNCATE);
+    }
+
+    lf.lfHeight  = -MulDiv(9, static_cast<int>(dpi), 72);   /* 9pt */
+    lf.lfQuality = CLEARTYPE_QUALITY;
+    return CreateFontIndirectW(&lf);
 }
 
 unsigned long long Fnv1a64(const void* data, size_t len)

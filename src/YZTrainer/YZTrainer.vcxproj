@@ -38,6 +38,12 @@
       <AdditionalIncludeDirectories>..\..\src\common;..\..\src\YZTrainer;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <DisableSpecificWarnings>4100;4152;4204;4245;4267;4996</DisableSpecificWarnings>
     </ClCompile>
+    <Manifest>
+
+      <AdditionalManifestFiles>YZTrainer.manifest</AdditionalManifestFiles>
+
+    </Manifest>
+
     <Link>
       <SubSystem>Windows</SubSystem>
       <AdditionalOptions>/MANIFESTUAC:"level='requireAdministrator'" %(AdditionalOptions)</AdditionalOptions>

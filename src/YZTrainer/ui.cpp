@@ -46,6 +46,8 @@ DWORD g_uiThreadId = 0;
 NOTIFYICONDATAW g_nid;
 bool  g_trayAdded = false;
 bool  g_minimizeToTray = true;
+UINT  g_dpi     = 96;       /* 当前界面 DPI：所有布局与字体都按它换算 */
+HFONT g_font    = nullptr;  /* 按 g_dpi 创建，WM_DPICHANGED 时重建 */
 
 HICON MakeAppIcon(int size)
 {
@@ -241,6 +243,92 @@ void OnCommandWord(HWND hwnd, int id)
     }
 }
 
+int Dp(int value)
+{
+    return yz::ScaleForDpi(value, g_dpi);
+}
+
+BOOL CALLBACK CollectChildProc(HWND child, LPARAM lParam)
+{
+    reinterpret_cast<std::vector<HWND>*>(lParam)->push_back(child);
+    return TRUE;
+}
+
+/* 按当前 g_dpi 创建全部子控件。WM_CREATE 与 WM_DPICHANGED 都走这里，
+   所以每一处尺寸都必须经过 Dp()，不能写字面像素值。 */
+void CreateChildren(HWND hwnd, HINSTANCE hinst)
+{
+    HFONT font = g_font;
+    int y = Dp(12);
+
+    const wchar_t* items[] = {
+        L"全屏广播窗口化（把全屏广播变成可自由操作的窗口）",
+        L"解除键鼠锁定（拦截远志的键盘/鼠标钩子与热键屏蔽）",
+        L"广播窗口保持置顶",
+        L"防监视（冻结教师端看到的画面，默认关闭）",
+        L"拦截教师端遥控输入（默认关闭，会影响老师远程协助）"
+    };
+    const int ids[] = { IDC_CHK_WINDOWIZE, IDC_CHK_UNLOCK, IDC_CHK_TOPMOST,
+                        IDC_CHK_ANTIMON, IDC_CHK_BLOCKREMOTE };
+
+    for (int i = 0; i < 5; i++)
+    {
+        HWND chk = CreateWindowExW(0, L"Button", items[i],
+                                   WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+                                   Dp(12), y, Dp(520), Dp(22), hwnd,
+                                   reinterpret_cast<HMENU>(static_cast<INT_PTR>(ids[i])), hinst, nullptr);
+        SendMessageW(chk, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+        y += Dp(26);
+    }
+
+    HWND label = CreateWindowExW(0, L"Static", L"广播窗口宽度（占屏幕百分比）:",
+                                 WS_CHILD | WS_VISIBLE, Dp(12), y + Dp(4), Dp(220), Dp(20),
+                                 hwnd, nullptr, hinst, nullptr);
+    SendMessageW(label, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+    HWND edit = CreateWindowExW(WS_EX_CLIENTEDGE, L"Edit", L"60",
+                                WS_CHILD | WS_VISIBLE | ES_NUMBER | ES_AUTOHSCROLL,
+                                Dp(240), y, Dp(60), Dp(24), hwnd,
+                                reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_EDIT_PERCENT)), hinst, nullptr);
+    SendMessageW(edit, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+    HWND apply = CreateWindowExW(0, L"Button", L"应用",
+                                 WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                                 Dp(308), y, Dp(60), Dp(24), hwnd,
+                                 reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_BTN_APPLY)), hinst, nullptr);
+    SendMessageW(apply, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+    y += Dp(36);
+
+    g_status = CreateWindowExW(WS_EX_CLIENTEDGE, L"Static", L"",
+                               WS_CHILD | WS_VISIBLE | SS_LEFT,
+                               Dp(12), y, Dp(520), Dp(100), hwnd,
+                               reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_STATIC_STATUS)), hinst, nullptr);
+    SendMessageW(g_status, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+    y += Dp(110);
+
+    const wchar_t* btnText[] = { L"立即注入", L"服务面板", L"导出诊断包", L"打开日志目录", L"关于" };
+    const int btnId[] = { IDC_BTN_INJECT, IDC_BTN_SERVICE, IDC_BTN_DIAG, IDC_BTN_LOG, IDC_BTN_ABOUT };
+    int bx = Dp(12);
+    for (int i = 0; i < 5; i++)
+    {
+        HWND btn = CreateWindowExW(0, L"Button", btnText[i],
+                                   WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                                   bx, y, Dp(100), Dp(26), hwnd,
+                                   reinterpret_cast<HMENU>(static_cast<INT_PTR>(btnId[i])), hinst, nullptr);
+        SendMessageW(btn, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+        bx += Dp(106);
+    }
+    y += Dp(34);
+
+    g_logEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"Edit", L"",
+                                WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE |
+                                    ES_AUTOVSCROLL | ES_READONLY,
+                                Dp(12), y, Dp(520), Dp(180), hwnd,
+                                reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_EDIT_LOG)), hinst, nullptr);
+    SendMessageW(g_logEdit, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+
+    SyncControls();
+    UpdateStatusText();
+}
+
 /* 定义在 WndProc 之后，这里前置声明，避免 C3861。 */
 int TrayMenuCommand(int id);
 
@@ -249,76 +337,52 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     switch (msg)
     {
     case WM_CREATE:
+        CreateChildren(hwnd, reinterpret_cast<HINSTANCE>(GetWindowLongPtrW(hwnd, GWLP_HINSTANCE)));
+        return 0;
+
+    case WM_DPICHANGED:
         {
-            HINSTANCE hinst = reinterpret_cast<HINSTANCE>(GetWindowLongPtrW(hwnd, GWLP_HINSTANCE));
-            HFONT font = reinterpret_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
-            int y = 12;
-
-            const wchar_t* items[] = {
-                L"全屏广播窗口化（把全屏广播变成可自由操作的窗口）",
-                L"解除键鼠锁定（拦截远志的键盘/鼠标钩子与热键屏蔽）",
-                L"广播窗口保持置顶",
-                L"防监视（冻结教师端看到的画面，默认关闭）",
-                L"拦截教师端遥控输入（默认关闭，会影响老师远程协助）"
-            };
-            const int ids[] = { IDC_CHK_WINDOWIZE, IDC_CHK_UNLOCK, IDC_CHK_TOPMOST,
-                                IDC_CHK_ANTIMON, IDC_CHK_BLOCKREMOTE };
-
-            for (int i = 0; i < 5; i++)
+            /* 换到缩放不同的显示器：按新 DPI 重建字体与全部子控件。
+               日志框内容先取出来，重建完再灌回去，避免历史日志被清空。 */
+            g_dpi = HIWORD(wParam);
+            if (g_font != nullptr)
             {
-                HWND chk = CreateWindowExW(0, L"Button", items[i],
-                                           WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-                                           12, y, 520, 22, hwnd,
-                                           reinterpret_cast<HMENU>(static_cast<INT_PTR>(ids[i])), hinst, nullptr);
-                SendMessageW(chk, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
-                y += 26;
+                DeleteObject(g_font);
+                g_font = nullptr;
+            }
+            g_font = yz::CreateUiFontForDpi(g_dpi);
+
+            std::wstring logText;
+            if (g_logEdit != nullptr)
+            {
+                const int len = GetWindowTextLengthW(g_logEdit);
+                if (len > 0)
+                {
+                    std::vector<wchar_t> buf(static_cast<size_t>(len) + 1, L'\0');
+                    GetWindowTextW(g_logEdit, buf.data(), len + 1);
+                    logText.assign(buf.data());
+                }
             }
 
-            HWND label = CreateWindowExW(0, L"Static", L"广播窗口宽度（占屏幕百分比）:",
-                                         WS_CHILD | WS_VISIBLE, 12, y + 4, 220, 20, hwnd, nullptr, hinst, nullptr);
-            SendMessageW(label, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
-            HWND edit = CreateWindowExW(WS_EX_CLIENTEDGE, L"Edit", L"60",
-                                        WS_CHILD | WS_VISIBLE | ES_NUMBER | ES_AUTOHSCROLL,
-                                        240, y, 60, 24, hwnd,
-                                        reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_EDIT_PERCENT)), hinst, nullptr);
-            SendMessageW(edit, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
-            HWND apply = CreateWindowExW(0, L"Button", L"应用",
-                                         WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                                         308, y, 60, 24, hwnd,
-                                         reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_BTN_APPLY)), hinst, nullptr);
-            SendMessageW(apply, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
-            y += 36;
+            std::vector<HWND> children;
+            EnumChildWindows(hwnd, CollectChildProc, reinterpret_cast<LPARAM>(&children));
+            for (size_t i = 0; i < children.size(); i++)
+                DestroyWindow(children[i]);
+            g_status  = nullptr;
+            g_logEdit = nullptr;
 
-            g_status = CreateWindowExW(WS_EX_CLIENTEDGE, L"Static", L"",
-                                       WS_CHILD | WS_VISIBLE | SS_LEFT,
-                                       12, y, 520, 100, hwnd,
-                                       reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_STATIC_STATUS)), hinst, nullptr);
-            SendMessageW(g_status, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
-            y += 110;
-
-            const wchar_t* btnText[] = { L"立即注入", L"服务面板", L"导出诊断包", L"打开日志目录", L"关于" };
-            const int btnId[] = { IDC_BTN_INJECT, IDC_BTN_SERVICE, IDC_BTN_DIAG, IDC_BTN_LOG, IDC_BTN_ABOUT };
-            int bx = 12;
-            for (int i = 0; i < 5; i++)
+            const RECT* want = reinterpret_cast<const RECT*>(lParam);
+            if (want != nullptr)
             {
-                HWND btn = CreateWindowExW(0, L"Button", btnText[i],
-                                           WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                                           bx, y, 100, 26, hwnd,
-                                           reinterpret_cast<HMENU>(static_cast<INT_PTR>(btnId[i])), hinst, nullptr);
-                SendMessageW(btn, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
-                bx += 106;
+                SetWindowPos(hwnd, nullptr, want->left, want->top,
+                             Dp(570), Dp(520), SWP_NOZORDER | SWP_NOACTIVATE);
             }
-            y += 34;
 
-            g_logEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"Edit", L"",
-                                        WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE |
-                                            ES_AUTOVSCROLL | ES_READONLY,
-                                        12, y, 520, 180, hwnd,
-                                        reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_EDIT_LOG)), hinst, nullptr);
-            SendMessageW(g_logEdit, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+            CreateChildren(hwnd, reinterpret_cast<HINSTANCE>(GetWindowLongPtrW(hwnd, GWLP_HINSTANCE)));
+            if (!logText.empty() && g_logEdit != nullptr)
+                SetWindowTextW(g_logEdit, logText.c_str());
 
-            SyncControls();
-            UpdateStatusText();
+            UiAppendLog(yz::kLogInfo, yz::Format(L"显示缩放变化，界面已按 %u%% 重新布局", g_dpi * 100 / 96));
         }
         return 0;
 
@@ -386,6 +450,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
     case WM_DESTROY:
         RemoveTrayIcon();
+        if (g_font != nullptr)
+        {
+            DeleteObject(g_font);
+            g_font = nullptr;
+        }
         PostQuitMessage(0);
         return 0;
 
@@ -423,6 +492,14 @@ HWND UiInit(HINSTANCE hinst)
     g_uiThreadId = GetCurrentThreadId();
     g_app.hinst  = hinst;
 
+    /* 高 DPI：清单里声明了 PerMonitorV2，这里先按系统 DPI 建字体与尺寸；
+       窗口若落到缩放不同的显示器上，再由 WM_DPICHANGED 重新布局。 */
+    g_dpi = yz::GetWindowDpi(nullptr);
+    if (g_font != nullptr)
+        DeleteObject(g_font);
+    g_font = yz::CreateUiFontForDpi(g_dpi);
+    YZLOGI(L"界面 DPI = %u (%u%%)", g_dpi, g_dpi * 100 / 96);
+
     WNDCLASSEXW wc;
     ZeroMemory(&wc, sizeof(wc));
     wc.cbSize        = sizeof(wc);
@@ -431,8 +508,8 @@ HWND UiInit(HINSTANCE hinst)
     wc.lpszClassName = kWindowClass;
     wc.hCursor       = LoadCursorW(nullptr, IDC_ARROW);
     wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1);
-    wc.hIcon         = MakeAppIcon(32);
-    wc.hIconSm       = MakeAppIcon(16);
+    wc.hIcon         = MakeAppIcon(GetSystemMetrics(SM_CXICON));
+    wc.hIconSm       = MakeAppIcon(GetSystemMetrics(SM_CXSMICON));
     if (!RegisterClassExW(&wc))
     {
         YZLOGE(L"RegisterClassEx 失败: %s", yz::Win32ErrorMessage(GetLastError()).c_str());
@@ -442,7 +519,8 @@ HWND UiInit(HINSTANCE hinst)
 
     HWND hwnd = CreateWindowExW(0, kWindowClass, kAppTitle,
                                 WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
-                                CW_USEDEFAULT, CW_USEDEFAULT, 570, 520,
+                                CW_USEDEFAULT, CW_USEDEFAULT,
+                                yz::ScaleForDpi(570, g_dpi), yz::ScaleForDpi(520, g_dpi),
                                 nullptr, nullptr, hinst, nullptr);
     if (hwnd == nullptr)
     {
