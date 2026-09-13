@@ -1,5 +1,7 @@
 # YZTrainer
 
+> **v0.1** · 一款远志多媒体教学管理软件(学生端)的解控软件，仅作学习用途，不承担任何相关后果。
+
 针对 **广州远志 YZinfo 多媒体教学网络系统 V9.0 学生端** 的课堂辅助工具，参照 JiYuTrainer 的思路重新实现（不复制其代码）。
 
 ## 它做什么
@@ -139,4 +141,5 @@ ProcessNames=Yistart.exe;TEACHCMD.exe;PlayerGUI.exe;ExdPaintHelper.exe
 
 本项目仅用于个人学习与在**不影响正常教学**的前提下改善课堂体验（作者立场与 JiYuTrainer 相同）。
 请勿在考试、测验、监考等场景使用；工具已内置考试模式自动停用。
-第三方组件：MinHook（BSD-2-Clause，见 `third_party/minhook/LICENSE.txt`）。
+本项目以 MIT 许可证发布，全文见 `LICENSE`。
+第三方组件：MinHook（BSD-2-Clause，见 `third_party/minhook/LICENSE.txt`）；实现思路参考 JiYuTrainer（MIT），未复制其代码。
