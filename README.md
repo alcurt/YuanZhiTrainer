@@ -151,6 +151,19 @@ ProcessNames=Yistart.exe;TEACHCMD.exe;PlayerGUI.exe;ExdPaintHelper.exe
 
 本声明随版本更新；它不构成对使用者的责任豁免，也不能替代你的法律意见。
 
+## Disclaimer (English)
+
+This project is provided solely for **educational research** and **technical study**, in order to learn how Windows user-mode mechanisms such as process injection, API hooking, window management and the input subsystem work. It must not be used for any illegal purpose.
+
+* **No affiliation.** This project is developed independently by an individual. It is not affiliated with, authorized by, endorsed by, or sponsored by Guangzhou Yuanzhi (YZinfo) or any of its affiliates. Product names and trademarks mentioned here belong to their respective owners and are used for identification purposes only.
+* **You are responsible.** You must ensure that your use complies with all applicable laws, your school's regulations, and any relevant software license agreements. The author accepts no responsibility or liability for any system failure, data loss, account or device ban, disciplinary action, or any other consequence arising from the use of this software.
+* **Prohibited uses.** Do not use this project during exams, quizzes, or any other form of assessment; do not use it to disrupt teaching, invade privacy, or interfere with other people's devices; do not use it for attacks or for profit. Circumventing technological protection measures or damaging computer information systems may violate copyright and criminal law in your jurisdiction.
+* **No circumvention of protection measures.** This project is not intended to crack, copy, or redistribute anyone else's software, and this repository contains no vendor files. Obtain any third-party software through legitimate channels.
+* **No warranty.** The software is provided "as is", without warranty of any kind. It requires administrator privileges and injects code into other processes, and may therefore be flagged, blocked, or quarantined by antivirus software, EDR, or your school's endpoint management system.
+* **Exam-mode hard limit.** The program automatically disables all features the moment exam or quiz mode is detected, and provides no switch to bypass it.
+
+This disclaimer is subject to change with new versions. It does not exempt users from liability and is not a substitute for legal advice.
+
 ## 许可与第三方
 
 本项目以 MIT 许可证发布，全文见 `LICENSE`。
