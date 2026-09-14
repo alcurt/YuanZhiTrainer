@@ -7,7 +7,7 @@
 #include <vector>
 
 #include "yz_protocol.h"
-#define YZ_VERSION_STR L"0.1.0"
+#define YZ_VERSION_STR L"0.2.0"
 
 #define WM_YZ_STATUS (WM_APP + 1)
 #define WM_YZ_LOG    (WM_APP + 2)

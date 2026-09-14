@@ -40,6 +40,48 @@ const int  IDM_TRAY_INJECT   = 3006;
 const wchar_t* const kWindowClass = L"YZTrainerMainWnd";
 const wchar_t* const kAppTitle    = L"YZTrainer - 远志学生端解控工具";
 
+/* 主窗口风格（创建与 DPI 重排共用，保证两处算出的外框一致） */
+const DWORD kMainStyle = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
+
+/* 布局在 96 DPI 下需要的客户区：
+   宽 = 12 + 520 + 12
+   高 = 12 + 6*26(六行复选框) + 36(百分比行) + 100(状态) + 10 + 26(按钮行) + 8 + 180(日志) + 12 */
+const int kClientBaseW = 544;
+const int kClientBaseH = 540;
+
+/* 由客户区需求反算窗口外框尺寸。外框尺寸写死会在改布局时漏改
+   （曾出现 WM_DPICHANGED 仍用旧尺寸、把日志框底部裁掉），这里统一算。 */
+void ComputeOuterSize(UINT dpi, int* outW, int* outH)
+{
+    RECT rc;
+    rc.left   = 0;
+    rc.top    = 0;
+    rc.right  = yz::ScaleForDpi(kClientBaseW, dpi);
+    rc.bottom = yz::ScaleForDpi(kClientBaseH, dpi);
+
+    typedef BOOL (WINAPI *PFN_AdjustWindowRectExForDpi)(LPRECT, DWORD, BOOL, DWORD, UINT);
+    static PFN_AdjustWindowRectExForDpi s_forDpi  = nullptr;
+    static bool                        s_resolved = false;
+    if (!s_resolved)
+    {
+        s_resolved = true;
+        HMODULE user32 = GetModuleHandleW(L"user32.dll");
+        if (user32 != nullptr)
+        {
+            s_forDpi = reinterpret_cast<PFN_AdjustWindowRectExForDpi>(
+                GetProcAddress(user32, "AdjustWindowRectExForDpi"));
+        }
+    }
+
+    if (s_forDpi != nullptr)
+        s_forDpi(&rc, kMainStyle, FALSE, 0, dpi);
+    else
+        AdjustWindowRectEx(&rc, kMainStyle, FALSE, 0);
+
+    *outW = rc.right - rc.left;
+    *outH = rc.bottom - rc.top;
+}
+
 HWND  g_status  = nullptr;
 HWND  g_logEdit = nullptr;
 HICON g_icon    = nullptr;
@@ -392,8 +434,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             const RECT* want = reinterpret_cast<const RECT*>(lParam);
             if (want != nullptr)
             {
+                int outerW = 0;
+                int outerH = 0;
+                ComputeOuterSize(g_dpi, &outerW, &outerH);
                 SetWindowPos(hwnd, nullptr, want->left, want->top,
-                             Dp(570), Dp(520), SWP_NOZORDER | SWP_NOACTIVATE);
+                             outerW, outerH, SWP_NOZORDER | SWP_NOACTIVATE);
             }
 
             CreateChildren(hwnd, reinterpret_cast<HINSTANCE>(GetWindowLongPtrW(hwnd, GWLP_HINSTANCE)));
@@ -535,10 +580,12 @@ HWND UiInit(HINSTANCE hinst)
     }
     g_icon = wc.hIcon;
 
-    HWND hwnd = CreateWindowExW(0, kWindowClass, kAppTitle,
-                                WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
-                                CW_USEDEFAULT, CW_USEDEFAULT,
-                                yz::ScaleForDpi(580, g_dpi), yz::ScaleForDpi(546, g_dpi),
+    int outerW = 0;
+    int outerH = 0;
+    ComputeOuterSize(g_dpi, &outerW, &outerH);
+
+    HWND hwnd = CreateWindowExW(0, kWindowClass, kAppTitle, kMainStyle,
+                                CW_USEDEFAULT, CW_USEDEFAULT, outerW, outerH,
                                 nullptr, nullptr, hinst, nullptr);
     if (hwnd == nullptr)
     {

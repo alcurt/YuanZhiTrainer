@@ -80,7 +80,7 @@ std::wstring ProbeToJson(const ProbeData& data)
     std::wstring j;
     j += L"{\n";
     j += L"  \"tool\": \"YZProbe\",\n";
-    j += L"  \"version\": \"0.1.0\",\n";
+    j += L"  \"version\": \"0.2.0\",\n";
     j += L"  \"generatedAt\": \"" + JsonEscape(data.generatedAt) + L"\",\n";
     j += L"  \"computer\": \"" + JsonEscape(data.computerName) + L"\",\n";
     j += L"  \"os\": \"" + JsonEscape(data.osVersion) + L"\",\n";
