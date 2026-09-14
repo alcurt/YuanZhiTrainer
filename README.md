@@ -18,7 +18,7 @@
 * 不修改、不替换任何远志文件；不写持久化注册表项（只在本进程存活期间恢复被远志改写的 HKCU 策略值，退出时还原）。
 * 不向其他机器发送指令、不做 UDP 攻击、不给同学机器远程发消息或执行命令。
 * 不做免杀、混淆、反检测。
-* **检测到考试/测验模式（加载 `Exam.ads`/`ExamDlg.exe`/`ClassQuiz.ads`/`ORAL_EXAM.ocx` 或出现考试类窗口标题）时，全部功能立即自动停用**，本工具不留绕过开关。
+* **检测到考试/测验的强信号时，全部功能立即自动停用**：独立考试进程 `ExamDlg.exe`、进程内加载 `ExamDlg.exe` / `ExamDlg.dll` / `ORAL_EXAM.ocx` / `ExamEditor.exe`，或存在**可见**且标题命中考试类关键词的远志窗口。注意 `Exam.ads` / `ClassQuiz.ads` 属学生端启动即加载的常驻模块（弱信号），**只会记日志、不再触发熔断**——它们是就绪态而非"正在考试"的判据。
 * 不尝试在无管理员权限的环境下工作。
 
 ## 工程结构
@@ -110,6 +110,7 @@ LogLevel=2         ; 0=错误 1=警告 2=信息 3=调试
 AutoInject=1       ; 是否自动注入 / 客户端被服务重启后自动补注入
 TargetDir=         ; 远志安装目录，留空=自动判定
 HookDllPath=       ; 留空=用内嵌的 YZHook.dll；填路径可强制改用外部 DLL（调试用）
+EnableExamGuard=1  ; 考试模式守护：1=仅强信号熔断（默认）；0=完全跳过考试检测
 ProcessNames=Yistart.exe;TEACHCMD.exe;PlayerGUI.exe;ExdPaintHelper.exe
 ```
 
@@ -125,6 +126,7 @@ ProcessNames=Yistart.exe;TEACHCMD.exe;PlayerGUI.exe;ExdPaintHelper.exe
 * **输入层**：拦截学生端安装键盘钩子的调用；`RegisterHotKey`、`SystemParametersInfoW`（屏保/快速任务切换）、`ClipCursor`、`BlockInput` 全部按开关放行或拦截；每秒强制 `ClipCursor(NULL)` 一次；被改写的 HKCU 策略值（任务管理器/锁屏/Win 键/GameDVR）在后台持续恢复，退出时还原原值。
 * **采集层**：跟踪进程内取得的屏幕 DC（`GetDC(NULL)`/`GetWindowDC`/`CreateDCW("DISPLAY")`），冻结时把 `BitBlt`/`StretchBlt`/`PrintWindow` 的源改为开启瞬间抓取的 DIB，从而只影响学生端自己抓屏，不影响你本地显示。
 * **通信**：命名管道 `\\.\pipe\YZTrainer`，帧格式 `[magic 'YZT1'][opcode][len][payload]`；Hook DLL 主动连接并上报状态与日志。
+* **考试模式判定（强/弱信号分级）**：弱信号（`Exam.ads` / `ClassQuiz.ads` 已加载）只按节流记 INFO；强信号（独立 `ExamDlg.exe` 进程、进程内加载考试对话框组件、或**可见**且标题命中 `考试|测验|答题|试卷|快问快答|Exam|Quiz` 的远志窗口）任一命中才熔断并恢复策略、清零功能位。判据走严格目录前缀比较（避免 `...V9.0 StudentX` 这类前缀误判），窗口用 `IsWindowVisible` 过滤隐藏窗口；熔断时输出诊断（命中原因 / 考试进程路径 / 强信号模块 / 进程模块清单）到日志与 `%TEMP%\YZTrainer\exam-debug.txt`，同内容 30 秒节流 + FNV-1a 去重。开关 `EnableExamGuard`（默认 1）以控制位 `YZ_CFG_EXAM_GUARD` 随配置下发，用 `YZ_FLAG_FUNCTION_MASK` 剔除，保证功能位上报不被污染。
 * **还原**：收到卸载指令或客户端进程退出时，全量 `MH_DisableHook` + `MH_RemoveHook` + `MH_Uninitialize`，恢复策略值，释放冻结位图；不调用 `FreeLibrary`（避免崩溃），DLL 留在进程内但完全停用。
 
 ## 已知限制
@@ -147,7 +149,7 @@ ProcessNames=Yistart.exe;TEACHCMD.exe;PlayerGUI.exe;ExdPaintHelper.exe
 * **不规避技术措施**：本项目不以破解、复制、传播他人软件为目的，仓库内不包含任何厂商文件；请自行通过合法渠道获取相关软件。
 * **无担保与已知风险**：软件按“现状”提供，不附带任何明示或默示担保。它需要管理员权限并向其他进程注入代码，可能被防病毒软件、EDR 或学校终端管理系统拦截、隔离或告警。
 * **禁止恶意用途**：禁止将本项目或其衍生代码用于免杀、反检测、捆绑传播或任何攻击性用途。
-* **考试模式硬边界**：程序检测到考试/测验模式时会立即自动停用全部功能，不提供任何绕过开关。
+* **考试模式硬边界**：程序检测到考试/测验的**强信号**时会立即自动停用全部功能并恢复被改写的策略值；默认开启的"考试模式守护"（`EnableExamGuard`）只做判定，**关闭它等于停止检测，不改变本项目的使用边界**——任何考试、测验、监考场景都禁止使用本工具。
 
 本声明随版本更新；它不构成对使用者的责任豁免，也不能替代你的法律意见。
 
@@ -160,7 +162,7 @@ This project is provided solely for **educational research** and **technical stu
 * **Prohibited uses.** Do not use this project during exams, quizzes, or any other form of assessment; do not use it to disrupt teaching, invade privacy, or interfere with other people's devices; do not use it for attacks or for profit. Circumventing technological protection measures or damaging computer information systems may violate copyright and criminal law in your jurisdiction.
 * **No circumvention of protection measures.** This project is not intended to crack, copy, or redistribute anyone else's software, and this repository contains no vendor files. Obtain any third-party software through legitimate channels.
 * **No warranty.** The software is provided "as is", without warranty of any kind. It requires administrator privileges and injects code into other processes, and may therefore be flagged, blocked, or quarantined by antivirus software, EDR, or your school's endpoint management system.
-* **Exam-mode hard limit.** The program automatically disables all features the moment exam or quiz mode is detected, and provides no switch to bypass it.
+* **Exam-mode hard limit.** On a strong exam/quiz signal the program immediately disables all features and restores any modified policy values. The default-on "exam guard" (`EnableExamGuard`) only governs detection; turning it off stops detection but does not change this project's usage boundary — use during any exam, quiz or proctored session is prohibited.
 
 This disclaimer is subject to change with new versions. It does not exempt users from liability and is not a substitute for legal advice.
 
