@@ -29,6 +29,7 @@ void ConfigApplyDefaults(AppConfig& cfg)
     cfg.windowPercent = 60;
     cfg.logLevel      = 2;
     cfg.autoInject    = true;
+    cfg.enableExamGuard = true;
     cfg.processNames.clear();
     cfg.processNames.push_back(L"Yistart.exe");
     cfg.processNames.push_back(L"TEACHCMD.exe");
@@ -49,6 +50,13 @@ void ConfigLoad(AppConfig& cfg, const std::wstring& iniPath)
     if (cfg.windowPercent > 100) cfg.windowPercent = 100;
     cfg.logLevel = static_cast<int>(ReadInt(iniPath, L"LogLevel", static_cast<DWORD>(cfg.logLevel)));
     cfg.autoInject = ReadInt(iniPath, L"AutoInject", cfg.autoInject ? 1 : 0) != 0;
+    cfg.enableExamGuard = ReadInt(iniPath, L"EnableExamGuard", cfg.enableExamGuard ? 1 : 0) != 0;
+
+    /* 考试守护开关以控制位形式随配置下发；其余功能位保持 ini 中的值 */
+    if (cfg.enableExamGuard)
+        cfg.flags |= YZ_CFG_EXAM_GUARD;
+    else
+        cfg.flags &= ~YZ_CFG_EXAM_GUARD;
 
     wchar_t buf[1024] = {0};
     GetPrivateProfileStringW(kSection, L"TargetDir", L"", buf, 1024, iniPath.c_str());
@@ -72,10 +80,12 @@ void ConfigLoad(AppConfig& cfg, const std::wstring& iniPath)
 
 void ConfigSave(const AppConfig& cfg, const std::wstring& iniPath)
 {
-    WriteInt(iniPath, L"Flags", cfg.flags);
+    /* Flags 只落功能位；考试守护用独立键保存，避免同一开关存在两处事实来源 */
+    WriteInt(iniPath, L"Flags", cfg.flags & YZ_FLAG_FUNCTION_MASK);
     WriteInt(iniPath, L"WindowPercent", cfg.windowPercent);
     WriteInt(iniPath, L"LogLevel", static_cast<DWORD>(cfg.logLevel));
     WriteInt(iniPath, L"AutoInject", cfg.autoInject ? 1 : 0);
+    WriteInt(iniPath, L"EnableExamGuard", cfg.enableExamGuard ? 1 : 0);
     WritePrivateProfileStringW(kSection, L"TargetDir", cfg.targetDir.c_str(), iniPath.c_str());
     WritePrivateProfileStringW(kSection, L"HookDllPath", cfg.hookDllPath.c_str(), iniPath.c_str());
 

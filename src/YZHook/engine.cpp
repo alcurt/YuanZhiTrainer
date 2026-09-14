@@ -41,9 +41,39 @@ std::deque<YZ_LOG_EVENT> g_logQueue;
 std::deque<DWORD>        g_statusQueue;
 
 DWORD            g_configFlags = 0;
+std::wstring     g_examLogSig;
+unsigned long long g_examLogSigHash = 0;
+DWORD            g_examLogTick = 0;
+unsigned         g_examLogCount = 0;
+unsigned         g_examWeakLogCount = 0;
+bool             g_examGuard = true;
+bool             g_examGuardOffLogged = false;
+
+
 bool             g_running = false;
 bool             g_unloadRequested = false;
 bool             g_hooksReady = false;
+
+/* 把考试模式诊断文本落一份到日志目录，便于事后查看完整模块列表 */
+void DetailDumpWrite(const std::wstring& text)
+{
+    std::wstring dir = yz::LogDir();
+    if (!yz::EnsureDirectory(dir))
+        return;
+
+    std::wstring path = yz::JoinPath(dir, L"exam-debug.txt");
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr,
+                           CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE)
+        return;
+
+    std::string utf8 = yz::WideToUtf8(text + L"\r\n");
+    const char bom[3] = { '\xEF', '\xBB', '\xBF' };
+    DWORD written = 0;
+    WriteFile(h, bom, 3, &written, nullptr);
+    WriteFile(h, utf8.data(), static_cast<DWORD>(utf8.size()), &written, nullptr);
+    CloseHandle(h);
+}
 
 void Lock()   { if (g_csInit) EnterCriticalSection(&g_cs); }
 void Unlock() { if (g_csInit) LeaveCriticalSection(&g_cs); }
@@ -76,7 +106,8 @@ void FillStatus(YZ_STATUS* status, DWORD opcodeUnused)
 
 void ApplyEffectiveFlags()
 {
-    DWORD effective = g_configFlags;
+    /* 只让功能位参与生效计算，控制位（如 EnableExamGuard）不得混进 g_flags */
+    DWORD effective = g_configFlags & YZ_FLAG_FUNCTION_MASK;
     if (yzhook::g_examMode != 0)
         effective = 0;
     InterlockedExchange(&yzhook::g_flags, static_cast<LONG>(effective));
@@ -94,11 +125,52 @@ void ApplyEffectiveFlags()
         yzhook::NativeUnhookClientHooks(1500);
 }
 
+/* 日志文本过长时做中段截断：保留首尾，便于看清是哪个模块/窗口 */
+std::wstring TruncateForLog(const std::wstring& text, size_t max)
+{
+    if (text.size() <= max)
+        return text;
+    std::wstring out = text.substr(0, max - 40);
+    out += L"...";
+    out += text.substr(text.size() - 36);
+    return out;
+}
+
+/* EnableExamGuard=0：完全跳过考试检测，已进入的考试模式也要解除 */
+void ExamTickGuardDisabled()
+{
+    bool changed = false;
+    if (yzhook::g_examMode != 0)
+    {
+        InterlockedExchange(&yzhook::g_examMode, 0);
+        ApplyEffectiveFlags();
+        changed = true;
+    }
+    if (!g_examGuardOffLogged)
+    {
+        g_examGuardOffLogged = true;
+        changed = true;
+    }
+    if (changed)
+    {
+        yzhook::SendLogToHost(YZ_LOG_INFO, L"考试模式检测已按配置关闭(EnableExamGuard=0)");
+    }
+}
+
 void ExamTick()
 {
-    const wchar_t* reason = nullptr;
-    bool exam = yzhook::ExamDetect(&reason);
+    if (!g_examGuard)
+    {
+        ExamTickGuardDisabled();
+        return;
+    }
+
+    yzhook::ExamDetail detail;
+    bool exam = yzhook::ExamDetect(&detail);
     LONG before = yzhook::g_examMode;
+
+    const bool firstObservation = (before == 0 && g_examLogCount == 0);
+    bool repeat = false;
 
     if (exam && before == 0)
     {
@@ -106,8 +178,10 @@ void ExamTick()
         yzhook::PolicyRestore();
         ApplyEffectiveFlags();
         yzhook::SendLogToHost(YZ_LOG_WARN,
-            yz::Format(L"检测到考试/测验模式(%s)，已停用全部功能", reason != nullptr ? reason : L"未知").c_str());
+            yz::Format(L"检测到考试/测验模式(%s)，已停用全部功能",
+                       detail.reason != nullptr ? detail.reason : L"未知").c_str());
         yzhook::SendStatusToHost(YZ_EVT_EXAM_MODE);
+        repeat = true;
     }
     else if (!exam && before != 0)
     {
@@ -115,6 +189,57 @@ void ExamTick()
         ApplyEffectiveFlags();
         yzhook::SendLogToHost(YZ_LOG_INFO, L"考试模式结束，功能按当前配置恢复");
         yzhook::SendStatusToHost(YZ_EVT_EXAM_MODE);
+    }
+    else if (!exam)
+    {
+        /* 弱信号（Exam.ads / ClassQuiz.ads 常驻）只记日志，不触发熔断 */
+        yzhook::ExamDetail weak;
+        size_t weakCount = 0;
+        yzhook::ExamDetectWeak(&weak, &weakCount);
+        if (weakCount > 0 && g_examWeakLogCount < 3)
+        {
+            ++g_examWeakLogCount;
+            std::wstring mods = weak.moduleName.empty() ? yzhook::ExamLoadedModuleList() : weak.moduleName;
+            yzhook::SendLogToHost(YZ_LOG_INFO,
+                yz::Format(L"弱信号: 考试模块常驻(%s)，属于就绪态，不熔断",
+                           mods.empty() ? L"未知" : TruncateForLog(mods, 150).c_str()).c_str());
+        }
+        return;
+    }
+    else if (exam && before != 0)
+    {
+        DWORD now = GetTickCount();
+        if ((now - g_examLogTick) >= 30000)
+            repeat = true;
+    }
+
+    if (exam && (repeat || firstObservation))
+    {
+        g_examLogTick = GetTickCount();
+        std::wstring text = yzhook::ExamDetailText(detail);
+
+        std::wstring sig;
+        sig.reserve(text.size());
+        for (size_t i = 0; i < text.size(); i++)
+        {
+            wchar_t ch = text[i];
+            if (ch != L'\r' && ch != L'\n')
+                sig += ch;
+        }
+        unsigned long long hash = yz::Fnv1a64(sig.c_str(), sig.size() * sizeof(wchar_t));
+        bool changed = (hash != g_examLogSigHash);
+        g_examLogSigHash = hash;
+        g_examLogSig     = sig;
+
+        YZLOGI(L"考试模式明细 #%u (hash=%016llX, %s)",
+               g_examLogCount + 1, hash, changed ? L"内容变化" : L"内容未变");
+        yzhook::SendLogToHost(YZ_LOG_INFO, text.c_str());
+
+        if (g_examLogCount == 0 || changed)
+        {
+            DetailDumpWrite(text);
+            ++g_examLogCount;
+        }
     }
 }
 
@@ -429,12 +554,23 @@ bool EngineIsTargetHost()
 void EngineApplyConfig(const YZ_CONFIG& cfg)
 {
     g_configFlags = cfg.flags;
+
+    bool guard = (cfg.flags & YZ_CFG_EXAM_GUARD) != 0;
+    if (!guard && g_examGuard)
+    {
+        /* 运行中关掉考试守护：立刻退出熔断状态 */
+        InterlockedExchange(&yzhook::g_examMode, 0);
+        g_examGuardOffLogged = false;
+    }
+    g_examGuard = guard;
+
     if (cfg.windowPercent >= 20 && cfg.windowPercent <= 100)
         g_windowPercent = cfg.windowPercent;
     WindowHooksSetTopmost((cfg.flags & YZ_FLAG_TOPMOST) != 0);
     ApplyEffectiveFlags();
     SendStatusToHost(YZ_EVT_STATUS);
-    YZLOGI(L"应用配置: flags=0x%08X percent=%u", cfg.flags, g_windowPercent);
+    YZLOGI(L"应用配置: flags=0x%08X percent=%u 考试守护=%s",
+           cfg.flags, g_windowPercent, g_examGuard ? L"开" : L"关");
 }
 
 void EngineSetFlag(DWORD flag, bool on)

@@ -9,6 +9,7 @@
 #include <windows.h>
 
 #include "engine.h"
+#include "exam.h"
 #include "yz_hook_state.h"
 
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved)
@@ -76,4 +77,33 @@ extern "C" __declspec(dllexport) BOOL WINAPI YZ_GetStatus(YZ_STATUS* status)
 extern "C" __declspec(dllexport) BOOL WINAPI YZ_IsExamMode()
 {
     return yzhook::EngineIsExamMode() ? TRUE : FALSE;
+}
+
+/* 诊断辅助：返回本次检测的详细信息文本（含命中原因、窗口标题、模块列表） */
+extern "C" __declspec(dllexport) const wchar_t* WINAPI YZ_ExamDetailText()
+{
+    static std::wstring s_cache;
+    yzhook::ExamDetail detail;
+    yzhook::ExamDetect(&detail);
+    yzhook::ExamDetailText(detail, &s_cache);
+    return s_cache.c_str();
+}
+
+/* 诊断辅助：弱信号（Exam.ads / ClassQuiz.ads 常驻）单独查询，便于自动测试 */
+extern "C" __declspec(dllexport) const wchar_t* WINAPI YZ_ExamWeakDetailText()
+{
+    static std::wstring s_weak;
+    yzhook::ExamDetail detail;
+    size_t count = 0;
+    yzhook::ExamDetectWeak(&detail, &count);
+    s_weak = yz::Format(L"弱信号命中=%s 命中模块=%s",
+                        (count != 0) ? L"true" : L"false",
+                        detail.moduleName.empty() ? L"(无)" : detail.moduleName.c_str());
+    return s_weak.c_str();
+}
+
+/* 诊断辅助：只返回是否处于考试模式，供外部工具核对 */
+extern "C" __declspec(dllexport) BOOL WINAPI YZ_ExamDetailHit()
+{
+    return yzhook::ExamDetect(static_cast<const wchar_t**>(nullptr)) ? TRUE : FALSE;
 }

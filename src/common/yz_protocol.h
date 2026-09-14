@@ -20,6 +20,10 @@
 #define YZ_FLAG_ANTI_MONITOR 0x00000008u  /* 冻结教师端看到的画面 */
 #define YZ_FLAG_BLOCK_REMOTE 0x00000010u  /* 拦截教师端遥控输入 */
 
+/* 控制位：不属于"功能开关"，不参与 g_flags 上报，只影响引擎行为 */
+#define YZ_CFG_EXAM_GUARD    0x00010000u  /* 1=启用考试模式强信号熔断，0=完全跳过检测 */
+#define YZ_FLAG_FUNCTION_MASK 0x0000FFFFu /* 功能开关掩码，用于剔除控制位 */
+
 enum YZ_OPCODE : DWORD
 {
     /* 主程序 -> Hook DLL */

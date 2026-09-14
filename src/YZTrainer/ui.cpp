@@ -27,6 +27,7 @@ const int IDC_BTN_DIAG       = 2011;
 const int IDC_BTN_LOG        = 2012;
 const int IDC_BTN_ABOUT      = 2013;
 const int IDC_EDIT_LOG       = 2014;
+const int IDC_CHK_EXAMGUARD  = 2015;
 
 const UINT WM_YZ_TRAY        = WM_APP + 10;
 const int  IDM_TRAY_SHOW     = 3001;
@@ -105,6 +106,7 @@ void SyncControls()
     CheckDlgButton(g_app.hwndMain, IDC_CHK_TOPMOST,     (g_app.cfg.flags & YZ_FLAG_TOPMOST) ? BST_CHECKED : BST_UNCHECKED);
     CheckDlgButton(g_app.hwndMain, IDC_CHK_ANTIMON,     (g_app.cfg.flags & YZ_FLAG_ANTI_MONITOR) ? BST_CHECKED : BST_UNCHECKED);
     CheckDlgButton(g_app.hwndMain, IDC_CHK_BLOCKREMOTE, (g_app.cfg.flags & YZ_FLAG_BLOCK_REMOTE) ? BST_CHECKED : BST_UNCHECKED);
+    CheckDlgButton(g_app.hwndMain, IDC_CHK_EXAMGUARD,   g_app.cfg.enableExamGuard ? BST_CHECKED : BST_UNCHECKED);
     SetDlgItemTextW(g_app.hwndMain, IDC_EDIT_PERCENT, yz::Format(L"%u", g_app.cfg.windowPercent).c_str());
 }
 
@@ -209,6 +211,21 @@ void OnCommandWord(HWND hwnd, int id)
     case IDC_CHK_BLOCKREMOTE:
         CmdSetFlag(YZ_FLAG_BLOCK_REMOTE, IsDlgButtonChecked(hwnd, IDC_CHK_BLOCKREMOTE) == BST_CHECKED);
         break;
+    case IDC_CHK_EXAMGUARD:
+        {
+            g_app.cfg.enableExamGuard = (IsDlgButtonChecked(hwnd, IDC_CHK_EXAMGUARD) == BST_CHECKED);
+            if (g_app.cfg.enableExamGuard)
+                g_app.cfg.flags |= YZ_CFG_EXAM_GUARD;
+            else
+                g_app.cfg.flags &= ~YZ_CFG_EXAM_GUARD;
+            ConfigSave(g_app.cfg, g_app.iniPath);
+            IpcSendConfig();
+            SyncControls();
+            UiAppendLog(yz::kLogInfo, g_app.cfg.enableExamGuard
+                        ? L"考试模式守护已开启（仅强信号熔断）"
+                        : L"考试模式守护已关闭（跳过考试检测）");
+        }
+        break;
     case IDC_BTN_APPLY:
         {
             wchar_t buf[32] = {0};
@@ -266,12 +283,13 @@ void CreateChildren(HWND hwnd, HINSTANCE hinst)
         L"解除键鼠锁定（拦截远志的键盘/鼠标钩子与热键屏蔽）",
         L"广播窗口保持置顶",
         L"防监视（冻结教师端看到的画面，默认关闭）",
-        L"拦截教师端遥控输入（默认关闭，会影响老师远程协助）"
+        L"拦截教师端遥控输入（默认关闭，会影响老师远程协助）",
+        L"考试模式守护（仅强信号熔断，默认开启）"
     };
     const int ids[] = { IDC_CHK_WINDOWIZE, IDC_CHK_UNLOCK, IDC_CHK_TOPMOST,
-                        IDC_CHK_ANTIMON, IDC_CHK_BLOCKREMOTE };
+                        IDC_CHK_ANTIMON, IDC_CHK_BLOCKREMOTE, IDC_CHK_EXAMGUARD };
 
-    for (int i = 0; i < 5; i++)
+    for (int i = 0; i < 6; i++)
     {
         HWND chk = CreateWindowExW(0, L"Button", items[i],
                                    WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
@@ -520,7 +538,7 @@ HWND UiInit(HINSTANCE hinst)
     HWND hwnd = CreateWindowExW(0, kWindowClass, kAppTitle,
                                 WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
                                 CW_USEDEFAULT, CW_USEDEFAULT,
-                                yz::ScaleForDpi(570, g_dpi), yz::ScaleForDpi(520, g_dpi),
+                                yz::ScaleForDpi(580, g_dpi), yz::ScaleForDpi(546, g_dpi),
                                 nullptr, nullptr, hinst, nullptr);
     if (hwnd == nullptr)
     {
@@ -654,7 +672,9 @@ void CmdShowAbout()
                 L"用途：在教师全屏广播时把广播画面改成可自由操作的窗口，"
                 L"并解除远志学生端对本机的键鼠封锁。\n"
                 L"原则：不修改远志文件、不卸载驱动、不干扰教师端；"
-                L"检测到考试/测验模式时全部功能自动停用。\n\n"
+                L"检测到考试强信号（独立考试进程 ExamDlg.exe、考试对话框组件或"
+                L"可见考试窗口）时全部功能自动停用；Exam.ads / ClassQuiz.ads 属于"
+                L"学生端启动就绪模块，只会记日志、不再触发熔断。\n\n"
                 L"热键：Ctrl+Alt+F9 广播窗口化 / F10 键鼠解锁 / F11 防监视 / F12 显示界面",
                 L"关于 YZTrainer", MB_OK | MB_ICONINFORMATION);
 }

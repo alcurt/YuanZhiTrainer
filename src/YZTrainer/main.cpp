@@ -47,14 +47,15 @@ std::wstring StartupSummary()
                        yz::FileExists(hookPath) ? L"存在" : L"缺失，请先编译 YZHook 工程");
     if (!g_app.hookDllError.empty())
         text += yz::Format(L"Hook DLL 释放失败原因: %s\r\n", g_app.hookDllError.c_str());
-    text += yz::Format(L"配置: 窗口化=%d 解锁=%d 置顶=%d 防监视=%d 拦遥控=%d 宽度=%u%%\r\n",
+    text += yz::Format(L"配置: 窗口化=%d 解锁=%d 置顶=%d 防监视=%d 拦遥控=%d 宽度=%u%% 考试守护=%d\r\n",
                        (g_app.cfg.flags & YZ_FLAG_WINDOWIZE) ? 1 : 0,
                        (g_app.cfg.flags & YZ_FLAG_INPUT_UNLOCK) ? 1 : 0,
                        (g_app.cfg.flags & YZ_FLAG_TOPMOST) ? 1 : 0,
                        (g_app.cfg.flags & YZ_FLAG_ANTI_MONITOR) ? 1 : 0,
                        (g_app.cfg.flags & YZ_FLAG_BLOCK_REMOTE) ? 1 : 0,
-                       g_app.cfg.windowPercent);
-    text += L"提示：本工具不修改远志文件、不卸载驱动；考试模式下会自动停用全部功能。";
+                       g_app.cfg.windowPercent,
+                       g_app.cfg.enableExamGuard ? 1 : 0);
+    text += L"提示：本工具不修改远志文件、不卸载驱动；检测到考试强信号时会自动停用全部功能。";
     return text;
 }
 } /* namespace */

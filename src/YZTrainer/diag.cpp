@@ -197,11 +197,12 @@ void ExportDiagnostics(HWND owner)
     /* 快照 */
     std::wstring snapshot;
     snapshot += L"YZTrainer 诊断快照\r\n生成时间: " + yz::NowStampEx() + L"\r\n\r\n";
-    snapshot += yz::Format(L"== 配置 ==\r\nFlags=0x%08X WindowPercent=%u AutoInject=%d\r\n"
+    snapshot += yz::Format(L"== 配置 ==\r\nFlags=0x%08X WindowPercent=%u AutoInject=%d EnableExamGuard=%d\r\n"
                            L"TargetDir=%s\r\nHookDll=%s\r\n"
                            L"HookDllSource=%s 内嵌资源=%u 字节\r\nExeDir=%s\r\n\r\n",
                            g_app.cfg.flags, g_app.cfg.windowPercent,
                            g_app.cfg.autoInject ? 1 : 0,
+                           g_app.cfg.enableExamGuard ? 1 : 0,
                            g_app.cfg.targetDir.c_str(),
                            ResolveHookDllPath().c_str(),
                            g_app.hookDllSource.c_str(), PayloadEmbeddedSize(),
