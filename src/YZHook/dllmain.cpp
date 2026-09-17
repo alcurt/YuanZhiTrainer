@@ -107,3 +107,11 @@ extern "C" __declspec(dllexport) BOOL WINAPI YZ_ExamDetailHit()
 {
     return yzhook::ExamDetect(static_cast<const wchar_t**>(nullptr)) ? TRUE : FALSE;
 }
+
+/* 备用注入路径：YZTrainer 用 SetWindowsHookEx(WH_GETMESSAGE) 把本 DLL 挂进目标进程时，
+   Windows 会调用这个导出。真正的初始化在 DllMain 里已完成（EngineStart），
+   这里只把消息传下去，保持钩子有效；宿主识别失败时它在别的进程里也只是空转。 */
+extern "C" __declspec(dllexport) LRESULT CALLBACK YZ_HookProc(int code, WPARAM wParam, LPARAM lParam)
+{
+    return CallNextHookEx(nullptr, code, wParam, lParam);
+}

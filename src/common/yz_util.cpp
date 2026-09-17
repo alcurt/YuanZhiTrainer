@@ -430,6 +430,14 @@ HFONT CreateUiFontForDpi(UINT dpi)
     return CreateFontIndirectW(&lf);
 }
 
+bool IsYuanzhiInstallPath(const std::wstring& path)
+{
+    if (path.empty())
+        return false;
+    return ContainsNoCase(path, L"YZinfo Multimedia teaching software") ||
+           ContainsNoCase(path, L"GZYZ");
+}
+
 unsigned long long Fnv1a64(const void* data, size_t len)
 {
     const unsigned char* p = static_cast<const unsigned char*>(data);

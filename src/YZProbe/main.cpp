@@ -9,8 +9,10 @@
 #include "probe.h"
 
 #include "../common/yz_util.h"
+#include "yz_protocol.h"
 
 #include <stdio.h>
+#include <locale.h>
 
 namespace
 {
@@ -99,7 +101,7 @@ std::wstring ProbeToJson(const ProbeData& data)
     std::wstring j;
     j += L"{\n";
     j += L"  \"tool\": \"YZProbe\",\n";
-    j += L"  \"version\": \"0.2.0\",\n";
+    j += yz::Format(L"  \"version\": \"%s\",\n", YZ_VERSION_STR);
     j += L"  \"generatedAt\": \"" + JsonEscape(data.generatedAt) + L"\",\n";
     j += L"  \"computer\": \"" + JsonEscape(data.computerName) + L"\",\n";
     j += L"  \"os\": \"" + JsonEscape(data.osVersion) + L"\",\n";
@@ -472,7 +474,9 @@ std::wstring ProbeToMarkdown(const ProbeData& data)
 
 int wmain(int argc, wchar_t** argv)
 {
+    /* 控制台按 UTF-8 输出，CRT 也要用 UTF-8 区域设置，否则宽字符会退化成 '?' */
     SetConsoleOutputCP(CP_UTF8);
+    setlocale(LC_ALL, ".UTF8");
 
     std::wstring outDir = yz::GetExeDir();
     bool includeAllModules = false;

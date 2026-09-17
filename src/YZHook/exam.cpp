@@ -245,7 +245,7 @@ BOOL CALLBACK ExamWindowProc(HWND hwnd, LPARAM lParam)
     std::wstring path = yz::GetProcessImagePath(pid);
     if (path.empty())
         return TRUE;
-    if (!yz::ContainsNoCase(path, L"YZinfo Multimedia teaching software") &&
+    if (!yz::IsYuanzhiInstallPath(path) &&
         !PathWithin(path, TargetDirLower()))
         return TRUE;
 

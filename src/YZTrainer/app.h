@@ -7,7 +7,7 @@
 #include <vector>
 
 #include "yz_protocol.h"
-#define YZ_VERSION_STR L"0.2.0"
+/* 产品版本号统一定义在 yz_protocol.h 的 YZ_VERSION_STR */
 
 #define WM_YZ_STATUS (WM_APP + 1)
 #define WM_YZ_LOG    (WM_APP + 2)
@@ -25,6 +25,7 @@ struct AppConfig
     DWORD        windowPercent;    /* 20..100 */
     int          logLevel;         /* 0..3 */
     bool         autoInject;       /* 是否自动注入/补注入 */
+    int          injectMethod;     /* 0=远程线程（默认） 1=消息钩子（SetWindowsHookEx） */
     bool         enableExamGuard;  /* 是否启用考试模式强信号熔断（EnableExamGuard） */
     std::wstring targetDir;        /* 远志安装目录，空=按进程路径自动判定 */
     std::wstring hookDllPath;      /* 空=用内嵌资源；填路径则强制使用该文件 */
@@ -51,6 +52,7 @@ struct AppRuntime
     DWORD            targetPid;
     DWORD            injectCount;
     DWORD            lastInjectTick;
+    HHOOK            injectHook;      /* 消息钩子注入方式下保存的 HHOOK */
 };
 
 extern AppRuntime g_app;

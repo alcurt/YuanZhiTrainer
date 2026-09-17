@@ -520,7 +520,7 @@ bool IsModulePathUnderTargetDir(HMODULE mod)
         return false;
     if (!g_targetDir.empty() && yz::IsUnderDir(path, g_targetDir))
         return true;
-    return yz::ContainsNoCase(path, L"YZinfo Multimedia teaching software");
+    return yz::IsYuanzhiInstallPath(path);
 }
 
 bool IsWindowOfThisProcess(HWND hwnd)
@@ -540,7 +540,7 @@ bool EngineIsTargetHost()
     std::wstring exe = yz::GetSelfPath();
     if (exe.empty())
         return false;
-    if (yz::ContainsNoCase(exe, L"YZinfo Multimedia teaching software"))
+    if (yz::IsYuanzhiInstallPath(exe))
         return true;
     if (yz::ContainsNoCase(exe, L"YZSimTarget.exe"))
         return true;

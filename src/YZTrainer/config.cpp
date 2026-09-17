@@ -29,8 +29,11 @@ void ConfigApplyDefaults(AppConfig& cfg)
     cfg.windowPercent = 60;
     cfg.logLevel      = 2;
     cfg.autoInject    = true;
+    cfg.injectMethod  = 0;
     cfg.enableExamGuard = true;
     cfg.processNames.clear();
+    /* 客户端进程名单。网管版多一个守卫进程 Nmdeputy.exe，但它由注入器显式排除
+       （IsGuardProcess），这里不放进来；需要时可在 INI 里自行添加。 */
     cfg.processNames.push_back(L"Yistart.exe");
     cfg.processNames.push_back(L"TEACHCMD.exe");
     cfg.processNames.push_back(L"PlayerGUI.exe");
@@ -50,6 +53,7 @@ void ConfigLoad(AppConfig& cfg, const std::wstring& iniPath)
     if (cfg.windowPercent > 100) cfg.windowPercent = 100;
     cfg.logLevel = static_cast<int>(ReadInt(iniPath, L"LogLevel", static_cast<DWORD>(cfg.logLevel)));
     cfg.autoInject = ReadInt(iniPath, L"AutoInject", cfg.autoInject ? 1 : 0) != 0;
+    cfg.injectMethod = static_cast<int>(ReadInt(iniPath, L"InjectMethod", static_cast<DWORD>(cfg.injectMethod)));
     cfg.enableExamGuard = ReadInt(iniPath, L"EnableExamGuard", cfg.enableExamGuard ? 1 : 0) != 0;
 
     /* 考试守护开关以控制位形式随配置下发；其余功能位保持 ini 中的值 */
@@ -85,6 +89,7 @@ void ConfigSave(const AppConfig& cfg, const std::wstring& iniPath)
     WriteInt(iniPath, L"WindowPercent", cfg.windowPercent);
     WriteInt(iniPath, L"LogLevel", static_cast<DWORD>(cfg.logLevel));
     WriteInt(iniPath, L"AutoInject", cfg.autoInject ? 1 : 0);
+    WriteInt(iniPath, L"InjectMethod", static_cast<DWORD>(cfg.injectMethod));
     WriteInt(iniPath, L"EnableExamGuard", cfg.enableExamGuard ? 1 : 0);
     WritePrivateProfileStringW(kSection, L"TargetDir", cfg.targetDir.c_str(), iniPath.c_str());
     WritePrivateProfileStringW(kSection, L"HookDllPath", cfg.hookDllPath.c_str(), iniPath.c_str());

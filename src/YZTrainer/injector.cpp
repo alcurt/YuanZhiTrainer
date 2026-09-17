@@ -57,8 +57,28 @@ bool PathLooksYuanzhi(const AppConfig& cfg, const std::wstring& path)
         return false;
     if (!cfg.targetDir.empty() && yz::IsUnderDir(path, cfg.targetDir))
         return true;
-    return yz::ContainsNoCase(path, L"YZinfo Multimedia teaching software") ||
-           yz::ContainsNoCase(path, L"GZYZ");
+    return yz::IsYuanzhiInstallPath(path);
+}
+
+/* 网管版守卫进程：服务用 /SelfGuard /Protection 拉起 Nmdeputy.exe 做守护与上报，
+   不对它注入——它既不是广播窗口宿主，惊动它也更容易触发保护。 */
+bool IsGuardProcess(const std::wstring& name)
+{
+    return _wcsicmp(name.c_str(), L"Nmdeputy.exe") == 0;
+}
+
+/* 客户端主进程优先级（窗口宿主之外）：优先 Yistart.exe，其次网管版广播宿主 ExdPaintHelper.exe */
+int NamePriority(const std::wstring& name)
+{
+    if (_wcsicmp(name.c_str(), L"Yistart.exe") == 0)
+        return 3;
+    if (_wcsicmp(name.c_str(), L"ExdPaintHelper.exe") == 0)
+        return 2;
+    if (_wcsicmp(name.c_str(), L"TEACHCMD.exe") == 0)
+        return 1;
+    if (_wcsicmp(name.c_str(), L"PlayerGUI.exe") == 0)
+        return 1;
+    return 0;
 }
 
 bool IsProcessX86(DWORD pid, bool* outX86)
@@ -85,6 +105,64 @@ std::wstring AccessDeniedHint(DWORD err)
     if (err != ERROR_ACCESS_DENIED)
         return std::wstring();
     return L"（拒绝访问：目标可能受保护或句柄权限被剥夺，先用 YZProbe.exe --access <pid> 诊断）";
+}
+
+struct PostMsgCtx
+{
+    DWORD pid;
+    int   posted;
+};
+
+BOOL CALLBACK PostNullProc(HWND hwnd, LPARAM lParam)
+{
+    PostMsgCtx* ctx = reinterpret_cast<PostMsgCtx*>(lParam);
+    DWORD       pid = 0;
+    GetWindowThreadProcessId(hwnd, &pid);
+    if (pid != ctx->pid)
+        return TRUE;
+    if (PostMessageW(hwnd, WM_NULL, 0, 0))
+        ctx->posted++;
+    return (ctx->posted == 0);      /* 投出一条就够，触发目标线程处理消息 */
+}
+
+/* 备用注入：SetWindowsHookEx(WH_GETMESSAGE)。
+   由系统把我们的 DLL 映射进目标进程，我们自己不写目标内存，
+   因此能绕开“VM 权限被剥夺”这类保护（但绕不开 PPL/受保护进程）。 */
+bool InjectHookDllViaMessageHook(const std::wstring& dllPath, DWORD targetPid,
+                                 HHOOK* outHook, std::wstring* err)
+{
+    HMODULE mod = LoadLibraryW(dllPath.c_str());   /* 只为在本进程取到过程地址 */
+    if (mod == nullptr)
+    {
+        if (err != nullptr)
+            *err = L"LoadLibraryW 失败: " + yz::Win32ErrorMessage(GetLastError());
+        return false;
+    }
+
+    FARPROC proc = GetProcAddress(mod, "YZ_HookProc");
+    if (proc == nullptr)
+    {
+        if (err != nullptr)
+            *err = L"YZHook.dll 未导出 YZ_HookProc（载荷版本过旧？）";
+        return false;
+    }
+
+    HHOOK hook = SetWindowsHookExW(WH_GETMESSAGE, reinterpret_cast<HOOKPROC>(proc), mod, 0);
+    if (hook == nullptr)
+    {
+        if (err != nullptr)
+            *err = L"SetWindowsHookEx 失败: " + yz::Win32ErrorMessage(GetLastError());
+        return false;
+    }
+
+    /* 投一条无害消息，促使目标线程处理消息队列，从而加载我们的 DLL */
+    PostMsgCtx ctx;
+    ctx.pid    = targetPid;
+    ctx.posted = 0;
+    EnumWindows(PostNullProc, reinterpret_cast<LPARAM>(&ctx));
+
+    *outHook = hook;
+    return true;
 }
 
 /* 与 YZHook 侧 IsCandidateWindow 用同一套判据，只是这里看的是别人的窗口：
@@ -264,8 +342,26 @@ DWORD FindTargetProcess(const AppConfig& cfg)
     std::wstring bestName;
     std::wstring bestReason;
 
+    /* 网管版：守卫进程在场时提示一次（它可能重启客户端并重新保护），但不注入它 */
+    static bool s_guardLogged = false;
+    if (!s_guardLogged)
+    {
+        for (size_t i = 0; i < procs.size(); i++)
+        {
+            if (!IsGuardProcess(procs[i].name))
+                continue;
+            s_guardLogged = true;
+            YZLOGI(L"检测到网管版守卫进程 %s (pid=%u)：只注入客户端，不碰守卫",
+                   procs[i].name.c_str(), procs[i].pid);
+            break;
+        }
+    }
+
     for (size_t i = 0; i < procs.size(); i++)
     {
+        if (IsGuardProcess(procs[i].name))
+            continue;
+
         int score = 0;
         std::wstring reason;
 
@@ -278,6 +374,12 @@ DWORD FindTargetProcess(const AppConfig& cfg)
         {
             score += 3;
             reason += L"进程名 ";
+        }
+        const int prio = NamePriority(procs[i].name);
+        if (prio != 0)
+        {
+            score += prio;
+            reason += L"主进程优先 ";
         }
         if (windowPid != 0 && procs[i].pid == windowPid)
         {
@@ -312,6 +414,9 @@ DWORD FindTargetProcess(const AppConfig& cfg)
        只有在进程名与安装路径都没识别出来时才走这里。 */
     for (size_t i = 0; i < procs.size(); i++)
     {
+        if (IsGuardProcess(procs[i].name))
+            continue;
+
         std::wstring which;
         if (!ProcessHasYuanzhiModule(procs[i].pid, &which))
             continue;
@@ -458,6 +563,29 @@ void WatchdogTick()
         return;
 
     g_app.lastInjectTick = now;
+
+    /* 备用注入方式：消息钩子。挂上之后就不再重复挂，等目标连上管道。 */
+    if (g_app.cfg.injectMethod == 1)
+    {
+        if (g_app.injectHook != nullptr)
+            return;
+
+        std::wstring err;
+        HHOOK        hook = nullptr;
+        if (InjectHookDllViaMessageHook(ResolveHookDllPath(), pid, &hook, &err))
+        {
+            g_app.injectHook = hook;
+            g_app.injectCount++;
+            YZLOGI(L"已通过消息钩子注入 HHOOK=%p pid=%u", hook, pid);
+            UiAppendLog(yz::kLogInfo, yz::Format(L"已通过消息钩子注入目标进程 PID=%u", pid));
+        }
+        else
+        {
+            YZLOGW(L"消息钩子注入失败: %s", err.c_str());
+            UiAppendLog(yz::kLogWarn, L"消息钩子注入失败: " + err);
+        }
+        return;
+    }
 
     std::wstring err;
     if (InjectHookDll(pid, ResolveHookDllPath(), &err))

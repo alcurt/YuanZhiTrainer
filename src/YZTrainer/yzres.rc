@@ -23,8 +23,8 @@ IDR_HOOK_DLL RCDATA "..\\..\\dist\\Win32\\YZHook.dll"
 #define VS_VERSION_INFO 1
 
 VS_VERSION_INFO VERSIONINFO
- FILEVERSION 0,2,0,0
- PRODUCTVERSION 0,2,0,0
+ FILEVERSION 0,3,0,0
+ PRODUCTVERSION 0,3,0,0
  FILEFLAGSMASK 0x3fL
  FILEFLAGS 0x0L
  FILEOS 0x40004L
@@ -37,12 +37,12 @@ BEGIN
         BEGIN
             VALUE "CompanyName",      "alcurt"
             VALUE "FileDescription",  "YZTrainer - Yuanzhi classroom client unlock tool"
-            VALUE "FileVersion",      "0.2.0.0"
+            VALUE "FileVersion",      "0.3.0.0"
             VALUE "InternalName",     "YZTrainer"
             VALUE "LegalCopyright",   "MIT License"
             VALUE "OriginalFilename", "YZTrainer.exe"
             VALUE "ProductName",      "YZTrainer"
-            VALUE "ProductVersion",   "0.2.0"
+            VALUE "ProductVersion",   "0.3.0"
         END
     END
     BLOCK "VarFileInfo"

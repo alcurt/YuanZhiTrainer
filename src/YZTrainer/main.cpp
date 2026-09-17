@@ -71,6 +71,7 @@ int WINAPI wWinMain(HINSTANCE hinst, HINSTANCE, LPWSTR, int)
 
     InitializeCriticalSection(&g_app.cs);
     g_app.pipe    = INVALID_HANDLE_VALUE;
+    g_app.injectHook = nullptr;
     g_app.exeDir  = yz::GetExeDir();
     g_app.iniPath = ConfigPath();
 
@@ -124,6 +125,12 @@ int WINAPI wWinMain(HINSTANCE hinst, HINSTANCE, LPWSTR, int)
     IpcSendUnload();
     Sleep(300);
     IpcStop();
+    if (g_app.injectHook != nullptr)
+    {
+        /* 消息钩子方式注入时，退出前摘掉钩子，避免我们的 DLL 继续被加载 */
+        UnhookWindowsHookEx(g_app.injectHook);
+        g_app.injectHook = nullptr;
+    }
     UiShutdown();
     ConfigSave(g_app.cfg, g_app.iniPath);
     yz::LogShutdown();

@@ -20,6 +20,10 @@ bool         EnsureDirectory(const std::wstring& dir);
 bool         FileExists(const std::wstring& path);
 bool         IsUnderDir(const std::wstring& path, const std::wstring& dir);
 
+/* 路径是否属于远志安装目录。同时兼容普通版与网管版：
+   "…\YZinfo Multimedia teaching software…" 与网管版默认前缀 "…\GZYZ\…"。 */
+bool         IsYuanzhiInstallPath(const std::wstring& path);
+
 /* ---- 字符串 ---- */
 std::wstring ToLower(const std::wstring& s);
 bool         ContainsNoCase(const std::wstring& haystack, const std::wstring& needle);

@@ -493,6 +493,12 @@ void CollectProcesses(ProbeData& data, bool includeAllModules)
                         p.pid, p.name.c_str()));
                     CollectDiskExports(p.path, p);
                 }
+                if (_wcsicmp(p.name.c_str(), L"Nmdeputy.exe") == 0)
+                {
+                    data.notes.push_back(yz::Format(
+                        L"检测到网管版守卫进程 Nmdeputy.exe (PID=%u)：注入目标应优先客户端 Yistart.exe",
+                        p.pid));
+                }
                 /* 现场第一手数据：能不能读 / 分配 / 写这个进程 */
                 ProbeAccessCapability(p.pid, data);
             }

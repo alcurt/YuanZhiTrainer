@@ -1,8 +1,8 @@
 # YZTrainer
 
-> **v0.2.0** · 一款远志多媒体教学管理软件(学生端)的解控软件 · 仅供**教育研究**与**技术学习**，禁止任何非法用途 · 与厂商无关联，使用者自行承担全部后果。
+> **v0.3.0** · 一款**远志多媒体教学管理软件 V9.0 网管版学生端**的解控软件 · 仅供**教育研究**与**技术学习**，禁止任何非法用途 · 与厂商无关联，使用者自行承担全部后果。
 
-针对 **广州远志 YZinfo 多媒体教学网络系统 V9.0 学生端** 的课堂辅助工具，参照 JiYuTrainer 的思路重新实现（不复制其代码）。
+针对 **广州远志（Howyar）YZinfo 多媒体教学网络系统 V9.0 网管版学生端** 的课堂辅助工具（普通学生端同样适用，实测机房部署的是网管版），参照 JiYuTrainer 的思路重新实现（不复制其代码）。
 
 ## 它做什么
 
@@ -25,13 +25,14 @@
 
 ```
 YZTrainer/
-  YZTrainer.sln             VS 解决方案（4 个工程）
+  YZTrainer.sln             VS 解决方案（5 个工程）
   build.ps1                 命令行构建脚本（调用 MSBuild）
   src/common/               公共协议、日志、工具函数
   src/YZTrainer/            主程序：托盘 UI、热键、注入器、命名管道服务、服务面板、诊断导出
   src/YZHook/               注入到远志学生端的 Hook DLL（MinHook + 窗口/输入/采集三层）
   src/YZProbe/              机房侦察工具（进程/模块/窗口/服务/网络快照，输出 JSON + Markdown）
   src/YZSimTarget/          模拟远志学生端（本地回归测试用）
+  src/YZUnhookTest/         免注入拔钩验证工具（本进程加载远志 DLL 调其导出，不注入）
   third_party/minhook/      MinHook（BSD-2-Clause，已内置源码）
   tests/run_sim_test.ps1    本地自动回归脚本
   dist/                     构建产物输出目录
@@ -70,6 +71,7 @@ pwsh -File build.ps1 -Both
 | `YZTrainer.exe` | 主程序（清单要求管理员权限），已内嵌 YZHook.dll，单文件即可运行 |
 | `YZHook.dll` | 注入模块，运行时从 exe 资源释放；dist 下这份是回退/调试用，分发时不需要拷贝 |
 | `YZProbe.exe` | 机房侦察工具，只读，建议先跑它 |
+| `YZUnhookTest.exe` | 免注入拔钩验证工具：默认只体检（读文件导出表 + 调用约定自检），`--apply` 才真正加载远志 DLL 并调用其拔钩导出 |
 | `YZSimTarget.exe` | 模拟学生端，仅本地测试用 |
 
 ## 建议的使用流程
@@ -108,6 +110,7 @@ Flags=5            ; 1=窗口化 2=窗口置顶 4=键鼠解锁 8=防监视 16=�
 WindowPercent=60   ; 窗口化后的宽度占屏幕百分比（20-100）
 LogLevel=2         ; 0=错误 1=警告 2=信息 3=调试
 AutoInject=1       ; 是否自动注入 / 客户端被服务重启后自动补注入
+InjectMethod=0     ; 注入方式：0=CreateRemoteThread+LoadLibrary（默认）；1=SetWindowsHookEx 消息钩子
 TargetDir=         ; 远志安装目录，留空=自动判定
 HookDllPath=       ; 留空=用内嵌的 YZHook.dll；填路径可强制改用外部 DLL（调试用）
 EnableExamGuard=1  ; 考试模式守护：1=仅强信号熔断（默认）；0=完全跳过考试检测
@@ -122,6 +125,9 @@ ProcessNames=Yistart.exe;TEACHCMD.exe;PlayerGUI.exe;ExdPaintHelper.exe
 * **目标选择（三路打分 + 一路兜底）**：① 正在全屏广播的窗口宿主 PID，**+5**，判据与 Hook 侧完全一致（无属主 / 无标题栏 / 非子窗口 / 非桌面壳类 / 覆盖整块显示器 / POPUP 或置顶）；② 进程名在 `ProcessNames` 名单，**+3**；③ 安装路径含 `YZinfo Multimedia teaching software` 或 `GYZY`，**+2**。三者都没命中时，才逐个查进程模块是否加载了 `Rmdesk.ads` / `PlayerGUI.dll` / `ExdHooks.dll`（代价高，仅兜底）。选中后在日志里写明命中原因。
 * **主动拔钩**：用户态没有受支持的 API 能摘掉别人装的钩子，但远志自己导出了卸载入口——解锁开关生效时调用 `KeyboardHook.dll!KillHook()`、`ExdHooks.dll!UnSetExdHooks(0)`、`ExdHooks.dll!UnSetExdHooks2(GetCurrentThreadId())`，拔掉“注入之前”就已经装好的全局/线程钩子。调用放在独立工作线程并限时等待（`KillHook` 结尾是 `WaitForSingleObject(..., INFINITE)`，直接在引擎线程调用有挂死风险），调用点用 SEH 兜底。
 * **调用约定自检（fail-closed）**：调用远志自带导出前，用内置的 HDE32 走真实指令流确认函数以 `ret` / `ret 0` 收尾、单参函数确实读取 `[esp+4]`；出现 `ret imm16 != 0`、远返回、thunk(`jmp`) 或解析失败一律拒绝调用并记 ERROR。裸字节扫描会被指令里的 ModRM 字节骗到（例如 `3B C3` 里的 `0xC3`），所以必须走解码。
+* **备用注入方式（消息钩子）**：`InjectMethod=1` 时，主程序用 `SetWindowsHookEx(WH_GETMESSAGE)` 把已释放的 `YZHook.dll` 挂到会话的 GUI 线程上，由系统加载器把 DLL 映射进目标进程——我们自己不写目标内存，因此能绕开"内核组件剥夺句柄 VM 权限"这一类保护（`OpenProcess` 成功、`VirtualAllocEx` 返回 0x5 的场景）。代价是 DLL 会被映射进本会话所有 GUI 进程（宿主识别不通过的进程里只是空转），因此默认仍用远程线程方式，只在被剥夺句柄权限的机器上切到 1。
+* **注入能力诊断（YZProbe）**：探针用 `GetProcessInformation(ProcessProtectionLevelInfo)` 读进程保护级别（`PROTECTION_LEVEL` 枚举，`0xFFFFFFFE`=无保护）、用 `NtQueryObject` 读句柄**实得权限**，再逐项实测模块枚举 / `ReadProcessMemory` / `VirtualAllocEx` / `WriteProcessMemory`（只写自己刚分配的一页并立刻释放）。`--access <pid>` 可对单个进程单独诊断。它同时列出非微软签名的内核驱动（保护件/杀软/还原卡）与服务的 `SERVICE_CONFIG_LAUNCH_PROTECTED` 标志。
+* **免注入拔钩（YZUnhookTest）**：`KeyboardHook.dll` 的 `HookData` 与 `ExdHooks.dll` 的 `.ExdHook` 都是跨进程共享节，HHOOK 又是会话级对象——因此在**本进程**里加载这两个 DLL 并调用 `KillHook()` / `UnSetExdHooks(0)` / `UnSetExdHooks2(GetCurrentThreadId())`，撤销的是同一个钩子集合，完全不需要注入。工具默认只体检（读文件导出表 + 调用约定自检），`--apply` 才真调用，并在调用前后打印共享节里的句柄/状态字作为对照。
 * **窗口层**：hook `SetWindowPos` / `MoveWindow` / `ShowWindow` / `SetWindowLongA/W`，命中“本进程 + 无标题栏 + 覆盖整块显示器 + 置顶或 POPUP”的窗口后改写成 `WS_OVERLAPPEDWINDOW`，默认屏宽 60% 居中、不抢焦点；客户端每 3 秒抢回全屏时按 500ms 节流重新纠正。
 * **输入层**：拦截学生端安装键盘钩子的调用；`RegisterHotKey`、`SystemParametersInfoW`（屏保/快速任务切换）、`ClipCursor`、`BlockInput` 全部按开关放行或拦截；每秒强制 `ClipCursor(NULL)` 一次；被改写的 HKCU 策略值（任务管理器/锁屏/Win 键/GameDVR）在后台持续恢复，退出时还原原值。
 * **采集层**：跟踪进程内取得的屏幕 DC（`GetDC(NULL)`/`GetWindowDC`/`CreateDCW("DISPLAY")`），冻结时把 `BitBlt`/`StretchBlt`/`PrintWindow` 的源改为开启瞬间抓取的 DIB，从而只影响学生端自己抓屏，不影响你本地显示。
@@ -138,6 +144,14 @@ ProcessNames=Yistart.exe;TEACHCMD.exe;PlayerGUI.exe;ExdPaintHelper.exe
 5. 防监视从设计上只影响学生端自己抓屏的路径，不会改动系统显示驱动。
 6. **同一时间只能运行一份**：主程序用全局互斥体 `Global\YZTrainer_SingleInstance` 防重入，第二份会弹提示后退出。若另一份是**非提权**的旧副本，它还会因完整性级别不够而 `OpenProcess` 失败（错误 0x5），表现就是“什么都没发生”——现场先确认没有其它 YZTrainer 在跑（含 `YZTrainer-noelev.exe` 这类改名副本）。
 7. 主动拔钩依赖远志 DLL 已加载且导出签名与本地分析一致：签名不符时会被运行时自检拒绝（记 ERROR、功能不生效，但不影响其它功能）。本机 V9.0 Student 的 `KillHook` 为无参，`UnSetExdHooks` / `UnSetExdHooks2` 各带 1 个 DWORD 参数（与最初计划书“全部无参”的假设不同，实测内部调用点分别传 `0` 与调用者自身 tid）。
+
+## 网管版（GZYZ）适配
+
+机房里实测部署的是**网管版**，与普通学生端有几处差异，代码里已按下面规则处理：
+
+* **安装前缀**：网管版默认装在 `C:\Program Files (x86)\GZYZ\YZinfo Multimedia teaching softwareV9.0 Student\`。所有"是否远志"的路径判据统一走 `yz::IsYuanzhiInstallPath()`，同时认 `YZinfo Multimedia teaching software` 与 `GZYZ` 两种前缀——注入器的目标打分、Hook 侧的宿主识别、考试模式的窗口归属判据都改用它，避免只认一种前缀造成漏判。探针的服务/模块过滤关键词本来就含 `GZYZ`。
+* **守卫进程 Nmdeputy.exe**：服务以 `Nmdeputy.exe /NormalApp /GlobalMutex /StopParam:stop /Delay:1000 /Delay2:3000 /DelayInit:3000 /SelfGuard /Protection /Name:… Service /"…\Yistart.exe" -AutoUninstall` 的形式拉起客户端。它是**守护与上报**进程，因此：**注入器显式排除它**（`IsGuardProcess`，日志里提示一次"检测到网管版守卫进程"，只注入客户端）；同时正因为它会重启/重新保护客户端，看门狗每 2 秒补注入这条机制在网管版上是必需的，不能省。
+* **目标优先级**：广播窗口宿主(+5) ＞ 主进程优先（`Yistart.exe` +3、`ExdPaintHelper.exe` +2、`TEACHCMD.exe`/`PlayerGUI.exe` +1）＞ 进程名在名单(+3) ＞ 安装路径匹配(+2)，守卫进程永不入选。这样即便名单里同时有多个客户端进程，也会稳定落到 `Yistart.exe` 或真正的广播窗口宿主上。
 
 ## 免责声明与使用边界
 
