@@ -77,6 +77,16 @@ bool IsProcessX86(DWORD pid, bool* outX86)
     CloseHandle(h);
     return ok;
 }
+
+/* 注入时最容易被误读的失败：目标进程受保护 / 句柄权限被内核组件剥夺。
+   这种情况下 OpenProcess 会成功，但后续 VM/线程操作返回 ACCESS_DENIED。 */
+std::wstring AccessDeniedHint(DWORD err)
+{
+    if (err != ERROR_ACCESS_DENIED)
+        return std::wstring();
+    return L"（拒绝访问：目标可能受保护或句柄权限被剥夺，先用 YZProbe.exe --access <pid> 诊断）";
+}
+
 /* 与 YZHook 侧 IsCandidateWindow 用同一套判据，只是这里看的是别人的窗口：
    无属主 + 无标题栏 + 非子窗口 + 非桌面壳类 + 覆盖整块显示器 + (POPUP 或置顶)。 */
 bool LooksBroadcastWindow(HWND hwnd)
@@ -360,7 +370,10 @@ bool InjectHookDll(DWORD pid, const std::wstring& dllPath, std::wstring* err)
     if (remote == nullptr)
     {
         if (err != nullptr)
-            *err = L"VirtualAllocEx 失败: " + yz::Win32ErrorMessage(GetLastError());
+        {
+            const DWORD werr = GetLastError();
+            *err = L"VirtualAllocEx 失败: " + yz::Win32ErrorMessage(werr) + AccessDeniedHint(werr);
+        }
         CloseHandle(process);
         return false;
     }
@@ -370,7 +383,10 @@ bool InjectHookDll(DWORD pid, const std::wstring& dllPath, std::wstring* err)
     if (!WriteProcessMemory(process, remote, dllPath.c_str(), bytes, &written))
     {
         if (err != nullptr)
-            *err = L"WriteProcessMemory 失败: " + yz::Win32ErrorMessage(GetLastError());
+        {
+            const DWORD werr = GetLastError();
+            *err = L"WriteProcessMemory 失败: " + yz::Win32ErrorMessage(werr) + AccessDeniedHint(werr);
+        }
     }
     else
     {
@@ -388,7 +404,10 @@ bool InjectHookDll(DWORD pid, const std::wstring& dllPath, std::wstring* err)
             if (thread == nullptr)
             {
                 if (err != nullptr)
-                    *err = L"CreateRemoteThread 失败: " + yz::Win32ErrorMessage(GetLastError());
+                {
+                    const DWORD werr = GetLastError();
+                    *err = L"CreateRemoteThread 失败: " + yz::Win32ErrorMessage(werr) + AccessDeniedHint(werr);
+                }
             }
             else
             {

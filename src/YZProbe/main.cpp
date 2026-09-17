@@ -59,6 +59,25 @@ std::wstring StateName(DWORD state)
     }
 }
 
+/* 进程保护级别文本（PROTECTION_LEVEL 枚举，见 WinBase.h） */
+std::wstring ProtectionText(DWORD level)
+{
+    switch (level)
+    {
+    case 0xFFFFFFFE: return L"无";
+    case 0x00000000: return L"PPL/WinTcbLight";
+    case 0x00000001: return L"PP/Windows";
+    case 0x00000002: return L"PPL/WindowsLight";
+    case 0x00000003: return L"PPL/AntimalwareLight";
+    case 0x00000004: return L"PPL/LsaLight";
+    case 0x00000005: return L"PP/WinTcb";
+    case 0x00000006: return L"PPL/CodeGenLight";
+    case 0x00000007: return L"PP/Authenticode";
+    case 0x00000008: return L"PPL_APP";
+    default:         return yz::Format(L"未知(0x%08X)", level);
+    }
+}
+
 void WriteUtf8File(const std::wstring& path, const std::wstring& text)
 {
     HANDLE h = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
@@ -113,6 +132,7 @@ std::wstring ProbeToJson(const ProbeData& data)
         j += L"      \"integrity\": \"" + JsonEscape(IntegrityName(p.integrity)) + L"\",\n";
         j += yz::Format(L"      \"elevated\": %s,\n", p.elevated ? L"true" : L"false");
         j += yz::Format(L"      \"isYuanzhi\": %s,\n", p.isYuanzhi ? L"true" : L"false");
+        j += yz::Format(L"      \"protectionLevel\": \"0x%08X\",\n", p.protectionLevel);
         j += L"      \"modules\": [";
         for (size_t k = 0; k < p.modules.size(); k++)
         {
@@ -137,8 +157,47 @@ std::wstring ProbeToJson(const ProbeData& data)
             }
             j += L"]";
         }
+        j += L"},\n      \"diskModuleExports\": {";
+        bool firstDisk = true;
+        for (size_t k = 0; k < p.diskModules.size(); k++)
+        {
+            if (!firstDisk)
+                j += L", ";
+            firstDisk = false;
+            j += L"\"" + JsonEscape(p.diskModules[k].name) + L"\": [";
+            for (size_t e = 0; e < p.diskModules[k].exports.size(); e++)
+            {
+                if (e != 0)
+                    j += L", ";
+                j += L"\"" + JsonEscape(p.diskModules[k].exports[e]) + L"\"";
+            }
+            j += L"]";
+        }
         j += L"}\n    }";
         if (i + 1 != data.processes.size()) j += L",";
+        j += L"\n";
+    }
+    j += L"  ],\n";
+
+    j += L"  \"access\": [\n";
+    for (size_t i = 0; i < data.access.size(); i++)
+    {
+        const ProbeAccess& a = data.access[i];
+        j += L"    {\n";
+        j += yz::Format(L"      \"pid\": %u,\n", a.pid);
+        j += yz::Format(L"      \"protectionLevel\": \"0x%08X\",\n", a.protectionLevel);
+        j += L"      \"protection\": \"" + JsonEscape(a.protectionText) + L"\",\n";
+        j += (a.grantedAccess != 0)
+                 ? yz::Format(L"      \"grantedAccess\": \"0x%08X\",\n", static_cast<unsigned>(a.grantedAccess))
+                 : std::wstring(L"      \"grantedAccess\": \"未取到\",\n");
+        j += L"      \"moduleRead\": \"" + JsonEscape(a.moduleRead) + L"\",\n";
+        j += L"      \"vmRead\": \"" + JsonEscape(a.vmRead) + L"\",\n";
+        j += L"      \"vmOperation\": \"" + JsonEscape(a.vmOperation) + L"\",\n";
+        j += L"      \"vmWrite\": \"" + JsonEscape(a.vmWrite) + L"\",\n";
+        j += L"      \"createThread\": \"" + JsonEscape(a.createThread) + L"\"\n";
+        j += L",\n      \"privNote\": \"" + JsonEscape(a.privNote) + L"\"\n";
+        j += L"    }";
+        if (i + 1 != data.access.size()) j += L",";
         j += L"\n";
     }
     j += L"  ],\n";
@@ -176,8 +235,22 @@ std::wstring ProbeToJson(const ProbeData& data)
         j += L"\"display\": \"" + JsonEscape(s.display) + L"\", ";
         j += L"\"imagePath\": \"" + JsonEscape(s.imagePath) + L"\", ";
         j += L"\"state\": \"" + JsonEscape(StateName(s.state)) + L"\", ";
-        j += yz::Format(L"\"isDriver\": %s}", s.isDriver ? L"true" : L"false");
+        j += yz::Format(L"\"isDriver\": %s, ", s.isDriver ? L"true" : L"false");
+        j += yz::Format(L"\"launchProtected\": %u}", s.launchProtected);
         if (i + 1 != data.services.size()) j += L",";
+        j += L"\n";
+    }
+    j += L"  ],\n";
+
+    j += L"  \"thirdPartyDrivers\": [\n";
+    for (size_t i = 0; i < data.drivers.size(); i++)
+    {
+        const ProbeDriver& d = data.drivers[i];
+        j += L"    {\"name\": \"" + JsonEscape(d.name) + L"\", ";
+        j += L"\"company\": \"" + JsonEscape(d.company) + L"\", ";
+        j += L"\"imagePath\": \"" + JsonEscape(d.imagePath) + L"\", ";
+        j += yz::Format(L"\"state\": %u}", d.state);
+        if (i + 1 != data.drivers.size()) j += L",";
         j += L"\n";
     }
     j += L"  ],\n";
@@ -217,14 +290,15 @@ std::wstring ProbeToMarkdown(const ProbeData& data)
                     data.self.hasSeDebug ? L"有" : L"无");
 
     m += L"## 远志相关进程\n\n";
-    m += L"| PID | 进程 | 用户 | 完整性 | 提权 | 路径 |\n|---|---|---|---|---|---|\n";
+    m += L"| PID | 进程 | 用户 | 完整性 | 提权 | 进程保护 | 路径 |\n|---|---|---|---|---|---|---|\n";
     for (size_t i = 0; i < data.processes.size(); i++)
     {
         const ProbeProcess& p = data.processes[i];
         if (!p.isYuanzhi)
             continue;
-        m += yz::Format(L"| %u | %s | %s | %s | %s | %s |\n", p.pid, p.name.c_str(), p.user.c_str(),
-                        IntegrityName(p.integrity).c_str(), p.elevated ? L"是" : L"否", p.path.c_str());
+        m += yz::Format(L"| %u | %s | %s | %s | %s | %s | %s |\n", p.pid, p.name.c_str(), p.user.c_str(),
+                        IntegrityName(p.integrity).c_str(), p.elevated ? L"是" : L"否",
+                        ProtectionText(p.protectionLevel).c_str(), p.path.c_str());
     }
 
     m += L"\n### 远志进程加载的关键模块\n\n";
@@ -268,6 +342,63 @@ std::wstring ProbeToMarkdown(const ProbeData& data)
         }
     }
 
+    m += L"### 安装目录关键模块的导出表（进程内模块读不到时的兜底）\n\n";
+    bool anyDisk = false;
+    for (size_t i = 0; i < data.processes.size(); i++)
+    {
+        const ProbeProcess& p = data.processes[i];
+        if (!p.isYuanzhi || p.diskModules.empty())
+            continue;
+        anyDisk = true;
+        m += yz::Format(L"**PID %u (%s) 的安装目录**\n\n", p.pid, p.name.c_str());
+        for (size_t k = 0; k < p.diskModules.size(); k++)
+        {
+            m += L"`" + p.diskModules[k].name + L"`：";
+            for (size_t e = 0; e < p.diskModules[k].exports.size(); e++)
+            {
+                m += p.diskModules[k].exports[e];
+                m += (e + 1 == p.diskModules[k].exports.size()) ? L"\n" : L", ";
+            }
+        }
+        m += L"\n";
+    }
+    if (!anyDisk)
+        m += L"（未采集：进程模块可正常读取，或没有远志进程）\n\n";
+
+    m += L"## 注入能力实测（回答“为什么注不进去”）\n\n";
+    if (data.access.empty())
+    {
+        m += L"（未采集：非管理员运行，或这次没有远志进程）\n\n";
+    }
+    else
+    {
+        m += L"| PID | 进程保护 | 句柄实得权限 | 模块枚举 | ReadProcessMemory | VirtualAllocEx | WriteProcessMemory |\n";
+        m += L"|---|---|---|---|---|---|---|\n";
+        for (size_t i = 0; i < data.access.size(); i++)
+        {
+            const ProbeAccess& a = data.access[i];
+            const std::wstring granted = (a.grantedAccess != 0)
+                ? yz::Format(L"0x%08X", static_cast<unsigned>(a.grantedAccess))
+                : std::wstring(L"未取到");
+            m += yz::Format(L"| %u | %s | %s | %s | %s | %s | %s |\n",
+                            a.pid, a.protectionText.c_str(), granted.c_str(),
+                            a.moduleRead.c_str(), a.vmRead.c_str(), a.vmOperation.c_str(),
+                            a.vmWrite.c_str());
+        }
+        for (size_t i = 0; i < data.access.size(); i++)
+        {
+            if (!data.access[i].privNote.empty())
+            {
+                m += yz::Format(L"- PID %u：%s\n", data.access[i].pid,
+                                data.access[i].privNote.c_str());
+            }
+        }
+        m += L"\n权限位对照：`PROCESS_VM_OPERATION=0x0008`、`PROCESS_VM_WRITE=0x0020`、"
+             L"`PROCESS_VM_READ=0x0010`、`PROCESS_CREATE_THREAD=0x0002`。"
+             L"请求了这些位而“实得权限”里没有，就说明被内核组件（句柄权限剥夺）或进程保护机制拿掉了——"
+             L"这正是“OpenProcess 成功、VirtualAllocEx 返回 0x5”的原因。\n\n";
+    }
+
     m += L"## 疑似全屏/置顶窗口（按进程排序）\n\n";
     m += L"| HWND | PID | 进程 | 类名 | 样式 | 置顶 | 无边框 | 覆盖整屏 | 可见 | 标题 |\n|---|---|---|---|---|---|---|---|---|---|\n";
     for (size_t i = 0; i < data.windows.size(); i++)
@@ -284,12 +415,31 @@ std::wstring ProbeToMarkdown(const ProbeData& data)
     }
 
     m += L"\n## 远志相关服务 / 驱动\n\n";
-    m += L"| 名称 | 显示名 | 状态 | 驱动 | ImagePath |\n|---|---|---|---|---|\n";
+    m += L"| 名称 | 显示名 | 状态 | 驱动 | 受保护启动 | ImagePath |\n|---|---|---|---|---|---|\n";
     for (size_t i = 0; i < data.services.size(); i++)
     {
         const ProbeService& s = data.services[i];
-        m += yz::Format(L"| %s | %s | %s | %s | %s |\n", s.name.c_str(), s.display.c_str(),
-                        StateName(s.state).c_str(), s.isDriver ? L"是" : L"否", s.imagePath.c_str());
+        m += yz::Format(L"| %s | %s | %s | %s | %u | %s |\n", s.name.c_str(), s.display.c_str(),
+                        StateName(s.state).c_str(), s.isDriver ? L"是" : L"否",
+                        s.launchProtected, s.imagePath.c_str());
+    }
+
+    m += L"\n## 非微软签名的内核驱动（保护件/杀软/还原卡通常在这张表里）\n\n";
+    if (data.drivers.empty())
+    {
+        m += L"（无，或没有权限枚举）\n\n";
+    }
+    else
+    {
+        m += L"| 服务名 | 状态 | 厂商 | ImagePath |\n|---|---|---|---|\n";
+        for (size_t i = 0; i < data.drivers.size(); i++)
+        {
+            const ProbeDriver& d = data.drivers[i];
+            m += yz::Format(L"| %s | %u | %s | %s |\n", d.name.c_str(), d.state,
+                            d.company.empty() ? L"(无版本信息)" : d.company.c_str(),
+                            d.imagePath.c_str());
+        }
+        m += L"\n";
     }
 
     m += L"\n## 远志进程的网络端点\n\n";
@@ -326,6 +476,7 @@ int wmain(int argc, wchar_t** argv)
 
     std::wstring outDir = yz::GetExeDir();
     bool includeAllModules = false;
+    DWORD accessPid = 0;
 
     for (int i = 1; i < argc; i++)
     {
@@ -338,9 +489,15 @@ int wmain(int argc, wchar_t** argv)
         {
             includeAllModules = true;
         }
+        else if (arg == L"--access" && i + 1 < argc)
+        {
+            accessPid = static_cast<DWORD>(_wtoi(argv[++i]));
+        }
         else if (arg == L"-h" || arg == L"--help")
         {
-            wprintf(L"用法: YZProbe.exe [-o 输出目录] [--modules]\n");
+            wprintf(L"用法: YZProbe.exe [-o 输出目录] [--modules] [--access <pid>]\n");
+            wprintf(L"  --modules       采集所有进程的模块（默认只采集远志相关进程）\n");
+            wprintf(L"  --access <pid>  对指定进程做注入能力探测（保护级别/句柄权限/读/分配/写）\n");
             return 0;
         }
     }
@@ -349,6 +506,11 @@ int wmain(int argc, wchar_t** argv)
 
     ProbeData data;
     ProbeCollect(data, includeAllModules);
+    if (accessPid != 0)
+    {
+        ProbeAccessProbePid(accessPid, data);
+        data.notes.push_back(yz::Format(L"按 --access 参数额外探测了 PID=%u", accessPid));
+    }
 
     yz::EnsureDirectory(outDir);
     std::wstring stamp = yz::NowStamp();
@@ -369,6 +531,8 @@ int wmain(int argc, wchar_t** argv)
     wprintf(L"  进程 %zu 个（其中远志相关 %zu 个）\n", data.processes.size(), yuanzhiProcesses);
     wprintf(L"  窗口 %zu 个，服务/驱动 %zu 个，网络端点 %zu 条\n",
             data.windows.size(), data.services.size(), data.net.size());
+    wprintf(L"  非微软内核驱动 %zu 个，注入能力探测 %zu 条\n",
+            data.drivers.size(), data.access.size());
     wprintf(L"  JSON: %ls\n", jsonPath.c_str());
     wprintf(L"  Markdown: %ls\n", mdPath.c_str());
     return 0;
