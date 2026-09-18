@@ -483,6 +483,7 @@ int wmain(int argc, wchar_t** argv)
     std::wstring outDir = yz::GetExeDir();
     bool includeAllModules = false;
     DWORD accessPid = 0;
+    bool  noPause = false;
 
     for (int i = 1; i < argc; i++)
     {
@@ -499,11 +500,18 @@ int wmain(int argc, wchar_t** argv)
         {
             accessPid = static_cast<DWORD>(_wtoi(argv[++i]));
         }
+        else if (arg == L"--no-pause")
+        {
+            noPause = true;
+        }
         else if (arg == L"-h" || arg == L"--help")
         {
-            wprintf(L"用法: YZProbe.exe [-o 输出目录] [--modules] [--access <pid>]\n");
+            wprintf(L"用法: YZProbe.exe [-o 输出目录] [--modules] [--access <pid>] [--no-pause]\n");
             wprintf(L"  --modules       采集所有进程的模块（默认只采集远志相关进程）\n");
             wprintf(L"  --access <pid>  对指定进程做注入能力探测（保护级别/句柄权限/读/分配/写）\n");
+            wprintf(L"  双击运行时结束会等你按回车；脚本里用 --no-pause 跳过\n");
+            if (!noPause)
+                yz::PauseIfSoleConsole();
             return 0;
         }
     }
@@ -541,6 +549,8 @@ int wmain(int argc, wchar_t** argv)
             data.drivers.size(), data.access.size());
     wprintf(L"  JSON: %ls\n", jsonPath.c_str());
     wprintf(L"  Markdown: %ls\n", mdPath.c_str());
+    if (!noPause)
+        yz::PauseIfSoleConsole();
     return 0;
 }
 

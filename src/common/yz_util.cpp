@@ -430,6 +430,30 @@ HFONT CreateUiFontForDpi(UINT dpi)
     return CreateFontIndirectW(&lf);
 }
 
+bool IsSoleConsoleOwner()
+{
+    if (GetConsoleWindow() == nullptr)
+        return false;
+
+    DWORD list[8] = {0};
+    const DWORD count = GetConsoleProcessList(list, ARRAYSIZE(list));
+    return count == 1;
+}
+
+void PauseIfSoleConsole()
+{
+    if (!IsSoleConsoleOwner())
+        return;
+
+    wprintf(L"\n按回车键退出…\n");
+    HANDLE in = GetStdHandle(STD_INPUT_HANDLE);
+    if (in == nullptr || in == INVALID_HANDLE_VALUE)
+        return;
+    char buf[8];
+    DWORD got = 0;
+    ReadFile(in, buf, sizeof(buf), &got, nullptr);
+}
+
 bool IsYuanzhiInstallPath(const std::wstring& path)
 {
     if (path.empty())

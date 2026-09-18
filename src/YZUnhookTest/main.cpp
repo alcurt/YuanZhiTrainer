@@ -19,6 +19,7 @@
 //
 #include <windows.h>
 #include <stdio.h>
+#include <stdarg.h>
 
 #include <string.h>
 #include <locale.h>
@@ -32,6 +33,58 @@
 
 namespace
 {
+/* ---------- 输出：同时写控制台与同目录报告文件 ---------- */
+HANDLE g_log     = INVALID_HANDLE_VALUE;
+bool   g_noPause = false;
+
+void Out(const wchar_t* fmt, ...)
+{
+    wchar_t buf[4096] = {0};
+    va_list args;
+    va_start(args, fmt);
+    _vsnwprintf_s(buf, ARRAYSIZE(buf), _TRUNCATE, fmt, args);
+    va_end(args);
+
+    /* 控制台走 WriteConsoleW：避免重定向/代码页把中文变成 '?' */
+    HANDLE out  = GetStdHandle(STD_OUTPUT_HANDLE);
+    DWORD  mode = 0;
+    if (out != nullptr && out != INVALID_HANDLE_VALUE && GetConsoleMode(out, &mode))
+    {
+        DWORD written = 0;
+        WriteConsoleW(out, buf, static_cast<DWORD>(wcslen(buf)), &written, nullptr);
+    }
+    else if (out != nullptr && out != INVALID_HANDLE_VALUE)
+    {
+        char utf8[8192] = {0};
+        const int n = WideCharToMultiByte(CP_UTF8, 0, buf, -1, utf8, sizeof(utf8) - 1, nullptr, nullptr);
+        DWORD written = 0;
+        if (n > 0)
+            WriteFile(out, utf8, static_cast<DWORD>(n - 1), &written, nullptr);
+    }
+
+    if (g_log != INVALID_HANDLE_VALUE)
+    {
+        char utf8[8192] = {0};
+        const int n = WideCharToMultiByte(CP_UTF8, 0, buf, -1, utf8, sizeof(utf8) - 1, nullptr, nullptr);
+        DWORD written = 0;
+        if (n > 0)
+            WriteFile(g_log, utf8, static_cast<DWORD>(n - 1), &written, nullptr);
+    }
+}
+
+/* 统一退出路径：双击运行时停等回车，别让窗口一闪而过；同时关掉报告文件 */
+int Finish(int code)
+{
+    if (!g_noPause)
+        yz::PauseIfSoleConsole();
+    if (g_log != INVALID_HANDLE_VALUE)
+    {
+        CloseHandle(g_log);
+        g_log = INVALID_HANDLE_VALUE;
+    }
+    return code;
+}
+
 struct TargetEntry
 {
     const wchar_t* relPath;
@@ -314,6 +367,12 @@ int wmain(int argc, wchar_t** argv)
     SetConsoleOutputCP(CP_UTF8);
     setlocale(LC_ALL, ".UTF8");
 
+    /* 报告文件：双击运行时控制台会随进程一起消失，所以同一份输出也落盘 */
+    const std::wstring logPath =
+        yz::JoinPath(yz::GetExeDir(), L"YZUnhookTest-" + yz::NowStamp() + L".txt");
+    g_log = CreateFileW(logPath.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr,
+                        CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+
     std::wstring installDir;
     bool         apply  = false;
     DWORD        waitMs = 3000;
@@ -327,28 +386,31 @@ int wmain(int argc, wchar_t** argv)
             apply = true;
         else if ((arg == L"--wait" || arg == L"-w") && i + 1 < argc)
             waitMs = static_cast<DWORD>(_wtoi(argv[++i]));
+        else if (arg == L"--no-pause")
+            g_noPause = true;
         else if (arg == L"-h" || arg == L"--help")
         {
-            wprintf(L"用法: YZUnhookTest.exe [--install-dir <远志安装目录>] [--apply] [--wait <毫秒>]\n");
-            wprintf(L"  默认只体检：读文件导出表 + 调用约定自检，不加载、不调用\n");
-            wprintf(L"  --apply 才真正 LoadLibrary 并调用 KillHook / UnSetExdHooks / UnSetExdHooks2\n");
-            return 0;
+            Out(L"用法: YZUnhookTest.exe [--install-dir <远志安装目录>] [--apply] [--wait <毫秒>] [--no-pause]\n");
+            Out(L"  默认只体检：读文件导出表 + 调用约定自检，不加载、不调用\n");
+            Out(L"  --apply 才真正 LoadLibrary 并调用 KillHook / UnSetExdHooks / UnSetExdHooks2\n");
+            Out(L"  双击运行时结束会等你按回车；脚本里用 --no-pause 跳过\n");
+            return Finish(0);
         }
     }
 
-    wprintf(L"YZUnhookTest %s —— 免注入拔钩验证工具\n", YZ_VERSION_STR);
+    Out(L"YZUnhookTest %s —— 免注入拔钩验证工具\n", YZ_VERSION_STR);
     if (installDir.empty())
         installDir = FindInstallDir();
     if (installDir.empty())
     {
-        wprintf(L"找不到远志安装目录：请用 --install-dir 指定（例如 C:\\Program Files (x86)\\GZYZ\\YZinfo Multimedia teaching softwareV9.0 Student）\n");
-        return 2;
+        Out(L"找不到远志安装目录：请用 --install-dir 指定（例如 C:\\Program Files (x86)\\GZYZ\\YZinfo Multimedia teaching softwareV9.0 Student）\n");
+        return Finish(2);
     }
-    wprintf(L"远志安装目录: %ls\n", installDir.c_str());
-    wprintf(L"探针位数: %s\n\n", (sizeof(void*) == 8) ? L"x64" : L"x86");
+    Out(L"远志安装目录: %ls\n", installDir.c_str());
+    Out(L"探针位数: %s\n\n", (sizeof(void*) == 8) ? L"x64" : L"x86");
 
     /* ---------- 1) 体检 ---------- */
-    wprintf(L"=== 1) 体检（只读文件，不加载任何远志 DLL）===\n");
+    Out(L"=== 1) 体检（只读文件，不加载任何远志 DLL）===\n");
     int planOk = 0;
     for (size_t i = 0; i < sizeof(kTargets) / sizeof(kTargets[0]); i++)
     {
@@ -358,21 +420,21 @@ int wmain(int argc, wchar_t** argv)
         PeFile pe;
         if (!LoadPeFile(dllPath, &pe))
         {
-            wprintf(L"  [跳过] %-42ls 打不开文件\n", t.label);
+            Out(L"  [跳过] %-42ls 打不开文件\n", t.label);
             continue;
         }
 
         DWORD rva = 0;
         if (!PeFindExport(pe, t.proc, &rva))
         {
-            wprintf(L"  [无导出] %-40ls %ls 里找不到 %S\n", t.label, t.relPath, t.proc);
+            Out(L"  [无导出] %-40ls %ls 里找不到 %S\n", t.label, t.relPath, t.proc);
             continue;
         }
 
         const DWORD codeOff = PeRvaToOffset(pe, rva);
         if (codeOff == 0)
         {
-            wprintf(L"  [异常] %-42ls 导出 RVA 0x%X 无法映射\n", t.label, rva);
+            Out(L"  [异常] %-42ls 导出 RVA 0x%X 无法映射\n", t.label, rva);
             continue;
         }
 
@@ -381,7 +443,7 @@ int wmain(int argc, wchar_t** argv)
         wchar_t     why[192] = {0};
         const bool  sigOk = yzhook::SignatureLooksCallable(pe.bytes.data() + codeOff, scanLen,
                                                            t.takesArg, why, ARRAYSIZE(why));
-        wprintf(L"  [%ls] %-40ls RVA=0x%06X 调用约定自检: %ls %ls\n",
+        Out(L"  [%ls] %-40ls RVA=0x%06X 调用约定自检: %ls %ls\n",
                 sigOk ? L"可调用" : L"拒绝", t.label, rva,
                 sigOk ? L"通过" : L"失败", sigOk ? L"" : why);
         if (sigOk)
@@ -390,18 +452,19 @@ int wmain(int argc, wchar_t** argv)
 
     if (planOk == 0)
     {
-        wprintf(L"\n没有任何入口通过体检，放弃。\n");
-        return 3;
+        Out(L"\n没有任何入口通过体检，放弃。\n");
+        return Finish(3);
     }
     if (!apply)
     {
-        wprintf(L"\n体检完成（%d 个入口可调用）。这只是演练：真正调用请加 --apply。\n", planOk);
-        return 0;
+        Out(L"\n体检完成（%d 个入口可调用）。这只是演练：真正调用请加 --apply。\n", planOk);
+        Out(L"报告文件: %ls\n", logPath.c_str());
+        return Finish(0);
     }
 
     /* ---------- 2) 实际调用 ---------- */
-    wprintf(L"\n=== 2) 实际调用（--apply）===\n");
-    wprintf(L"注意：这会真的撤销全局钩子（目标就是如此），且不卸载已加载的 DLL。\n\n");
+    Out(L"\n=== 2) 实际调用（--apply）===\n");
+    Out(L"注意：这会真的撤销全局钩子（目标就是如此），且不卸载已加载的 DLL。\n\n");
 
     struct LoadedDll { std::wstring relPath; HMODULE mod; };
     std::vector<LoadedDll> loaded;
@@ -426,7 +489,7 @@ int wmain(int argc, wchar_t** argv)
             mod = LoadLibraryW(dllPath.c_str());
             if (mod == nullptr)
             {
-                wprintf(L"  [失败] 加载 %ls 失败 err=0x%08X\n", t.relPath, GetLastError());
+                Out(L"  [失败] 加载 %ls 失败 err=0x%08X\n", t.relPath, GetLastError());
                 continue;
             }
             LoadedDll ld;
@@ -438,7 +501,7 @@ int wmain(int argc, wchar_t** argv)
         void* proc = reinterpret_cast<void*>(GetProcAddress(mod, t.proc));
         if (proc == nullptr)
         {
-            wprintf(L"  [失败] %ls 里 GetProcAddress(%S) 为空\n", t.relPath, t.proc);
+            Out(L"  [失败] %ls 里 GetProcAddress(%S) 为空\n", t.relPath, t.proc);
             continue;
         }
 
@@ -447,7 +510,7 @@ int wmain(int argc, wchar_t** argv)
                                                           384, t.takesArg, why, ARRAYSIZE(why));
         if (!sigOk)
         {
-            wprintf(L"  [拒绝] %-40ls 运行时自检未过：%ls\n", t.label, why);
+            Out(L"  [拒绝] %-40ls 运行时自检未过：%ls\n", t.label, why);
             continue;
         }
 
@@ -470,19 +533,19 @@ int wmain(int argc, wchar_t** argv)
 
         if (!completed)
         {
-            wprintf(L"  [超时] %-40ls %u ms 内没返回（线程留在对方代码里，不再回收）\n", t.label, waitMs);
+            Out(L"  [超时] %-40ls %u ms 内没返回（线程留在对方代码里，不再回收）\n", t.label, waitMs);
         }
         else if (!a->ok)
         {
-            wprintf(L"  [异常] %-40ls 触发 0x%08X\n", t.label, a->seh);
+            Out(L"  [异常] %-40ls 触发 0x%08X\n", t.label, a->seh);
         }
         else
         {
             called++;
             if (t.takesArg)
-                wprintf(L"  [已调用] %-38ls 返回 %u\n", t.label, a->result);
+                Out(L"  [已调用] %-38ls 返回 %u\n", t.label, a->result);
             else
-                wprintf(L"  [已调用] %-38ls (无返回值)\n", t.label);
+                Out(L"  [已调用] %-38ls (无返回值)\n", t.label);
         }
 
         if (haveSnap)
@@ -492,16 +555,17 @@ int wmain(int argc, wchar_t** argv)
                 if (_wcsicmp(kSnapshots[s].relPath, t.relPath) != 0)
                     continue;
                 const bool okAfter = ReadGlobals(mod, kSnapshots[s].rvas, kSnapshots[s].count, after);
-                wprintf(L"           对照 %ls\n", kSnapshots[s].note);
-                wprintf(L"             调用前: %ls\n", FormatDwords(before, kSnapshots[s].count).c_str());
-                wprintf(L"             调用后: %ls%ls\n", okAfter ? L"" : L"(读取失败) ",
+                Out(L"           对照 %ls\n", kSnapshots[s].note);
+                Out(L"             调用前: %ls\n", FormatDwords(before, kSnapshots[s].count).c_str());
+                Out(L"             调用后: %ls%ls\n", okAfter ? L"" : L"(读取失败) ",
                         FormatDwords(after, kSnapshots[s].count).c_str());
                 break;
             }
         }
     }
 
-    wprintf(L"\n完成：成功调用 %d 个入口。请同时观察键鼠是否恢复（这才是最终判据）。\n", called);
-    wprintf(L"本进程不卸载已加载的远志 DLL，直接退出即可。\n");
-    return (called > 0) ? 0 : 4;
+    Out(L"\n完成：成功调用 %d 个入口。请同时观察键鼠是否恢复（这才是最终判据）。\n", called);
+    Out(L"本进程不卸载已加载的远志 DLL，直接退出即可。\n");
+    Out(L"报告文件: %ls\n", logPath.c_str());
+    return Finish((called > 0) ? 0 : 4);
 }

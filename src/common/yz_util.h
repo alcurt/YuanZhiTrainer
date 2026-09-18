@@ -52,6 +52,13 @@ UINT  GetWindowDpi(HWND hwnd);                    /* 取窗口 DPI；hwnd 可为
 int   ScaleForDpi(int value, UINT dpi);           /* value * dpi / 96 */
 HFONT CreateUiFontForDpi(UINT dpi);               /* 9pt 系统消息字体，按 DPI 换算高度 */
 
+/* ---- 控制台工具用 ---- */
+/* 是否“独占”当前控制台（双击运行的情形：只有本进程挂在控制台上）。
+   被 PowerShell/cmd 拉起或输出被重定向时返回 false——那时不该停等。 */
+bool IsSoleConsoleOwner();
+/* 独占控制台时打印提示并等一次回车，避免窗口一闪而过看不到输出。 */
+void PauseIfSoleConsole();
+
 /* ---- 杂项 ---- */
 unsigned long long Fnv1a64(const void* data, size_t len);
 } /* namespace yz */

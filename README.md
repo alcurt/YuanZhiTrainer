@@ -1,6 +1,6 @@
 # YZTrainer
 
-> **v0.3.0** · 一款**远志多媒体教学管理软件 V9.0 网管版学生端**的解控软件 · 仅供**教育研究**与**技术学习**，禁止任何非法用途 · 与厂商无关联，使用者自行承担全部后果。
+> **v0.3.1** · 一款**远志多媒体教学管理软件 V9.0 网管版学生端**的解控软件 · 仅供**教育研究**与**技术学习**，禁止任何非法用途 · 与厂商无关联，使用者自行承担全部后果。
 
 针对 **广州远志（Howyar）YZinfo 多媒体教学网络系统 V9.0 网管版学生端** 的课堂辅助工具（普通学生端同样适用，实测机房部署的是网管版），参照 JiYuTrainer 的思路重新实现（不复制其代码）。
 
@@ -71,7 +71,7 @@ pwsh -File build.ps1 -Both
 | `YZTrainer.exe` | 主程序（清单要求管理员权限），已内嵌 YZHook.dll，单文件即可运行 |
 | `YZHook.dll` | 注入模块，运行时从 exe 资源释放；dist 下这份是回退/调试用，分发时不需要拷贝 |
 | `YZProbe.exe` | 机房侦察工具，只读，建议先跑它 |
-| `YZUnhookTest.exe` | 免注入拔钩验证工具：默认只体检（读文件导出表 + 调用约定自检），`--apply` 才真正加载远志 DLL 并调用其拔钩导出 |
+| `YZUnhookTest.exe` | 免注入拔钩验证工具：默认只体检（读文件导出表 + 调用约定自检）并把过程写入同目录 `YZUnhookTest-<时间戳>.txt`，双击运行时结束会等你按回车；`--apply` 才真正加载远志 DLL 并调用其拔钩导出，`--no-pause` 供脚本调用 |
 | `YZSimTarget.exe` | 模拟学生端，仅本地测试用 |
 
 ## 建议的使用流程
@@ -155,6 +155,19 @@ ProcessNames=Yistart.exe;TEACHCMD.exe;PlayerGUI.exe;ExdPaintHelper.exe
 * **客户端被定向剥夺句柄权限（2026-09-18 两台机房机器实测）**：`Yistart.exe` 的进程保护级别是**无保护**（`0xFFFFFFFE`，即不是 PPL），而 `Nmdeputy.exe` 可以正常枚举模块、`VirtualAllocEx`/`WriteProcessMemory` 全部成功——说明保护是**只针对客户端进程**的句柄权限剥夺（`ObRegisterCallbacks` 一类），不是进程保护机制。典型现象：注入时报 `VirtualAllocEx 失败 0x00000005`，连模块都枚举不到。首选免注入路线（`YZUnhookTest`），或把 `InjectMethod` 切成 1 试消息钩子。
 * **首要怀疑对象**：`BrDevfer`（`system32\Drivers\BRUsbFilter.sys`）——驱动清单里它挂在“Windows (R) Win 7 DDK provider”这个通用厂商字符串下（用 DDK 自建驱动常见），名字像 USB 过滤，但完全可能同时注册进程回调。下次上机把它的文件版本与签名一并记下来。
 * **打包提醒**：`build.ps1` 会在 `dist\<平台>\` 写入一份出厂默认 `YZTrainer.ini`（`Flags=5`、`LogLevel=2`、`EnableExamGuard=1`、`InjectMethod=0`），避免把调试配置（例如打开防监视的 `Flags=13`）随压缩包发出去。
+
+### 为什么注入会失败（`VirtualAllocEx` 返回 0x5）
+
+常规注入是四步，我们卡在第二步：
+
+1. `OpenProcess(PROCESS_CREATE_THREAD | PROCESS_VM_OPERATION | PROCESS_VM_WRITE | PROCESS_VM_READ | ...)` 拿到目标进程句柄；
+2. **`VirtualAllocEx`**——在**目标进程的地址空间**里申请一块内存（我们要用它存 DLL 的路径字符串）；
+3. `WriteProcessMemory` 把 DLL 路径写进那块内存；
+4. `CreateRemoteThread(LoadLibraryW, 那块内存)` 让目标进程自己把 DLL 加载进去。
+
+`VirtualAllocEx` 需要句柄带 `PROCESS_VM_OPERATION`。现在的情况是：`OpenProcess` **成功**（DACL 检查通过、`SeDebugPrivilege` 也开了），但拿到的句柄其 `GrantedAccess` 被**事后削减**——驱动用 `ObRegisterCallbacks` 注册进程回调，在每次有人打开受保护进程的句柄时剥掉 `PROCESS_VM_OPERATION`/`PROCESS_VM_WRITE`/`PROCESS_VM_READ`（可能还有 `PROCESS_CREATE_THREAD`）。于是第二步在对象管理器里被判 `STATUS_ACCESS_DENIED`，`GetLastError()` 得到 5。同一个原因也解释了为什么连模块枚举（内部要 `PROCESS_VM_READ`）都失败。
+
+这**不是权限不够**：已经是管理员 + `SeDebugPrivilege`，提权再多也没用（`SeDebug` 绕的是 DACL，不绕句柄权限削减）。可走的路只有两条：不写目标内存（`InjectMethod=1` 消息钩子，由系统加载器映射 DLL）或干脆不注入（`YZUnhookTest` 在本进程调用远志自己的拔钩导出）。
 
 ## 免责声明与使用边界
 
