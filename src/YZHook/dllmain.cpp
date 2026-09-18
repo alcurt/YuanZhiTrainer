@@ -12,6 +12,36 @@
 #include "exam.h"
 #include "yz_hook_state.h"
 
+/*
+ * x86 上 CALLBACK(__stdcall) 的导出名会被修饰成 _YZ_HookProc@12，而调用方
+ * （YZTrainer 的消息钩子注入）按未修饰名 GetProcAddress，所以这里额外用
+ * /EXPORT 显式导出未修饰名；x64 无修饰，直接用原名。
+ * 其余对外导出同理——README/协议文档写的是未修饰名，在 x86 上也得能取到。
+ */
+#ifdef _WIN64
+#pragma comment(linker, "/EXPORT:YZ_HookProc")
+#pragma comment(linker, "/EXPORT:YZ_ProtocolVersion")
+#pragma comment(linker, "/EXPORT:YZ_Init")
+#pragma comment(linker, "/EXPORT:YZ_Shutdown")
+#pragma comment(linker, "/EXPORT:YZ_ApplyCmd")
+#pragma comment(linker, "/EXPORT:YZ_GetStatus")
+#pragma comment(linker, "/EXPORT:YZ_IsExamMode")
+#pragma comment(linker, "/EXPORT:YZ_ExamDetailText")
+#pragma comment(linker, "/EXPORT:YZ_ExamWeakDetailText")
+#pragma comment(linker, "/EXPORT:YZ_ExamDetailHit")
+#else
+#pragma comment(linker, "/EXPORT:YZ_HookProc=_YZ_HookProc@12")
+#pragma comment(linker, "/EXPORT:YZ_ProtocolVersion=_YZ_ProtocolVersion@0")
+#pragma comment(linker, "/EXPORT:YZ_Init=_YZ_Init@4")
+#pragma comment(linker, "/EXPORT:YZ_Shutdown=_YZ_Shutdown@0")
+#pragma comment(linker, "/EXPORT:YZ_ApplyCmd=_YZ_ApplyCmd@8")
+#pragma comment(linker, "/EXPORT:YZ_GetStatus=_YZ_GetStatus@4")
+#pragma comment(linker, "/EXPORT:YZ_IsExamMode=_YZ_IsExamMode@0")
+#pragma comment(linker, "/EXPORT:YZ_ExamDetailText=_YZ_ExamDetailText@0")
+#pragma comment(linker, "/EXPORT:YZ_ExamWeakDetailText=_YZ_ExamWeakDetailText@0")
+#pragma comment(linker, "/EXPORT:YZ_ExamDetailHit=_YZ_ExamDetailHit@0")
+#endif
+
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved)
 {
     UNREFERENCED_PARAMETER(reserved);

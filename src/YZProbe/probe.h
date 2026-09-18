@@ -82,6 +82,7 @@ struct ProbeDriver
     std::wstring name;
     std::wstring imagePath;
     std::wstring company;
+    std::wstring fileVersion;   /* 文件版本，用于判断保护件的年代/来源 */
     DWORD        state;
 };
 

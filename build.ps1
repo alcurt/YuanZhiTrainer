@@ -53,5 +53,27 @@ Write-Host '构建产物：'
 Get-ChildItem (Join-Path $root 'dist') -Recurse -Include *.exe, *.dll -ErrorAction SilentlyContinue |
     Select-Object FullName, Length | Format-Table -AutoSize
 
+# dist 里始终放一份“出厂默认”INI：避免把调试用的配置（例如 Flags=13 打开防监视）
+# 随压缩包发给别人。内容保持纯 ASCII，GetPrivateProfileStringW 读取才不会有编码问题。
+foreach ($p in $platforms) {
+    $distDir = Join-Path $root "dist\$p"
+    if (-not (Test-Path $distDir)) { continue }
+    $ini = Join-Path $distDir 'YZTrainer.ini'
+    $default = @(
+        '[General]',
+        'Flags=5',
+        'WindowPercent=60',
+        'LogLevel=2',
+        'AutoInject=1',
+        'InjectMethod=0',
+        'EnableExamGuard=1',
+        'TargetDir=',
+        'HookDllPath=',
+        'ProcessNames=Yistart.exe;TEACHCMD.exe;PlayerGUI.exe;ExdPaintHelper.exe'
+    )
+    Set-Content -LiteralPath $ini -Value $default -Encoding utf8
+    Write-Host "已写入默认配置: $ini"
+}
+
 Write-Host ''
 Write-Host '提示：YZHook.dll 已内嵌进 YZTrainer.exe，单文件即可运行（运行时释放到 %ProgramData%\YZTrainer\cache）；YZProbe.exe 建议单独带到机房运行。'

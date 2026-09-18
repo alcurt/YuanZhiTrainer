@@ -152,6 +152,9 @@ ProcessNames=Yistart.exe;TEACHCMD.exe;PlayerGUI.exe;ExdPaintHelper.exe
 * **安装前缀**：网管版默认装在 `C:\Program Files (x86)\GZYZ\YZinfo Multimedia teaching softwareV9.0 Student\`。所有"是否远志"的路径判据统一走 `yz::IsYuanzhiInstallPath()`，同时认 `YZinfo Multimedia teaching software` 与 `GZYZ` 两种前缀——注入器的目标打分、Hook 侧的宿主识别、考试模式的窗口归属判据都改用它，避免只认一种前缀造成漏判。探针的服务/模块过滤关键词本来就含 `GZYZ`。
 * **守卫进程 Nmdeputy.exe**：服务以 `Nmdeputy.exe /NormalApp /GlobalMutex /StopParam:stop /Delay:1000 /Delay2:3000 /DelayInit:3000 /SelfGuard /Protection /Name:… Service /"…\Yistart.exe" -AutoUninstall` 的形式拉起客户端。它是**守护与上报**进程，因此：**注入器显式排除它**（`IsGuardProcess`，日志里提示一次"检测到网管版守卫进程"，只注入客户端）；同时正因为它会重启/重新保护客户端，看门狗每 2 秒补注入这条机制在网管版上是必需的，不能省。
 * **目标优先级**：广播窗口宿主(+5) ＞ 主进程优先（`Yistart.exe` +3、`ExdPaintHelper.exe` +2、`TEACHCMD.exe`/`PlayerGUI.exe` +1）＞ 进程名在名单(+3) ＞ 安装路径匹配(+2)，守卫进程永不入选。这样即便名单里同时有多个客户端进程，也会稳定落到 `Yistart.exe` 或真正的广播窗口宿主上。
+* **客户端被定向剥夺句柄权限（2026-09-18 两台机房机器实测）**：`Yistart.exe` 的进程保护级别是**无保护**（`0xFFFFFFFE`，即不是 PPL），而 `Nmdeputy.exe` 可以正常枚举模块、`VirtualAllocEx`/`WriteProcessMemory` 全部成功——说明保护是**只针对客户端进程**的句柄权限剥夺（`ObRegisterCallbacks` 一类），不是进程保护机制。典型现象：注入时报 `VirtualAllocEx 失败 0x00000005`，连模块都枚举不到。首选免注入路线（`YZUnhookTest`），或把 `InjectMethod` 切成 1 试消息钩子。
+* **首要怀疑对象**：`BrDevfer`（`system32\Drivers\BRUsbFilter.sys`）——驱动清单里它挂在“Windows (R) Win 7 DDK provider”这个通用厂商字符串下（用 DDK 自建驱动常见），名字像 USB 过滤，但完全可能同时注册进程回调。下次上机把它的文件版本与签名一并记下来。
+* **打包提醒**：`build.ps1` 会在 `dist\<平台>\` 写入一份出厂默认 `YZTrainer.ini`（`Flags=5`、`LogLevel=2`、`EnableExamGuard=1`、`InjectMethod=0`），避免把调试配置（例如打开防监视的 `Flags=13`）随压缩包发出去。
 
 ## 免责声明与使用边界
 

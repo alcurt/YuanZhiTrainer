@@ -250,6 +250,7 @@ std::wstring ProbeToJson(const ProbeData& data)
         const ProbeDriver& d = data.drivers[i];
         j += L"    {\"name\": \"" + JsonEscape(d.name) + L"\", ";
         j += L"\"company\": \"" + JsonEscape(d.company) + L"\", ";
+        j += L"\"fileVersion\": \"" + JsonEscape(d.fileVersion) + L"\", ";
         j += L"\"imagePath\": \"" + JsonEscape(d.imagePath) + L"\", ";
         j += yz::Format(L"\"state\": %u}", d.state);
         if (i + 1 != data.drivers.size()) j += L",";
@@ -433,14 +434,15 @@ std::wstring ProbeToMarkdown(const ProbeData& data)
     }
     else
     {
-        m += L"| 服务名 | 状态 | 厂商 | ImagePath |\n|---|---|---|---|\n";
-        for (size_t i = 0; i < data.drivers.size(); i++)
-        {
-            const ProbeDriver& d = data.drivers[i];
-            m += yz::Format(L"| %s | %u | %s | %s |\n", d.name.c_str(), d.state,
-                            d.company.empty() ? L"(无版本信息)" : d.company.c_str(),
-                            d.imagePath.c_str());
-        }
+    m += L"| 服务名 | 状态 | 厂商 | 文件版本 | ImagePath |\n|---|---|---|---|---|\n";
+    for (size_t i = 0; i < data.drivers.size(); i++)
+    {
+        const ProbeDriver& d = data.drivers[i];
+        m += yz::Format(L"| %s | %u | %s | %s | %s |\n", d.name.c_str(), d.state,
+                        d.company.empty() ? L"(无版本信息)" : d.company.c_str(),
+                        d.fileVersion.empty() ? L"-" : d.fileVersion.c_str(),
+                        d.imagePath.c_str());
+    }
         m += L"\n";
     }
 

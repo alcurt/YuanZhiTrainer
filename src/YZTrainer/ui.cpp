@@ -397,6 +397,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     switch (msg)
     {
     case WM_CREATE:
+        /* 必须先登记主窗口句柄：CreateChildren → SyncControls() 依赖 g_app.hwndMain，
+           否则冷启动时所有复选框会停在“未勾选”，直到第一条状态消息才刷新成真实状态。 */
+        g_app.hwndMain = hwnd;
         CreateChildren(hwnd, reinterpret_cast<HINSTANCE>(GetWindowLongPtrW(hwnd, GWLP_HINSTANCE)));
         return 0;
 

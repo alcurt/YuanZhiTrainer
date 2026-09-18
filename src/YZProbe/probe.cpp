@@ -264,7 +264,8 @@ void ProbeAccessCapability(DWORD pid, ProbeData& data)
 
 /* ---------- 非微软内核驱动（保护件/杀软/还原卡都会出现在这张表里） ---------- */
 
-std::wstring FileCompanyName(const std::wstring& path)
+/* 取版本资源里的某个字符串（CompanyName / FileVersion …） */
+std::wstring FileVersionValue(const std::wstring& path, const wchar_t* key)
 {
     DWORD       handle = 0;
     const DWORD len    = GetFileVersionInfoSizeW(path.c_str(), &handle);
@@ -284,7 +285,7 @@ std::wstring FileCompanyName(const std::wstring& path)
         return std::wstring();
 
     const std::wstring sub =
-        yz::Format(L"\\StringFileInfo\\%04X%04X\\CompanyName", tr[0].lang, tr[0].cp);
+        yz::Format(L"\\StringFileInfo\\%04X%04X\\%s", tr[0].lang, tr[0].cp, key);
     wchar_t* val = nullptr;
     if (!VerQueryValueW(buf.data(), sub.c_str(), reinterpret_cast<LPVOID*>(&val), &cb) || val == nullptr)
         return std::wstring();
@@ -365,8 +366,9 @@ void CollectThirdPartyDrivers(ProbeData& data)
             CloseServiceHandle(svc);
         }
 
-        d.imagePath = ResolveServicePath(path);
-        d.company   = FileCompanyName(d.imagePath);
+        d.imagePath   = ResolveServicePath(path);
+        d.company     = FileVersionValue(d.imagePath, L"CompanyName");
+        d.fileVersion = FileVersionValue(d.imagePath, L"FileVersion");
         if (_wcsicmp(d.company.c_str(), L"Microsoft Corporation") == 0)
             continue;                        /* 微软自带驱动不列 */
         data.drivers.push_back(d);
@@ -406,7 +408,36 @@ void CollectDiskExports(const std::wstring& exePath, ProbeProcess& p)
             m.name = name;
             m.path = yz::JoinPath(yz::JoinPath(dir, kDirs[d]), name);
             m.base = nullptr;
+
+            /* 第三方运行库/图形库的导出表与“远志自己的解锁入口”无关，
+               全列出来会把报告撑到几百 KB，这里跳过。 */
+            static const wchar_t* const kNoise[] =
+            {
+                L"gdiplus", L"mfc", L"msvc", L"msxml", L"cabinet", L"comctl",
+                L"shlwapi", L"oleaut", L"vcruntime", L"zlib", L"libeay", L"ssleay"
+            };
+            bool skip = false;
+            for (size_t n = 0; n < sizeof(kNoise) / sizeof(kNoise[0]); n++)
+            {
+                if (yz::ContainsNoCase(name, kNoise[n]))
+                {
+                    skip = true;
+                    break;
+                }
+            }
+            if (skip)
+                continue;
+
             ProbeReadExports(m.path, m.exports);
+
+            /* 单个模块最多保留 40 个导出，避免个别大库把报告撑爆 */
+            const size_t kMaxExports = 40;
+            if (m.exports.size() > kMaxExports)
+            {
+                const size_t total = m.exports.size();
+                m.exports.resize(kMaxExports);
+                m.exports.push_back(yz::Format(L"…（另有 %u 个导出）", static_cast<unsigned>(total - kMaxExports)));
+            }
             if (!m.exports.empty())
                 p.diskModules.push_back(m);
         } while (FindNextFileW(find, &fd));
