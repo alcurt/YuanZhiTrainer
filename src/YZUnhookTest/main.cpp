@@ -36,6 +36,8 @@ namespace
 /* ---------- 输出：同时写控制台与同目录报告文件 ---------- */
 HANDLE g_log     = INVALID_HANDLE_VALUE;
 bool   g_noPause = false;
+bool   g_arm     = false;   /* --arm：先待机，回到窗口按回车再执行 */
+int    g_delay   = 0;       /* --delay N：N 秒后自动执行（键盘被锁时用） */
 
 void Out(const wchar_t* fmt, ...)
 {
@@ -384,15 +386,30 @@ int wmain(int argc, wchar_t** argv)
             installDir = argv[++i];
         else if (arg == L"--apply")
             apply = true;
+        else if (arg == L"--arm")
+        {
+            apply = true;
+            g_arm = true;
+        }
+        else if (arg == L"--delay" && i + 1 < argc)
+        {
+            apply = true;
+            g_delay = _wtoi(argv[++i]);
+            if (g_delay < 0)
+                g_delay = 0;
+        }
         else if ((arg == L"--wait" || arg == L"-w") && i + 1 < argc)
             waitMs = static_cast<DWORD>(_wtoi(argv[++i]));
         else if (arg == L"--no-pause")
             g_noPause = true;
         else if (arg == L"-h" || arg == L"--help")
         {
-            Out(L"用法: YZUnhookTest.exe [--install-dir <远志安装目录>] [--apply] [--wait <毫秒>] [--no-pause]\n");
+            Out(L"用法: YZUnhookTest.exe [--install-dir <远志安装目录>] [--apply] [--arm] [--delay <秒>] [--wait <毫秒>] [--no-pause]\n");
             Out(L"  默认只体检：读文件导出表 + 调用约定自检，不加载、不调用\n");
             Out(L"  --apply 才真正 LoadLibrary 并调用 KillHook / UnSetExdHooks / UnSetExdHooks2\n");
+            Out(L"  --arm      先体检并待机，回到本窗口按回车后立刻执行（“先武装、再去被锁屏/广播”）\n");
+            Out(L"  --delay N  待机 N 秒后自动执行（键盘被锁、敲不了回车时用这个）\n");
+            Out(L"  --wait N   单个导出调用的等待上限毫秒数（默认 3000）\n");
             Out(L"  双击运行时结束会等你按回车；脚本里用 --no-pause 跳过\n");
             return Finish(0);
         }
@@ -465,6 +482,38 @@ int wmain(int argc, wchar_t** argv)
     /* ---------- 2) 实际调用 ---------- */
     Out(L"\n=== 2) 实际调用（--apply）===\n");
     Out(L"注意：这会真的撤销全局钩子（目标就是如此），且不卸载已加载的 DLL。\n\n");
+
+    /* 先武装、后触发：被锁屏/锁键鼠时你自己没法再开程序、也敲不了键，
+       所以这两步必须在还能操作的时候就做。
+       --delay N 到点自动执行（键盘被锁时唯一可行的触发方式）；
+       --arm 则等你回到本窗口按回车。 */
+    if (g_delay > 0)
+    {
+        Out(L"\n%d 秒后自动执行拔钩。现在切到被锁屏/广播的场景，不用再管这个窗口。\n", g_delay);
+        for (int left = g_delay; left > 0; left--)
+        {
+            Out(L"  倒计时 %d 秒…\n", left);
+            Sleep(1000);
+        }
+        Out(L"  时间到，开始执行。\n");
+    }
+    else if (g_arm)
+    {
+        Out(L"\n已就绪。现在切到被锁屏/广播的场景，然后回到本窗口按回车立即执行。\n");
+        HANDLE in = GetStdHandle(STD_INPUT_HANDLE);
+        DWORD  mode = 0;
+        if (in != nullptr && in != INVALID_HANDLE_VALUE && GetConsoleMode(in, &mode))
+        {
+            char buf[8];
+            DWORD got = 0;
+            ReadFile(in, buf, sizeof(buf), &got, nullptr);
+        }
+        else
+        {
+            Out(L"（当前输入不是控制台，无法等待回车，直接执行）\n");
+        }
+        Out(L"  开始执行。\n");
+    }
 
     struct LoadedDll { std::wstring relPath; HMODULE mod; };
     std::vector<LoadedDll> loaded;

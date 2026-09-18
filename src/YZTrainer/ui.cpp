@@ -234,6 +234,17 @@ void Balloon(const wchar_t* title, const wchar_t* text)
     Shell_NotifyIconW(NIM_MODIFY, &nid);
 }
 
+/* 第一次隐藏到托盘时给一条气泡提示（照 JiYuTrainer 的做法），
+   免得用户以为程序被关掉了；只提示一次，反复最小化时不打扰。 */
+void NotifyHiddenToTray()
+{
+    static bool s_notified = false;
+    if (s_notified)
+        return;
+    s_notified = true;
+    Balloon(L"YZTrainer 提示", L"窗口已隐藏到托盘：双击托盘图标显示主界面，右键打开菜单");
+}
+
 void OnCommandWord(HWND hwnd, int id)
 {
     switch (id)
@@ -463,6 +474,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         return 0;
 
     case WM_YZ_TRAY:
+        if (LOWORD(lParam) == WM_LBUTTONDBLCLK)
+        {
+            /* 双击托盘图标 = 显示主界面（与隐藏提示里说的一致） */
+            ShowWindow(hwnd, SW_SHOW);
+            SetForegroundWindow(hwnd);
+            return 0;
+        }
         if (LOWORD(lParam) == WM_RBUTTONUP || LOWORD(lParam) == WM_LBUTTONUP)
             ShowTrayMenu(hwnd);
         return 0;
@@ -506,12 +524,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         if ((wParam & 0xFFF0) == SC_MINIMIZE && g_minimizeToTray)
         {
             ShowWindow(hwnd, SW_HIDE);
+            NotifyHiddenToTray();
             return 0;
         }
         break;
 
     case WM_CLOSE:
         ShowWindow(hwnd, SW_HIDE);
+        NotifyHiddenToTray();
         return 0;
 
     case WM_DESTROY:
