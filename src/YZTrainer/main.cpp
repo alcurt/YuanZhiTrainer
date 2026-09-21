@@ -48,7 +48,7 @@ std::wstring StartupSummary()
     if (!g_app.hookDllError.empty())
         text += yz::Format(L"Hook DLL 释放失败原因: %s\r\n", g_app.hookDllError.c_str());
     text += yz::Format(L"配置: 窗口化=%d 解锁=%d 置顶=%d 防监视=%d 拦遥控=%d 宽度=%u%% "
-                       L"考试守护=%d 外部窗口纠正=%d 注入方式=%d\r\n",
+                       L"考试守护=%d 外部窗口纠正=%d 注入方式=%d 假全屏=%d\r\n",
                        (g_app.cfg.flags & YZ_FLAG_WINDOWIZE) ? 1 : 0,
                        (g_app.cfg.flags & YZ_FLAG_INPUT_UNLOCK) ? 1 : 0,
                        (g_app.cfg.flags & YZ_FLAG_TOPMOST) ? 1 : 0,
@@ -57,7 +57,8 @@ std::wstring StartupSummary()
                        g_app.cfg.windowPercent,
                        g_app.cfg.enableExamGuard ? 1 : 0,
                        g_app.cfg.externalWindowFix ? 1 : 0,
-                       g_app.cfg.injectMethod);
+                       g_app.cfg.injectMethod,
+                       (g_app.cfg.flags & YZ_FLAG_FAKE_FULLSCREEN) ? 1 : 0);
     text += L"提示：本工具不修改远志文件、不卸载驱动；检测到考试强信号时会自动停用全部功能。";
     return text;
 }

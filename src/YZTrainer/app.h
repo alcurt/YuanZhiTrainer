@@ -18,6 +18,7 @@
 #define ID_HOTKEY_UNLOCK    0x7102
 #define ID_HOTKEY_ANTIMON   0x7103
 #define ID_HOTKEY_SHOWUI    0x7104
+#define ID_HOTKEY_FAKEFULL  0x7105
 
 struct AppConfig
 {

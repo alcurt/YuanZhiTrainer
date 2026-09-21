@@ -10,7 +10,7 @@
 #define YZ_PROTOCOL_VERSION 1u
 /* 产品版本（语义化版本）：主程序、探针、免注入验证工具与文件版本资源共用这一处。
    注意与上面的 YZ_PROTOCOL_VERSION（管道/结构体协议版本）区分开。 */
-#define YZ_VERSION_STR L"0.4.0"
+#define YZ_VERSION_STR L"0.5.0"
 #define YZ_PIPE_NAME        L"\\\\.\\pipe\\YZTrainer"
 #define YZ_FRAME_MAGIC      0x31545A59u  /* 'YZT1' */
 #define YZ_MAX_LOG_TEXT     400
@@ -22,6 +22,7 @@
 #define YZ_FLAG_INPUT_UNLOCK 0x00000004u  /* 解除键鼠锁定 */
 #define YZ_FLAG_ANTI_MONITOR 0x00000008u  /* 冻结教师端看到的画面 */
 #define YZ_FLAG_BLOCK_REMOTE 0x00000010u  /* 拦截教师端遥控输入 */
+#define YZ_FLAG_FAKE_FULLSCREEN 0x00000020u /* 假全屏：保持全屏外观，只取消置顶（优先于 WINDOWIZE） */
 
 /* 控制位：不属于"功能开关"，不参与 g_flags 上报，只影响引擎行为 */
 #define YZ_CFG_EXAM_GUARD    0x00010000u  /* 1=启用考试模式强信号熔断，0=完全跳过检测 */
@@ -37,6 +38,7 @@ enum YZ_OPCODE : DWORD
     YZ_CMD_QUERY_STATUS     = 5,
     YZ_CMD_UNLOAD           = 6,
     YZ_CMD_APPLY_CONFIG     = 7,
+    YZ_CMD_SET_FAKE_FULL    = 8,
 
     /* Hook DLL -> 主程序 */
     YZ_EVT_HELLO     = 100,

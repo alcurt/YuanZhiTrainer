@@ -69,6 +69,7 @@
     <ClCompile Include="hooks_window.cpp" />
     <ClCompile Include="hooks_input.cpp" />
     <ClCompile Include="hooks_capture.cpp" />
+    <ClCompile Include="hooks_exec.cpp" />
     <ClCompile Include="native_unhook.cpp" />
     <ClCompile Include="policy.cpp" />
     <ClCompile Include="signature_check.cpp" />

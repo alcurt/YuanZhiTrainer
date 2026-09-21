@@ -9,6 +9,8 @@
 //   * 尝试 RegisterHotKey(Ctrl+Alt+F9) 抢占热键
 //   * 每 500ms 用 BitBlt 抓一帧全屏并记录哈希到 sim_capture.csv（用于验证防监视冻结）
 //   * --exam 参数额外创建一个标题含“考试”的窗口，用于验证考试模式自动停用
+//   * --exec 参数在启动 4 秒后拉起一个子进程（cmd.exe /c echo …），
+//     用于验证“教师端远程执行审计”能在学生进程里记录到 CreateProcess
 //
 #include <windows.h>
 #include <stdio.h>
@@ -24,6 +26,7 @@ HWND  g_exam = nullptr;
 HHOOK g_keyHook = nullptr;
 int   g_frame = 0;
 bool  g_examRequested = false;
+bool  g_execRequested = false;
 HBITMAP g_captureBmp = nullptr;
 void*   g_captureBits = nullptr;
 int     g_captureW = 0;
@@ -179,6 +182,35 @@ void MakeFullscreen()
     ClipCursor(nullptr);
 }
 
+/* 模拟"教师端远程执行命令"：在学生进程里跑一次 CreateProcess，
+   审计 hook 应该把它记进 remote-exec.log（origin=remote） */
+void SpawnChildOnce()
+{
+    wchar_t sysDir[MAX_PATH] = {0};
+    if (GetSystemDirectoryW(sysDir, MAX_PATH) == 0)
+        return;
+
+    const std::wstring exe = yz::JoinPath(sysDir, L"cmd.exe");
+    std::wstring cmdLine = L"cmd.exe /c echo yztrainer-audit";
+
+    STARTUPINFOW si;
+    ZeroMemory(&si, sizeof(si));
+    si.cb = sizeof(si);
+    PROCESS_INFORMATION pi;
+    ZeroMemory(&pi, sizeof(pi));
+
+    const BOOL ok = CreateProcessW(exe.c_str(), &cmdLine[0], nullptr, nullptr, FALSE,
+                                   CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi);
+    AppendFile(yz::JoinPath(g_exeDir, L"sim_log.txt"),
+               yz::Format(L"exec-child tick=%u ok=%d pid=%u exe=%s",
+                          GetTickCount(), ok ? 1 : 0, ok ? pi.dwProcessId : 0, exe.c_str()));
+    if (ok)
+    {
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+    }
+}
+
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
     switch (msg)
@@ -201,6 +233,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         else if (wParam == 4)
         {
             DumpState(L"timer-state");
+        }
+        else if (wParam == 5)
+        {
+            KillTimer(hwnd, 5);
+            SpawnChildOnce();
         }
         return 0;
 
@@ -249,6 +286,7 @@ int WINAPI wWinMain(HINSTANCE hinst, HINSTANCE, LPWSTR cmdLine, int)
 {
     g_exeDir = yz::GetExeDir();
     g_examRequested = (cmdLine != nullptr) && (wcsstr(cmdLine, L"--exam") != nullptr);
+    g_execRequested = (cmdLine != nullptr) && (wcsstr(cmdLine, L"--exec") != nullptr);
 
     WNDCLASSEXW wc;
     ZeroMemory(&wc, sizeof(wc));
@@ -275,6 +313,8 @@ int WINAPI wWinMain(HINSTANCE hinst, HINSTANCE, LPWSTR cmdLine, int)
     SetTimer(g_main, 2, 3000, nullptr);   /* 定期抢回全屏 */
     SetTimer(g_main, 3, 500, nullptr);    /* 抓帧 */
     SetTimer(g_main, 4, 1000, nullptr);   /* 状态落盘 */
+    if (g_execRequested)
+        SetTimer(g_main, 5, 4000, nullptr);   /* 一次性：模拟教师端远程执行 */
 
     g_keyHook = SetWindowsHookExW(WH_KEYBOARD_LL, KeyHookProc, nullptr, 0);
     ClipCursor(nullptr);

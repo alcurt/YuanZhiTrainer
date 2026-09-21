@@ -15,6 +15,14 @@
       6. 外部纠正后的窗口样式包含 WS_CAPTION
       7. 日志里能看到“外部窗口纠正”记录（找不到只记 WARN，不影响结论）
 
+    阶段三（假全屏，Flags=4|32）断言 2 条：
+      8. 广播窗口仍铺满整屏（fullscreen=1）且没有标题栏
+      9. 广播窗口已不置顶（topmost=0）——这是"能切到自己的窗口"的前提
+
+    阶段四（远程执行审计，YZSimTarget --exec）断言 2 条：
+     10. remote-exec.log 里出现 CreateProcessW 记录
+     11. 该记录被标为 origin=remote（不是客户端自己拉起的辅助进程）
+
     运行前请关闭其它 YZTrainer 实例（含改名副本）：主程序用全局互斥体防重入，
     别的实例在跑时本脚本启动的那份会静默退出，测试结果会变成假失败。
 
@@ -181,6 +189,116 @@ finally {
     if ($sim2Proc -and -not $sim2Proc.HasExited) { Stop-Process -Id $sim2Proc.Id -Force -ErrorAction SilentlyContinue }
     Start-Sleep -Milliseconds 500
     if ($app2Proc -and -not $app2Proc.HasExited) { Stop-Process -Id $app2Proc.Id -Force -ErrorAction SilentlyContinue }
+}
+
+# ---------------------------------------------------------------------------
+# 阶段三：假全屏（窗口化关、假全屏开）
+# 期望：窗口仍铺满整屏、没有标题栏，但已不置顶——这样 Alt+Tab 切过去的窗口能盖在广播上。
+# 模拟目标每 3 秒抢回全屏并重新置顶，所以同样要轮询等待。
+# ---------------------------------------------------------------------------
+Write-Host ''
+Write-Host '==== 阶段三：假全屏 ===='
+
+foreach ($f in @($stateFile, $capFile)) {
+    if (Test-Path $f) { Move-Item -LiteralPath $f -Destination "$f.bak3-$stamp" -Force }
+}
+
+$phase3Ini = @(
+    '[General]',
+    'Flags=36',
+    'WindowPercent=60',
+    'LogLevel=3',
+    'AutoInject=1',
+    'InjectMethod=0',
+    'EnableExamGuard=1',
+    'ExternalWindowFix=0',
+    'ProcessNames=Yistart.exe;TEACHCMD.exe;PlayerGUI.exe;ExdPaintHelper.exe;YZSimTarget.exe'
+)
+Set-Content -LiteralPath $iniFile -Value $phase3Ini -Encoding utf8
+
+$sim3Proc = $null
+$app3Proc = $null
+
+try {
+    $sim3Proc = Start-Process -FilePath $sim -PassThru
+    Start-Sleep -Seconds 3
+    $app3Proc = Start-Process -FilePath $trainer -PassThru
+
+    $fakeOk = $false
+    $state3 = ''
+    for ($i = 0; $i -lt 20; $i++) {
+        Start-Sleep -Milliseconds 700
+        $state3 = Get-Content -LiteralPath $stateFile -ErrorAction SilentlyContinue
+        if ($state3 -match 'fullscreen=1' -and $state3 -match 'topmost=0') { $fakeOk = $true; break }
+    }
+    Write-Host "假全屏状态: $state3"
+
+    if ($fakeOk) { $result.Add('PASS  假全屏：窗口仍全屏且已取消置顶') }
+    else { $result.Add('FAIL  假全屏未生效（窗口仍置顶或不再全屏）') }
+
+    if ($state3 -match 'style=0x([0-9A-Fa-f]{8})') {
+        $style3 = [Convert]::ToUInt32($Matches[1], 16)
+        if (($style3 -band 0x00C00000) -ne 0x00C00000) { $result.Add('PASS  假全屏下没有加标题栏（外观仍是全屏广播）') }
+        else { $result.Add('FAIL  假全屏下被加了标题栏') }
+    }
+}
+finally {
+    if ($sim3Proc -and -not $sim3Proc.HasExited) { Stop-Process -Id $sim3Proc.Id -Force -ErrorAction SilentlyContinue }
+    Start-Sleep -Milliseconds 500
+    if ($app3Proc -and -not $app3Proc.HasExited) { Stop-Process -Id $app3Proc.Id -Force -ErrorAction SilentlyContinue }
+}
+
+# ---------------------------------------------------------------------------
+# 阶段四：教师端远程执行审计（YZSimTarget --exec 模拟教师端下发的 CreateProcess）
+# ---------------------------------------------------------------------------
+Write-Host ''
+Write-Host '==== 阶段四：远程执行审计 ===='
+
+$auditFile = Join-Path (Join-Path $env:TEMP 'YZTrainer') 'remote-exec.log'
+if (Test-Path $auditFile) { Move-Item -LiteralPath $auditFile -Destination "$auditFile.bak4-$stamp" -Force }
+
+$phase4Ini = @(
+    '[General]',
+    'Flags=5',
+    'WindowPercent=60',
+    'LogLevel=3',
+    'AutoInject=1',
+    'InjectMethod=0',
+    'EnableExamGuard=1',
+    'ExternalWindowFix=0',
+    'ProcessNames=Yistart.exe;TEACHCMD.exe;PlayerGUI.exe;ExdPaintHelper.exe;YZSimTarget.exe'
+)
+Set-Content -LiteralPath $iniFile -Value $phase4Ini -Encoding utf8
+
+$sim4Proc = $null
+$app4Proc = $null
+
+try {
+    $sim4Proc = Start-Process -FilePath $sim -ArgumentList '--exec' -PassThru
+    Start-Sleep -Seconds 2
+    $app4Proc = Start-Process -FilePath $trainer -PassThru
+    Start-Sleep -Seconds 12
+
+    $auditLines = if (Test-Path $auditFile) { Get-Content -LiteralPath $auditFile } else { @() }
+    Write-Host ("审计文件行数: " + @($auditLines).Count)
+    if (@($auditLines).Count -gt 0) { Write-Host ("最后一行: " + ($auditLines | Select-Object -Last 1)) }
+
+    if (@($auditLines | Where-Object { $_ -match 'kind=CreateProcessW' }).Count -gt 0) {
+        $result.Add('PASS  远程执行审计记录了 CreateProcessW')
+    } else {
+        $result.Add('FAIL  remote-exec.log 里没有 CreateProcessW 记录')
+    }
+
+    if (@($auditLines | Where-Object { $_ -match 'kind=CreateProcessW.*origin=remote' }).Count -gt 0) {
+        $result.Add('PASS  审计把外部进程标为 origin=remote')
+    } else {
+        $result.Add('FAIL  审计记录里没有 origin=remote 的条目')
+    }
+}
+finally {
+    if ($sim4Proc -and -not $sim4Proc.HasExited) { Stop-Process -Id $sim4Proc.Id -Force -ErrorAction SilentlyContinue }
+    Start-Sleep -Milliseconds 500
+    if ($app4Proc -and -not $app4Proc.HasExited) { Stop-Process -Id $app4Proc.Id -Force -ErrorAction SilentlyContinue }
 }
 
 Write-Host ''

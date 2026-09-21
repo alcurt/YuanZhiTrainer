@@ -183,6 +183,9 @@ void ExportDiagnostics(HWND owner)
     CopyIfExists(yz::LogFilePath(), dir);
     CopyIfExists(yz::JoinPath(yz::LogDir(), L"yzt-1.log"), dir);
     CopyIfExists(yz::JoinPath(yz::LogDir(), L"yzt-2.log"), dir);
+    /* 远程执行审计（每份都带，避免回来看不到教师端下发的动作） */
+    CopyIfExists(yz::JoinPath(yz::LogDir(), L"remote-exec.log"), dir);
+    CopyIfExists(yz::JoinPath(yz::LogDir(), L"remote-exec-1.log"), dir);
 
     /* 上次探针报告 */
     WIN32_FIND_DATAW fd;
@@ -201,6 +204,7 @@ void ExportDiagnostics(HWND owner)
     snapshot += L"YZTrainer 诊断快照\r\n生成时间: " + yz::NowStampEx() + L"\r\n\r\n";
     snapshot += yz::Format(L"== 配置 ==\r\nFlags=0x%08X WindowPercent=%u AutoInject=%d EnableExamGuard=%d "
                            L"InjectMethod=%d ExternalWindowFix=%d\r\n"
+                           L"假全屏=%d（优先于窗口化）\r\n"
                            L"TargetDir=%s\r\nHookDll=%s\r\n"
                            L"HookDllSource=%s 内嵌资源=%u 字节\r\nExeDir=%s\r\n\r\n",
                            g_app.cfg.flags, g_app.cfg.windowPercent,
@@ -208,6 +212,7 @@ void ExportDiagnostics(HWND owner)
                            g_app.cfg.enableExamGuard ? 1 : 0,
                            g_app.cfg.injectMethod,
                            g_app.cfg.externalWindowFix ? 1 : 0,
+                           (g_app.cfg.flags & YZ_FLAG_FAKE_FULLSCREEN) ? 1 : 0,
                            g_app.cfg.targetDir.c_str(),
                            ResolveHookDllPath().c_str(),
                            g_app.hookDllSource.c_str(), PayloadEmbeddedSize(),

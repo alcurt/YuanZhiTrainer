@@ -58,6 +58,33 @@ bool FullscreenCoversMonitor(const RECT& rc, const RECT& mon)
            rc.right >= mon.right - tol && rc.bottom >= mon.bottom - tol;
 }
 
+/* 两种模式互斥，假全屏优先（只去置顶、保留全屏外观） */
+bool FakeFullscreenMode() { return (g_app.cfg.flags & YZ_FLAG_FAKE_FULLSCREEN) != 0; }
+bool AnyWindowMode()      { return FakeFullscreenMode() || ((g_app.cfg.flags & YZ_FLAG_WINDOWIZE) != 0); }
+
+bool IsTracked(HWND hwnd)
+{
+    bool found = false;
+    Lock();
+    found = g_lastFix.find(hwnd) != g_lastFix.end();
+    Unlock();
+    return found;
+}
+
+/* 已经处于假全屏稳态：无边框 + 铺满 + 不置顶 */
+bool FakeFullscreenDone(HWND hwnd)
+{
+    if (!IsTracked(hwnd))
+        return false;
+    const LONG style = GetWindowLongW(hwnd, GWL_STYLE);
+    const LONG ex    = GetWindowLongW(hwnd, GWL_EXSTYLE);
+    if ((style & WS_CAPTION) == WS_CAPTION)
+        return false;
+    if ((style & WS_POPUP) == 0)
+        return false;
+    return (ex & WS_EX_TOPMOST) == 0;
+}
+
 bool NameInList(const std::wstring& name)
 {
     if (name.empty())
@@ -218,6 +245,58 @@ void ApplyWindowize(HWND hwnd, const RECT& mon)
                                              hwnd, x, y, w, h, total));
 }
 
+/* 假全屏（跨进程）：只把窗口从最上层拿下来，尺寸与无边框外观保持"全屏广播"的样子。
+   注意置顶开关在假全屏下不生效——这个模式的全部意义就是"不置顶"。 */
+void ApplyFakeFullscreen(HWND hwnd, const RECT& mon)
+{
+    const int monW = mon.right - mon.left;
+    const int monH = mon.bottom - mon.top;
+    if (monW <= 0 || monH <= 0)
+        return;
+
+    const LONG_PTR style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+    const LONG_PTR ex    = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+
+    const LONG_PTR newStyle = (style & ~(WS_DISABLED | WS_MAXIMIZE)) | WS_VISIBLE;
+    const LONG_PTR newEx    = ex & ~WS_EX_TOPMOST;
+
+    bool ok = true;
+    if (newStyle != style)
+        ok = SetWindowLongChecked(hwnd, GWL_STYLE, newStyle, L"写样式(假全屏)") && ok;
+    if (newEx != ex)
+        ok = SetWindowLongChecked(hwnd, GWL_EXSTYLE, newEx, L"写扩展样式(假全屏)") && ok;
+
+    SetLastError(0);
+    if (!SetWindowPos(hwnd, HWND_NOTOPMOST, mon.left, mon.top, monW, monH,
+                      SWP_NOACTIVATE | SWP_FRAMECHANGED | SWP_SHOWWINDOW | SWP_ASYNCWINDOWPOS))
+    {
+        const DWORD err = GetLastError();
+        if (err != 0)
+        {
+            LogWriteFailure(L"定位(假全屏)", hwnd, err);
+            ok = false;
+        }
+    }
+    if (!ok)
+        return;
+
+    const LONG total = InterlockedIncrement(&g_corrections);
+    YZLOGI(L"外部窗口纠正(假全屏): 0x%p 保持 %dx%d 全屏、已取消置顶（第 %d 次）",
+           hwnd, monW, monH, total);
+    if (total <= 5 || (total % 20) == 0)
+        UiAppendLog(yz::kLogInfo,
+            yz::Format(L"外部窗口纠正(假全屏): 0x%p 保持 %dx%d 全屏、已取消置顶（第 %d 次）",
+                       hwnd, monW, monH, total));
+}
+
+void ApplyMode(HWND hwnd, const RECT& mon)
+{
+    if (FakeFullscreenMode())
+        ApplyFakeFullscreen(hwnd, mon);
+    else
+        ApplyWindowize(hwnd, mon);
+}
+
 struct ScanContext
 {
     DWORD now;
@@ -246,6 +325,10 @@ BOOL CALLBACK EnumProc(HWND hwnd, LPARAM lParam)
 
     ctx->candidates++;
 
+    /* 假全屏的稳态窗口仍然是"无边框全屏"，别每秒重复改一遍 */
+    if (FakeFullscreenMode() && FakeFullscreenDone(hwnd))
+        return TRUE;
+
     Lock();
     std::map<HWND, DWORD>::iterator it = g_lastFix.find(hwnd);
     const DWORD last = (it != g_lastFix.end()) ? it->second : 0;
@@ -254,7 +337,7 @@ BOOL CALLBACK EnumProc(HWND hwnd, LPARAM lParam)
     if (last != 0 && (ctx->now - last) < kRecorrectMs)
         return TRUE;
 
-    ApplyWindowize(hwnd, mon);
+    ApplyMode(hwnd, mon);
 
     Lock();
     g_lastFix[hwnd] = ctx->now;
@@ -275,7 +358,7 @@ void WinFixTick()
 
     if (g_app.examMode)
         return;
-    if ((g_app.cfg.flags & YZ_FLAG_WINDOWIZE) == 0)
+    if (!AnyWindowMode())
         return;
 
     EnterCriticalSection(&g_cs);

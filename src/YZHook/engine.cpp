@@ -3,6 +3,7 @@
 #include "exam.h"
 #include "hookmgr.h"
 #include "hooks_capture.h"
+#include "hooks_exec.h"
 #include "hooks_input.h"
 #include "hooks_window.h"
 #include "native_unhook.h"
@@ -320,6 +321,10 @@ void HandleCommand(DWORD opcode, const std::vector<BYTE>& payload)
         yzhook::EngineSetFlag(YZ_FLAG_BLOCK_REMOTE, hasValue ? (value != 0) : true);
         break;
 
+    case YZ_CMD_SET_FAKE_FULL:
+        yzhook::EngineSetFlag(YZ_FLAG_FAKE_FULLSCREEN, hasValue ? (value != 0) : true);
+        break;
+
     case YZ_CMD_QUERY_STATUS:
         yzhook::SendStatusToHost(YZ_EVT_STATUS);
         break;
@@ -402,6 +407,7 @@ void EngineThreadProc()
     yzhook::WindowHooksInstall(true);
     yzhook::InputHooksInstall(true);
     yzhook::CaptureHooksInstall(true);
+    yzhook::ExecHooksInstall(true);
     yzhook::PolicyBackup();
     g_hooksReady = true;
 
@@ -436,6 +442,7 @@ void EngineThreadProc()
 
     YZLOGI(L"引擎线程退出，开始还原");
     yzhook::CaptureUnfreeze();
+    yzhook::ExecHooksShutdown();
     yzhook::PolicyRestore();
     if (g_hooksReady)
     {

@@ -30,6 +30,7 @@ const int IDC_BTN_LOG        = 2012;
 const int IDC_BTN_ABOUT      = 2013;
 const int IDC_EDIT_LOG       = 2014;
 const int IDC_CHK_EXAMGUARD  = 2015;
+const int IDC_CHK_FAKEFULL   = 2016;
 
 const UINT WM_YZ_TRAY        = WM_APP + 10;
 const int  IDM_TRAY_SHOW     = 3001;
@@ -38,6 +39,7 @@ const int  IDM_TRAY_WINDOWIZE = 3003;
 const int  IDM_TRAY_UNLOCK   = 3004;
 const int  IDM_TRAY_ANTIMON  = 3005;
 const int  IDM_TRAY_INJECT   = 3006;
+const int  IDM_TRAY_FAKEFULL = 3007;
 
 const wchar_t* const kWindowClass = L"YZTrainerMainWnd";
 const wchar_t* const kAppTitle    = L"YZTrainer - 远志学生端解控工具";
@@ -47,9 +49,9 @@ const DWORD kMainStyle = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBO
 
 /* 布局在 96 DPI 下需要的客户区：
    宽 = 12 + 520 + 12
-   高 = 12 + 6*26(六行复选框) + 36(百分比行) + 100(状态) + 10 + 26(按钮行) + 8 + 180(日志) + 12 */
+   高 = 12 + 7*26(七行复选框) + 36(百分比行) + 100(状态) + 10 + 26(按钮行) + 8 + 180(日志) + 12 */
 const int kClientBaseW = 544;
-const int kClientBaseH = 540;
+const int kClientBaseH = 566;
 
 /* 由客户区需求反算窗口外框尺寸。外框尺寸写死会在改布局时漏改
    （曾出现 WM_DPICHANGED 仍用旧尺寸、把日志框底部裁掉），这里统一算。 */
@@ -151,6 +153,7 @@ void SyncControls()
     CheckDlgButton(g_app.hwndMain, IDC_CHK_ANTIMON,     (g_app.cfg.flags & YZ_FLAG_ANTI_MONITOR) ? BST_CHECKED : BST_UNCHECKED);
     CheckDlgButton(g_app.hwndMain, IDC_CHK_BLOCKREMOTE, (g_app.cfg.flags & YZ_FLAG_BLOCK_REMOTE) ? BST_CHECKED : BST_UNCHECKED);
     CheckDlgButton(g_app.hwndMain, IDC_CHK_EXAMGUARD,   g_app.cfg.enableExamGuard ? BST_CHECKED : BST_UNCHECKED);
+    CheckDlgButton(g_app.hwndMain, IDC_CHK_FAKEFULL,    (g_app.cfg.flags & YZ_FLAG_FAKE_FULLSCREEN) ? BST_CHECKED : BST_UNCHECKED);
     SetDlgItemTextW(g_app.hwndMain, IDC_EDIT_PERCENT, yz::Format(L"%u", g_app.cfg.windowPercent).c_str());
 }
 
@@ -197,6 +200,7 @@ void ShowTrayMenu(HWND hwnd)
     AppendMenuW(menu, MF_STRING | (CmdGetFlag(YZ_FLAG_WINDOWIZE) ? MF_CHECKED : 0), IDM_TRAY_WINDOWIZE, L"广播窗口化");
     AppendMenuW(menu, MF_STRING | (CmdGetFlag(YZ_FLAG_INPUT_UNLOCK) ? MF_CHECKED : 0), IDM_TRAY_UNLOCK, L"解除键鼠锁定");
     AppendMenuW(menu, MF_STRING | (CmdGetFlag(YZ_FLAG_ANTI_MONITOR) ? MF_CHECKED : 0), IDM_TRAY_ANTIMON, L"防监视（冻结画面）");
+    AppendMenuW(menu, MF_STRING | (CmdGetFlag(YZ_FLAG_FAKE_FULLSCREEN) ? MF_CHECKED : 0), IDM_TRAY_FAKEFULL, L"假全屏（保持全屏外观，仅取消置顶）");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, IDM_TRAY_INJECT, L"立即注入");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
@@ -287,6 +291,9 @@ void OnCommandWord(HWND hwnd, int id)
                         : L"考试模式守护已关闭（跳过考试检测）");
         }
         break;
+    case IDC_CHK_FAKEFULL:
+        CmdSetFlag(YZ_FLAG_FAKE_FULLSCREEN, IsDlgButtonChecked(hwnd, IDC_CHK_FAKEFULL) == BST_CHECKED);
+        break;
     case IDC_BTN_APPLY:
         {
             wchar_t buf[32] = {0};
@@ -345,12 +352,14 @@ void CreateChildren(HWND hwnd, HINSTANCE hinst)
         L"广播窗口保持置顶",
         L"防监视（冻结教师端看到的画面，默认关闭）",
         L"拦截教师端遥控输入（默认关闭，会影响老师远程协助）",
-        L"考试模式守护（仅强信号熔断，默认开启）"
+        L"考试模式守护（仅强信号熔断，默认开启）",
+        L"假全屏（广播仍铺满全屏但不置顶，默认关闭；优先于窗口化）"
     };
     const int ids[] = { IDC_CHK_WINDOWIZE, IDC_CHK_UNLOCK, IDC_CHK_TOPMOST,
-                        IDC_CHK_ANTIMON, IDC_CHK_BLOCKREMOTE, IDC_CHK_EXAMGUARD };
+                        IDC_CHK_ANTIMON, IDC_CHK_BLOCKREMOTE, IDC_CHK_EXAMGUARD,
+                        IDC_CHK_FAKEFULL };
 
-    for (int i = 0; i < 6; i++)
+    for (int i = 0; i < 7; i++)
     {
         HWND chk = CreateWindowExW(0, L"Button", items[i],
                                    WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
@@ -474,7 +483,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     case WM_COMMAND:
         {
             int id = LOWORD(wParam);
-            if (id >= IDM_TRAY_SHOW && id <= IDM_TRAY_INJECT)
+            if (id >= IDM_TRAY_SHOW && id <= IDM_TRAY_FAKEFULL)
                 return TrayMenuCommand(id);
             if (HIWORD(wParam) == BN_CLICKED || HIWORD(wParam) == EN_CHANGE)
                 OnCommandWord(hwnd, id);
@@ -519,6 +528,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         case ID_HOTKEY_WINDOWIZE: CmdToggleFlag(YZ_FLAG_WINDOWIZE); break;
         case ID_HOTKEY_UNLOCK:    CmdToggleFlag(YZ_FLAG_INPUT_UNLOCK); break;
         case ID_HOTKEY_ANTIMON:   CmdToggleFlag(YZ_FLAG_ANTI_MONITOR); break;
+        case ID_HOTKEY_FAKEFULL:  CmdToggleFlag(YZ_FLAG_FAKE_FULLSCREEN); break;
         case ID_HOTKEY_SHOWUI:
             ShowWindow(hwnd, SW_SHOW);
             SetForegroundWindow(hwnd);
@@ -573,6 +583,7 @@ int TrayMenuCommand(int id)
     case IDM_TRAY_WINDOWIZE: CmdToggleFlag(YZ_FLAG_WINDOWIZE); break;
     case IDM_TRAY_UNLOCK:    CmdToggleFlag(YZ_FLAG_INPUT_UNLOCK); break;
     case IDM_TRAY_ANTIMON:   CmdToggleFlag(YZ_FLAG_ANTI_MONITOR); break;
+    case IDM_TRAY_FAKEFULL:  CmdToggleFlag(YZ_FLAG_FAKE_FULLSCREEN); break;
     case IDM_TRAY_INJECT:    CmdInjectNow(); break;
     default:
         break;
@@ -631,6 +642,7 @@ HWND UiInit(HINSTANCE hinst)
     RegisterHotKey(hwnd, ID_HOTKEY_UNLOCK,    MOD_CONTROL | MOD_ALT, VK_F10);
     RegisterHotKey(hwnd, ID_HOTKEY_ANTIMON,   MOD_CONTROL | MOD_ALT, VK_F11);
     RegisterHotKey(hwnd, ID_HOTKEY_SHOWUI,    MOD_CONTROL | MOD_ALT, VK_F12);
+    RegisterHotKey(hwnd, ID_HOTKEY_FAKEFULL,  MOD_CONTROL | MOD_ALT, VK_F8);
 
     ShowWindow(hwnd, SW_SHOW);
     UpdateWindow(hwnd);
@@ -645,6 +657,7 @@ void UiShutdown()
         UnregisterHotKey(g_app.hwndMain, ID_HOTKEY_UNLOCK);
         UnregisterHotKey(g_app.hwndMain, ID_HOTKEY_ANTIMON);
         UnregisterHotKey(g_app.hwndMain, ID_HOTKEY_SHOWUI);
+        UnregisterHotKey(g_app.hwndMain, ID_HOTKEY_FAKEFULL);
     }
     RemoveTrayIcon();
 }
@@ -755,7 +768,10 @@ void CmdShowAbout()
                 L"检测到考试强信号（独立考试进程 ExamDlg.exe、考试对话框组件或"
                 L"可见考试窗口）时全部功能自动停用；Exam.ads / ClassQuiz.ads 属于"
                 L"学生端启动就绪模块，只会记日志、不再触发熔断。\n\n"
-                L"热键：Ctrl+Alt+F9 广播窗口化 / F10 键鼠解锁 / F11 防监视 / F12 显示界面",
+                L"热键：Ctrl+Alt+F8 假全屏（广播铺满但不置顶，可切到自己的窗口）/ "
+                L"F9 窗口化 / F10 键鼠解锁 / F11 防监视 / F12 显示界面。\n\n"
+                L"教师端远程执行审计：记录 CreateProcess/WinExec/ShellExecuteEx/ExitWindowsEx，"
+                L"只写日志、不拦截，审计文件为日志目录下的 remote-exec.log。",
                 L"关于 YZTrainer", MB_OK | MB_ICONINFORMATION);
 }
 

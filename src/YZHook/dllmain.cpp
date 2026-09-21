@@ -91,6 +91,7 @@ extern "C" __declspec(dllexport) BOOL WINAPI YZ_ApplyCmd(DWORD opcode, DWORD val
     case YZ_CMD_SET_INPUT_UNLOCK: yzhook::EngineSetFlag(YZ_FLAG_INPUT_UNLOCK, value != 0); return TRUE;
     case YZ_CMD_SET_ANTI_MONITOR: yzhook::EngineSetFlag(YZ_FLAG_ANTI_MONITOR, value != 0); return TRUE;
     case YZ_CMD_SET_BLOCK_REMOTE: yzhook::EngineSetFlag(YZ_FLAG_BLOCK_REMOTE, value != 0); return TRUE;
+    case YZ_CMD_SET_FAKE_FULL:    yzhook::EngineSetFlag(YZ_FLAG_FAKE_FULLSCREEN, value != 0); return TRUE;
     default:
         return FALSE;
     }

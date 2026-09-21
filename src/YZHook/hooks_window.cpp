@@ -32,6 +32,11 @@ bool                 g_topmost = false;
 bool                 g_hooksReady = false;
 DWORD                g_windowizeCount = 0;
 
+/* 两种模式互斥：假全屏只去掉置顶、保留全屏外观，优先于"窗口化" */
+bool FakeFullscreenMode() { return (yzhook::g_flags & YZ_FLAG_FAKE_FULLSCREEN) != 0; }
+bool WindowizeMode()      { return (yzhook::g_flags & YZ_FLAG_WINDOWIZE) != 0; }
+bool AnyWindowMode()      { return FakeFullscreenMode() || WindowizeMode(); }
+
 const wchar_t* const kSkipClasses[] =
 {
     L"Progman", L"WorkerW", L"Shell_TrayWnd", L"Shell_SecondaryTrayWnd",
@@ -178,6 +183,84 @@ void ApplyWindowize(HWND hwnd, const RECT& mon)
                        hwnd, x, y, w, h, g_topmost ? 1 : 0).c_str());
 }
 
+/* 假全屏：保持"无边框铺满整块显示器"的外观，只把窗口从最上层拿下来。
+   教师端看到的画面布局与正常全屏广播一样，但你 Alt+Tab 切过去的窗口能盖在它上面，
+   配合键鼠解锁就能操作自己的电脑了。注意它不隐藏内容——教师端若在抓屏，
+   看到的仍是你真实屏幕，要遮内容得靠防监视（冻结帧）。 */
+void ApplyFakeFullscreen(HWND hwnd, const RECT& mon)
+{
+    const int monW = mon.right - mon.left;
+    const int monH = mon.bottom - mon.top;
+    if (monW <= 0 || monH <= 0)
+        return;
+
+    yzhook::TryEnterHook();
+
+    const LONG style = GetWindowLongW(hwnd, GWL_STYLE);
+    const LONG ex    = GetWindowLongW(hwnd, GWL_EXSTYLE);
+
+    /* 不加 WS_CAPTION：外观上仍是全屏广播；只清掉禁用态与置顶 */
+    const LONG newStyle = (style & ~(WS_DISABLED | WS_MAXIMIZE)) | WS_VISIBLE;
+    LONG newEx = ex & ~WS_EX_TOPMOST;
+    if (g_topmost)
+        newEx |= WS_EX_TOPMOST;
+
+    if (newStyle != style)
+        SetWindowLongW(hwnd, GWL_STYLE, newStyle);
+    if (newEx != ex)
+        SetWindowLongW(hwnd, GWL_EXSTYLE, newEx);
+
+    SetWindowPos(hwnd, g_topmost ? HWND_TOPMOST : HWND_NOTOPMOST,
+                 mon.left, mon.top, monW, monH,
+                 SWP_NOACTIVATE | SWP_FRAMECHANGED | SWP_SHOWWINDOW);
+
+    yzhook::LeaveHook();
+
+    MarkTracked(hwnd);
+    g_windowizeCount++;
+    InterlockedIncrement(&yzhook::g_windowizeCount);
+
+    yzhook::SendLogToHost(YZ_LOG_INFO,
+        yz::Format(L"广播窗口假全屏: 0x%p 保持 %dx%d 全屏、已取消置顶（置顶开关=%d）",
+                   hwnd, monW, monH, g_topmost ? 1 : 0).c_str());
+}
+
+/* 已经处在"假全屏"稳态就不要再重复改样式（否则每秒都白改一次） */
+bool FakeFullscreenDone(HWND hwnd)
+{
+    if (!IsTracked(hwnd))
+        return false;
+    const LONG style = GetWindowLongW(hwnd, GWL_STYLE);
+    const LONG ex    = GetWindowLongW(hwnd, GWL_EXSTYLE);
+    if ((style & WS_CAPTION) == WS_CAPTION)
+        return false;
+    if ((style & WS_POPUP) == 0)
+        return false;
+    return (ex & WS_EX_TOPMOST) == 0;
+}
+
+/* 跟踪中的窗口又要求铺满整块显示器（远志每 3 秒抢一次全屏） */
+void ReapplyForMode(HWND hwnd)
+{
+    MONITORINFO mi;
+    mi.cbSize = sizeof(mi);
+    if (!GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mi))
+        return;
+    if (FakeFullscreenMode())
+        ApplyFakeFullscreen(hwnd, mi.rcMonitor);
+    else
+        ApplyWindowize(hwnd, mi.rcMonitor);
+}
+
+/* 按当前模式处理一个候选窗口 */
+void ApplyMode(HWND hwnd, const RECT& mon)
+{
+    if (FakeFullscreenMode())
+        ApplyFakeFullscreen(hwnd, mon);
+    else
+        ApplyWindowize(hwnd, mon);
+}
+
 /* 该请求是否要把已窗口化的窗口重新变成全屏 */
 bool IsRefullscreenRequest(HWND hwnd, int cx, int cy, UINT flags)
 {
@@ -206,24 +289,30 @@ BOOL WINAPI Hook_SetWindowPos(HWND hwnd, HWND after, int x, int y, int cx, int c
 
     BOOL result = FALSE;
     RECT mon;
-    if ((yzhook::g_flags & YZ_FLAG_WINDOWIZE) && IsCandidateWindow(hwnd, &mon))
+    if (AnyWindowMode() && IsCandidateWindow(hwnd, &mon))
     {
-        ApplyWindowize(hwnd, mon);
-        result = TRUE;
+        if (FakeFullscreenMode() && FakeFullscreenDone(hwnd))
+        {
+            /* 已达假全屏稳态：几何照它说的改，但把"重新置顶"的意图压掉 */
+            result = g_realSetWindowPos(hwnd, HWND_NOTOPMOST, x, y, cx, cy, flags & ~SWP_NOZORDER);
+        }
+        else
+        {
+            ApplyMode(hwnd, mon);
+            result = TRUE;
+        }
     }
-    else if ((yzhook::g_flags & YZ_FLAG_WINDOWIZE) && IsTracked(hwnd) && IsRefullscreenRequest(hwnd, cx, cy, flags))
+    else if (AnyWindowMode() && IsTracked(hwnd) && IsRefullscreenRequest(hwnd, cx, cy, flags))
     {
-        MONITORINFO mi;
-        mi.cbSize = sizeof(mi);
-        if (GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mi))
-            ApplyWindowize(hwnd, mi.rcMonitor);
+        ReapplyForMode(hwnd);
         result = TRUE;
     }
     else
     {
         result = g_realSetWindowPos(hwnd, after, x, y, cx, cy, flags);
-        if (result && (yzhook::g_flags & YZ_FLAG_WINDOWIZE) && IsCandidateWindow(hwnd, &mon))
-            ApplyWindowize(hwnd, mon);
+        if (result && AnyWindowMode() && IsCandidateWindow(hwnd, &mon) &&
+            !(FakeFullscreenMode() && FakeFullscreenDone(hwnd)))
+            ApplyMode(hwnd, mon);
     }
 
     yzhook::LeaveHook();
@@ -237,19 +326,17 @@ BOOL WINAPI Hook_MoveWindow(HWND hwnd, int x, int y, int cx, int cy, BOOL repain
 
     BOOL result = FALSE;
     RECT mon;
-    if ((yzhook::g_flags & YZ_FLAG_WINDOWIZE) && IsTracked(hwnd) && IsRefullscreenRequest(hwnd, cx, cy, 0))
+    if (AnyWindowMode() && IsTracked(hwnd) && IsRefullscreenRequest(hwnd, cx, cy, 0))
     {
-        MONITORINFO mi;
-        mi.cbSize = sizeof(mi);
-        if (GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mi))
-            ApplyWindowize(hwnd, mi.rcMonitor);
+        ReapplyForMode(hwnd);
         result = TRUE;
     }
     else
     {
         result = g_realMoveWindow(hwnd, x, y, cx, cy, repaint);
-        if (result && (yzhook::g_flags & YZ_FLAG_WINDOWIZE) && IsCandidateWindow(hwnd, &mon))
-            ApplyWindowize(hwnd, mon);
+        if (result && AnyWindowMode() && IsCandidateWindow(hwnd, &mon) &&
+            !(FakeFullscreenMode() && FakeFullscreenDone(hwnd)))
+            ApplyMode(hwnd, mon);
     }
 
     yzhook::LeaveHook();
@@ -262,23 +349,20 @@ BOOL WINAPI Hook_ShowWindow(HWND hwnd, int cmdShow)
         return g_realShowWindow(hwnd, cmdShow);
 
     BOOL result = FALSE;
-    if ((yzhook::g_flags & YZ_FLAG_WINDOWIZE) && IsTracked(hwnd) &&
+    if (AnyWindowMode() && IsTracked(hwnd) &&
         (cmdShow == SW_MAXIMIZE || cmdShow == SW_SHOWMAXIMIZED))
     {
         result = g_realShowWindow(hwnd, SW_SHOWNORMAL);
-        MONITORINFO mi;
-        mi.cbSize = sizeof(mi);
-        if (GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mi))
-            ApplyWindowize(hwnd, mi.rcMonitor);
+        ReapplyForMode(hwnd);
     }
     else
     {
         result = g_realShowWindow(hwnd, cmdShow);
-        if (result && (yzhook::g_flags & YZ_FLAG_WINDOWIZE))
+        if (result && AnyWindowMode())
         {
             RECT mon;
-            if (IsCandidateWindow(hwnd, &mon))
-                ApplyWindowize(hwnd, mon);
+            if (IsCandidateWindow(hwnd, &mon) && !(FakeFullscreenMode() && FakeFullscreenDone(hwnd)))
+                ApplyMode(hwnd, mon);
         }
     }
 
@@ -290,6 +374,16 @@ LONG_PTR SanitizeLong(HWND hwnd, int index, LONG_PTR value)
 {
     if (!IsTracked(hwnd))
         return value;
+
+    if (FakeFullscreenMode())
+    {
+        /* 假全屏：保留无边框全屏外观，只压掉置顶与禁用态，绝不加标题栏 */
+        if (index == GWL_STYLE)
+            return (value & ~(WS_DISABLED | WS_MAXIMIZE)) | WS_VISIBLE;
+        if (index == GWL_EXSTYLE)
+            return g_topmost ? (value | WS_EX_TOPMOST) : (value & ~WS_EX_TOPMOST);
+        return value;
+    }
 
     if (index == GWL_STYLE)
     {
@@ -321,7 +415,7 @@ LONG WINAPI Hook_SetWindowLongW(HWND hwnd, int index, LONG value)
         return g_realSetWindowLongW(hwnd, index, value);
 
     LONG_PTR sanitized = value;
-    if (yzhook::g_flags & YZ_FLAG_WINDOWIZE)
+    if (AnyWindowMode())
         sanitized = SanitizeLong(hwnd, index, value);
 
     LONG_PTR result = g_realSetWindowLongW(hwnd, index, sanitized);
@@ -339,7 +433,7 @@ LONG WINAPI Hook_SetWindowLongA(HWND hwnd, int index, LONG value)
         return g_realSetWindowLongA(hwnd, index, value);
 
     LONG_PTR sanitized = value;
-    if (yzhook::g_flags & YZ_FLAG_WINDOWIZE)
+    if (AnyWindowMode())
         sanitized = SanitizeLong(hwnd, index, value);
 
     LONG_PTR result = g_realSetWindowLongA(hwnd, index, sanitized);
@@ -349,12 +443,16 @@ LONG WINAPI Hook_SetWindowLongA(HWND hwnd, int index, LONG value)
 
 BOOL CALLBACK EnumProc(HWND hwnd, LPARAM)
 {
-    if (!(yzhook::g_flags & YZ_FLAG_WINDOWIZE))
+    if (!AnyWindowMode())
         return TRUE;
 
     RECT mon;
     if (IsCandidateWindow(hwnd, &mon))
     {
+        /* 假全屏的稳态窗口仍然是"无边框全屏"，别每秒重复改一遍 */
+        if (FakeFullscreenMode() && FakeFullscreenDone(hwnd))
+            return TRUE;
+
         DWORD now = GetTickCount();
         DWORD last = 0;
         Lock();
@@ -363,7 +461,7 @@ BOOL CALLBACK EnumProc(HWND hwnd, LPARAM)
             last = it->second;
         Unlock();
         if (last == 0 || (now - last) >= 500)
-            ApplyWindowize(hwnd, mon);
+            ApplyMode(hwnd, mon);
     }
     return TRUE;
 }
@@ -424,7 +522,7 @@ void WindowHooksShutdown()
 
 void WindowSweepTick()
 {
-    if (!(g_flags & YZ_FLAG_WINDOWIZE))
+    if (!AnyWindowMode())
         return;
     if (!g_hooksReady)
         return;
