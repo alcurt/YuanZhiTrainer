@@ -31,6 +31,7 @@ void ConfigApplyDefaults(AppConfig& cfg)
     cfg.autoInject    = true;
     cfg.injectMethod  = 0;
     cfg.enableExamGuard = true;
+    cfg.externalWindowFix = true;
     cfg.processNames.clear();
     /* 客户端进程名单。网管版多一个守卫进程 Nmdeputy.exe，但它由注入器显式排除
        （IsGuardProcess），这里不放进来；需要时可在 INI 里自行添加。 */
@@ -55,6 +56,7 @@ void ConfigLoad(AppConfig& cfg, const std::wstring& iniPath)
     cfg.autoInject = ReadInt(iniPath, L"AutoInject", cfg.autoInject ? 1 : 0) != 0;
     cfg.injectMethod = static_cast<int>(ReadInt(iniPath, L"InjectMethod", static_cast<DWORD>(cfg.injectMethod)));
     cfg.enableExamGuard = ReadInt(iniPath, L"EnableExamGuard", cfg.enableExamGuard ? 1 : 0) != 0;
+    cfg.externalWindowFix = ReadInt(iniPath, L"ExternalWindowFix", cfg.externalWindowFix ? 1 : 0) != 0;
 
     /* 考试守护开关以控制位形式随配置下发；其余功能位保持 ini 中的值 */
     if (cfg.enableExamGuard)
@@ -91,6 +93,7 @@ void ConfigSave(const AppConfig& cfg, const std::wstring& iniPath)
     WriteInt(iniPath, L"AutoInject", cfg.autoInject ? 1 : 0);
     WriteInt(iniPath, L"InjectMethod", static_cast<DWORD>(cfg.injectMethod));
     WriteInt(iniPath, L"EnableExamGuard", cfg.enableExamGuard ? 1 : 0);
+    WriteInt(iniPath, L"ExternalWindowFix", cfg.externalWindowFix ? 1 : 0);
     WritePrivateProfileStringW(kSection, L"TargetDir", cfg.targetDir.c_str(), iniPath.c_str());
     WritePrivateProfileStringW(kSection, L"HookDllPath", cfg.hookDllPath.c_str(), iniPath.c_str());
 

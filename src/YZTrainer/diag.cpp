@@ -8,6 +8,8 @@
 #include "yz_log.h"
 #include "yz_util.h"
 
+#include "winfix.h"
+
 #include <tlhelp32.h>
 #include <winsvc.h>
 
@@ -197,12 +199,15 @@ void ExportDiagnostics(HWND owner)
     /* 快照 */
     std::wstring snapshot;
     snapshot += L"YZTrainer 诊断快照\r\n生成时间: " + yz::NowStampEx() + L"\r\n\r\n";
-    snapshot += yz::Format(L"== 配置 ==\r\nFlags=0x%08X WindowPercent=%u AutoInject=%d EnableExamGuard=%d\r\n"
+    snapshot += yz::Format(L"== 配置 ==\r\nFlags=0x%08X WindowPercent=%u AutoInject=%d EnableExamGuard=%d "
+                           L"InjectMethod=%d ExternalWindowFix=%d\r\n"
                            L"TargetDir=%s\r\nHookDll=%s\r\n"
                            L"HookDllSource=%s 内嵌资源=%u 字节\r\nExeDir=%s\r\n\r\n",
                            g_app.cfg.flags, g_app.cfg.windowPercent,
                            g_app.cfg.autoInject ? 1 : 0,
                            g_app.cfg.enableExamGuard ? 1 : 0,
+                           g_app.cfg.injectMethod,
+                           g_app.cfg.externalWindowFix ? 1 : 0,
                            g_app.cfg.targetDir.c_str(),
                            ResolveHookDllPath().c_str(),
                            g_app.hookDllSource.c_str(), PayloadEmbeddedSize(),
@@ -212,11 +217,18 @@ void ExportDiagnostics(HWND owner)
 
     DWORD clientPid = 0;
     bool connected = IpcIsConnected(&clientPid);
+    DWORD fixCount = 0;
+    DWORD fixCandidates = 0;
+    bool  fixFailed = false;
+    winfix::WinFixStats(&fixCount, &fixCandidates, &fixFailed);
     snapshot += yz::Format(L"== 运行状态 ==\r\n连接=%d 客户端PID=%u 目标PID=%u 注入次数=%u 考试模式=%d\r\n"
-                           L"Hook数=%u 窗口化次数=%u\r\n主机路径=%s\r\n\r\n",
+                           L"Hook数=%u 窗口化次数=%u\r\n"
+                           L"外部窗口纠正: 次数=%u 上轮候选=%u 有写入失败=%d\r\n"
+                           L"主机路径=%s\r\n\r\n",
                            connected ? 1 : 0, clientPid, g_app.targetPid, g_app.injectCount,
                            g_app.examMode ? 1 : 0,
                            g_app.status.hooksInstalled, g_app.status.windowizeCount,
+                           fixCount, fixCandidates, fixFailed ? 1 : 0,
                            g_app.status.hostPath);
     snapshot += ProcessDump();
     snapshot += L"\r\n";

@@ -36,15 +36,47 @@ PFN_SetCursorPos           g_realSetCursorPos           = nullptr;
 
 volatile LONG g_blockedHookCount = 0;
 volatile LONG g_blockedRemoteCount = 0;
+volatile LONG g_blockedHotkeyCount = 0;
+volatile LONG g_blockedHookLogged = 0;
+volatile LONG g_unattributedHookCount = 0;
+volatile LONG g_unattributedHookLogged = 0;
 bool g_hooksReady = false;
 
-/* 是否需要拦截该 SetWindowsHookEx 调用 */
-bool ShouldBlockHook(int idHook, HINSTANCE hMod)
+/* 回调地址落在哪个模块里？跨模块判断"这个钩子是不是远志自己装的"靠它。
+   GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS 对未知/已卸载地址会失败，失败即视为
+   无法归属（调用方据此放行并记账），不再像以前那样把所有无模块的线程钩子一律拦掉。 */
+bool CallbackInTargetModule(LPCVOID lpfn)
+{
+    if (lpfn == nullptr)
+        return false;
+    HMODULE mod = nullptr;
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                            reinterpret_cast<LPCWSTR>(lpfn), &mod) ||
+        mod == nullptr)
+        return false;
+    return yzhook::IsModulePathUnderTargetDir(mod);
+}
+
+/* 拦截日志按次节流：远志失败后会周期性重试，原样每来一条记一行会把日志刷爆 */
+void LogHookDecision(const wchar_t* action, int idHook, DWORD threadId, DWORD moduleBase)
+{
+    const LONG n = InterlockedIncrement(&g_blockedHookLogged);
+    if (n > 8 && (n % 50) != 0)
+        return;
+    yzhook::SendLogToHost(YZ_LOG_INFO,
+        yz::Format(L"%s: idHook=%d thread=%u hmod=0x%08X（累计 %d 次）",
+                   action, idHook, threadId, moduleBase, n).c_str());
+}
+
+/* 是否需要拦截该 SetWindowsHookEx 调用。
+   只拦"确实是远志自己装的"钩子：DLL 钩子看模块路径，线程内钩子（hMod == NULL）
+   按回调地址反查所属模块。这样同进程里输入法/公共控件/其它组件的合法钩子不再被误伤。 */
+bool ShouldBlockHook(int idHook, HOOKPROC lpfn, HINSTANCE hMod)
 {
     if ((yzhook::g_flags & YZ_FLAG_INPUT_UNLOCK) == 0)
         return false;
 
-    bool interesting = false;
     switch (idHook)
     {
     case WH_KEYBOARD_LL:
@@ -53,18 +85,47 @@ bool ShouldBlockHook(int idHook, HINSTANCE hMod)
     case WH_MOUSE:
     case WH_GETMESSAGE:
     case WH_CALLWNDPROC:
-        interesting = true;
         break;
     default:
         return false;
     }
-    if (!interesting)
-        return false;
 
-    /* 线程内钩子（hMod == NULL）一定来自本进程；DLL 钩子则看模块路径 */
-    if (hMod == nullptr)
+    if (hMod != nullptr)
+        return yzhook::IsModulePathUnderTargetDir(hMod);
+
+    if (CallbackInTargetModule(reinterpret_cast<LPCVOID>(lpfn)))
         return true;
-    return yzhook::IsModulePathUnderTargetDir(hMod);
+
+    /* 归属不明：放行，但记账 + 有限次日志——机房上一旦发现锁没解开，
+       这里就是"是不是被我们放过去了"的第一手证据。 */
+    const LONG n = InterlockedIncrement(&g_unattributedHookCount);
+    const LONG logged = InterlockedIncrement(&g_unattributedHookLogged);
+    if (logged <= 3 || (logged % 50) == 0)
+    {
+        yzhook::SendLogToHost(YZ_LOG_INFO,
+            yz::Format(L"线程内钩子来源无法归属，已放行: idHook=%d lpfn=0x%p（累计 %d 次）",
+                       idHook, reinterpret_cast<const void*>(lpfn), n).c_str());
+    }
+    return false;
+}
+
+/* 远志会注册这些组合键来抢/屏蔽系统快捷键。只拦这些"逃生键"，
+   不再把同进程里所有 RegisterHotKey 一棍子打死。 */
+bool IsLockdownHotkey(UINT modifiers, UINT vk)
+{
+    const bool alt  = (modifiers & MOD_ALT) != 0;
+    const bool ctrl = (modifiers & MOD_CONTROL) != 0;
+    const bool shft = (modifiers & MOD_SHIFT) != 0;
+
+    if ((modifiers & MOD_WIN) != 0)                     /* Win / Win+任意键 */
+        return true;
+    if (alt && (vk == VK_TAB || vk == VK_ESCAPE || vk == VK_F4 || vk == VK_SPACE))
+        return true;                                    /* Alt+Tab / Alt+Esc / Alt+F4 / Alt+Space */
+    if (ctrl && vk == VK_ESCAPE)                        /* Ctrl+Esc（开始菜单） */
+        return true;
+    if (ctrl && shft && vk == VK_ESCAPE)                /* Ctrl+Shift+Esc（任务管理器） */
+        return true;
+    return false;
 }
 
 bool IsBlockedSpi(UINT action)
@@ -81,11 +142,11 @@ HHOOK WINAPI Hook_SetWindowsHookExW(int idHook, HOOKPROC lpfn, HINSTANCE hMod, D
         return g_realSetWindowsHookExW(idHook, lpfn, hMod, threadId);
 
     HHOOK result = nullptr;
-    if (ShouldBlockHook(idHook, hMod))
+    if (ShouldBlockHook(idHook, lpfn, hMod))
     {
         InterlockedIncrement(&g_blockedHookCount);
-        yzhook::SendLogToHost(YZ_LOG_INFO,
-            yz::Format(L"已拦截键盘/鼠标钩子安装: idHook=%d thread=%u", idHook, threadId).c_str());
+        LogHookDecision(L"已拦截远志键盘/鼠标钩子安装", idHook, threadId,
+                        static_cast<DWORD>(reinterpret_cast<ULONG_PTR>(hMod)));
         SetLastError(ERROR_ACCESS_DENIED);
         result = nullptr;
     }
@@ -104,11 +165,11 @@ HHOOK WINAPI Hook_SetWindowsHookExA(int idHook, HOOKPROC lpfn, HINSTANCE hMod, D
         return g_realSetWindowsHookExA(idHook, lpfn, hMod, threadId);
 
     HHOOK result = nullptr;
-    if (ShouldBlockHook(idHook, hMod))
+    if (ShouldBlockHook(idHook, lpfn, hMod))
     {
         InterlockedIncrement(&g_blockedHookCount);
-        yzhook::SendLogToHost(YZ_LOG_INFO,
-            yz::Format(L"已拦截键盘/鼠标钩子安装(A): idHook=%d thread=%u", idHook, threadId).c_str());
+        LogHookDecision(L"已拦截远志键盘/鼠标钩子安装(A)", idHook, threadId,
+                        static_cast<DWORD>(reinterpret_cast<ULONG_PTR>(hMod)));
         SetLastError(ERROR_ACCESS_DENIED);
         result = nullptr;
     }
@@ -127,14 +188,17 @@ BOOL WINAPI Hook_RegisterHotKey(HWND hwnd, int id, UINT modifiers, UINT vk)
         return g_realRegisterHotKey(hwnd, id, modifiers, vk);
 
     BOOL result = FALSE;
-    if (yzhook::g_flags & YZ_FLAG_INPUT_UNLOCK)
+    if ((yzhook::g_flags & YZ_FLAG_INPUT_UNLOCK) && IsLockdownHotkey(modifiers, vk))
     {
-        InterlockedIncrement(&g_blockedHookCount);
+        InterlockedIncrement(&g_blockedHotkeyCount);
+        yzhook::SendLogToHost(YZ_LOG_INFO,
+            yz::Format(L"已拦截远志抢注逃生快捷键: mod=0x%04X vk=0x%02X", modifiers, vk).c_str());
         SetLastError(ERROR_ACCESS_DENIED);
         result = FALSE;
     }
     else
     {
+        /* 其余热键放行：同进程里输入法、公共控件、其它组件也都要注册热键 */
         result = g_realRegisterHotKey(hwnd, id, modifiers, vk);
     }
 
@@ -231,6 +295,9 @@ UINT WINAPI Hook_SendInput(UINT count, LPINPUT inputs, int size)
     if (yzhook::g_flags & YZ_FLAG_BLOCK_REMOTE)
     {
         InterlockedIncrement(&g_blockedRemoteCount);
+        /* 返回"全部投递成功"而不是 0：调用方（教师端遥控的落地代码）拿不到
+           失败信号，就不会去重试或降级到别的输入通道。JiYuTrainer 同样这么做。 */
+        result = count;
     }
     else
     {

@@ -5,6 +5,8 @@
 #include "yz_log.h"
 #include "yz_util.h"
 
+#include "winfix.h"
+
 #include <tlhelp32.h>
 #include <string.h>
 
@@ -546,10 +548,25 @@ bool InjectHookDll(DWORD pid, const std::wstring& dllPath, std::wstring* err)
 void WatchdogTick()
 {
     if (g_app.examMode)
+    {
+        winfix::WinFixSetSkipPid(0);
         return;
+    }
 
     DWORD pid = FindTargetProcess(g_app.cfg);
     g_app.targetPid = pid;
+
+    /* 免注入的外部窗口纠正：这里是"注入不进去"时的唯一手段，所以必须在
+       autoInject / 目标 PID 的早退之前跑。Hook 生效（客户端连上管道且确实装了
+       钩子）时跳过它所在的进程，其余远志窗口仍可由外部路径纠正。 */
+    if (g_app.cfg.externalWindowFix)
+    {
+        DWORD clientPid  = 0;
+        bool  hookActive = IpcIsConnected(&clientPid) && g_app.status.hooksInstalled > 0;
+        winfix::WinFixSetSkipPid(hookActive ? clientPid : 0);
+        winfix::WinFixSetTopmost((g_app.cfg.flags & YZ_FLAG_TOPMOST) != 0);
+        winfix::WinFixTick();
+    }
 
     if (pid == 0 || !g_app.cfg.autoInject)
         return;

@@ -1,13 +1,13 @@
 # YZTrainer
 
-> **v0.3.2** · 一款**远志多媒体教学管理软件 V9.0 网管版学生端**的解控软件 · 仅供**教育研究**与**技术学习**，禁止任何非法用途 · 与厂商无关联，使用者自行承担全部后果。
+> **v0.4.0** · 一款**远志多媒体教学管理软件 V9.0 网管版学生端**的解控软件 · 仅供**教育研究**与**技术学习**，禁止任何非法用途 · 与厂商无关联，使用者自行承担全部后果。
 
 针对 **广州远志（Howyar）YZinfo 多媒体教学网络系统 V9.0 网管版学生端** 的课堂辅助工具（普通学生端同样适用，实测机房部署的是网管版），参照 JiYuTrainer 的思路重新实现（不复制其代码）。
 
 ## 它做什么
 
-* **广播窗口化**：教师端进行全屏广播时，把全屏、置顶、无边框的广播窗口改成可自由拖动缩放的普通窗口，画面与声音继续，你可以边看老师演示边操作自己的电脑。
-* **解除键鼠锁定**：拦截学生端安装的 `WH_KEYBOARD_LL` / `WH_MOUSE_LL` / `WH_KEYBOARD` / `WH_GETMESSAGE` 等钩子，阻止其屏蔽 Alt+Tab、Win 键、任务管理器，并解除 `ClipCursor` 鼠标锁定、`BlockInput` 输入封锁与相关 HKCU 策略改写。
+* **广播窗口化**：教师端进行全屏广播时，把全屏、置顶、无边框的广播窗口改成可自由拖动缩放的普通窗口，画面与声音继续，你可以边看老师演示边操作自己的电脑。**注入进不去也能用**：进程内 Hook 拿不到目标进程时，改由主程序跨进程改窗口样式（`ExternalWindowFix`，默认开）。
+* **解除键鼠锁定**：拦截学生端安装的 `WH_KEYBOARD_LL` / `WH_MOUSE_LL` / `WH_KEYBOARD` / `WH_GETMESSAGE` 等钩子，阻止其屏蔽 Alt+Tab、Win 键、任务管理器，并解除 `ClipCursor` 鼠标锁定、`BlockInput` 输入封锁与相关 HKCU 策略改写。只拦**确实是远志自己装的**钩子与**逃生类组合键**，不动同进程里其它组件的合法钩子/热键。
 * **防监视（默认关闭）**：开启后教师端“监视/远程桌面”看到的是开启瞬间的静止画面（冻结帧），关闭立即恢复实时。
 * **拦截教师端遥控输入（默认关闭）**：开启后丢弃学生端进程内的 `SendInput` / `mouse_event` / `keybd_event` / `SetCursorPos`，教师端无法接管你的鼠标键盘。
 * **服务/驱动面板**：列出与远志相关的服务与内核驱动，只做临时停止/启动，不删除任何服务或文件。
@@ -76,19 +76,21 @@ pwsh -File build.ps1 -Both
 
 ## 建议的使用流程
 
-1. **本地先跑通**：管理员 PowerShell 执行 `pwsh -File tests\run_sim_test.ps1`，确认四项断言通过（全屏置顶 / 窗口化 / 带 WS_CAPTION / 冻结画面）。
+1. **本地先跑通**：管理员 PowerShell 执行 `pwsh -File tests\run_sim_test.ps1`，确认两阶段断言全部通过——阶段一（注入路径）四项：全屏置顶 / 窗口化 / 带 WS_CAPTION / 冻结画面；阶段二（免注入路径）两项：模拟目标仍被窗口化、外部纠正计数大于 0。
 2. **机房侦察（先跑探针）**：把 `YZProbe.exe`（x64 版本信息最全）拷到机房机器，右键以管理员运行，生成 `YZProbe-report-*.json/.md`。重点看：
    * “远志相关进程”里哪个进程加载了 `Rmdesk.ads` / `PlayerGUI.dll` / `ExdHooks.dll`；
    * 远志模块导出表里 `KillHook` / `UnSetExdHooks` / `UnSetExdHooks2` 是否存在（与本地版本比对，决定主动拔钩可用性）；
    * “疑似全屏/置顶窗口”里广播窗口的类名、样式与所属 PID（确认是否由 `ExdPaintHelper.exe` 承载）；
    * “远志相关服务/驱动”的 ImagePath，确认文件过滤/网卡过滤驱动的真实名字；
    * 进程模块里是否出现 `ExdDtDup.dll`（决定防监视能不能用）；`self` 段的完整性级别/提权/SeDebug。
+   * **尽量在教师正在广播时再采一份**：只有广播进行中才会出现广播窗口，"疑似全屏/置顶窗口"表里的那行（类名/样式/所属 PID）是判断窗口化判据够不够用的唯一硬证据。2026-09-18 的两份报告都是无人广播时采集的，这一点至今仍是空白。
 3. **报告留在 `YZTrainer.exe` 同目录**：诊断包会自动把它一起打包，省得漏带。
 4. **机房实测（再跑主程序）**：把 `YZTrainer.exe` 单文件拷过去，**先确认没有别的 YZTrainer 在跑**（全局互斥体，第二份会静默退出），管理员运行，日志里按顺序确认三件事：
    * `目标进程 pid=… (…) 命中: …`（应优先命中“广播窗口宿主”）；
    * `已注入目标进程 pid=…` 与 Hook 侧的 `Hook 安装完成，共 23 个`；
    * `NativeUnhook: 已调用 …`（远志模块已加载时）——这是“能否解掉已经锁死的机器”的直接证据。
    随后让教师开始广播，看广播窗口是否变成可操作窗口、键鼠是否可用；`Ctrl+Alt+F9/F10/F11/F12` 是对应开关，注意**防监视默认关，只在明确要演示冻结画面时按**。
+   如果日志里只有 `注入失败: VirtualAllocEx 失败 …（拒绝访问 …）`，请把 `InjectMethod` 改成 `1` 再试消息钩子；两条路都不通时，窗口化仍由外部纠正负责，日志里会出现 `外部窗口纠正: 0x… -> x,y wxh`，状态栏“窗口化次数”的第二项就是它的计数。
 5. **导出诊断包**：它是**即时快照**，在“你希望被记录的那个状态”下导出。建议导两份——一份正常基线、一份出问题的那一刻；只能带一份回来时优先带异常那份。输出在 exe 同目录 `diag-<时间戳>\`，含日志（含滚动档）、`snapshot.txt`（配置/运行状态/进程/目标窗口/服务）与同目录的 `YZProbe-report-*`。退出程序后确认 hook 已卸载、被改写的策略值已还原。
 
 ## 界面与热键
@@ -116,6 +118,7 @@ InjectMethod=0     ; 注入方式：0=CreateRemoteThread+LoadLibrary（默认）
 TargetDir=         ; 远志安装目录，留空=自动判定
 HookDllPath=       ; 留空=用内嵌的 YZHook.dll；填路径可强制改用外部 DLL（调试用）
 EnableExamGuard=1  ; 考试模式守护：1=仅强信号熔断（默认）；0=完全跳过考试检测
+ExternalWindowFix=1; 免注入的外部窗口纠正：1=开（默认）0=关，只在窗口化开关打开时生效
 ProcessNames=Yistart.exe;TEACHCMD.exe;PlayerGUI.exe;ExdPaintHelper.exe
 ```
 
@@ -131,7 +134,8 @@ ProcessNames=Yistart.exe;TEACHCMD.exe;PlayerGUI.exe;ExdPaintHelper.exe
 * **注入能力诊断（YZProbe）**：探针用 `GetProcessInformation(ProcessProtectionLevelInfo)` 读进程保护级别（`PROTECTION_LEVEL` 枚举，`0xFFFFFFFE`=无保护）、用 `NtQueryObject` 读句柄**实得权限**，再逐项实测模块枚举 / `ReadProcessMemory` / `VirtualAllocEx` / `WriteProcessMemory`（只写自己刚分配的一页并立刻释放）。`--access <pid>` 可对单个进程单独诊断。它同时列出非微软签名的内核驱动（保护件/杀软/还原卡）与服务的 `SERVICE_CONFIG_LAUNCH_PROTECTED` 标志。
 * **免注入拔钩（YZUnhookTest）**：`KeyboardHook.dll` 的 `HookData` 与 `ExdHooks.dll` 的 `.ExdHook` 都是跨进程共享节，HHOOK 又是会话级对象——因此在**本进程**里加载这两个 DLL 并调用 `KillHook()` / `UnSetExdHooks(0)` / `UnSetExdHooks2(GetCurrentThreadId())`，撤销的是同一个钩子集合，完全不需要注入。工具默认只体检（读文件导出表 + 调用约定自检），`--apply` 才真调用，并在调用前后打印共享节里的句柄/状态字作为对照。
 * **窗口层**：hook `SetWindowPos` / `MoveWindow` / `ShowWindow` / `SetWindowLongA/W`，命中“本进程 + 无标题栏 + 覆盖整块显示器 + 置顶或 POPUP”的窗口后改写成 `WS_OVERLAPPEDWINDOW`，默认屏宽 60% 居中、不抢焦点；客户端每 3 秒抢回全屏时按 500ms 节流重新纠正。
-* **输入层**：拦截学生端安装键盘钩子的调用；`RegisterHotKey`、`SystemParametersInfoW`（屏保/快速任务切换）、`ClipCursor`、`BlockInput` 全部按开关放行或拦截；每秒强制 `ClipCursor(NULL)` 一次；被改写的 HKCU 策略值（任务管理器/锁屏/Win 键/GameDVR）在后台持续恢复，退出时还原原值。
+* **外部窗口纠正（免注入兜底）**：窗口样式是会话级对象，改别人的窗口不需要目标进程配合。主程序每秒按**同一套结构判据**枚举顶层窗口，命中"属于远志进程 + 无属主 + 无标题栏 + 非子窗口 + 非桌面壳类 + 覆盖整块显示器 + POPUP 或置顶"后用跨进程 `SetWindowLongPtrW` + `SetWindowPos(..., SWP_ASYNCWINDOWPOS)` 改成普通窗口，节流 1 秒。这是"客户端被剥夺句柄权限、`VirtualAllocEx` 返回 0x5"时唯一还能生效的窗口化手段；进程内 Hook 已生效的宿主进程会被跳过（避免两边抢同一个窗口），其余远志进程仍由它兜底。写入被拒（UIPI / win32k 权限检查）会记 WARN 并在状态栏显示"有写入失败"，不静默失败。
+* **输入层**：拦截学生端安装键盘钩子的调用——**线程内钩子（`hMod == NULL`）按回调地址反查所属模块**，只有落在远志目录里才拦，归属不明的放行并记账（避免误伤输入法/公共控件）；`RegisterHotKey` 只拦 Win / Alt+Tab / Alt+Esc / Alt+F4 / Alt+Space / Ctrl+Esc / Ctrl+Shift+Esc 这些"逃生键"；`SystemParametersInfoW`（屏保/快速任务切换）、`ClipCursor`、`BlockInput` 按开关放行或拦截；每秒强制 `ClipCursor(NULL)` 一次；被改写的 HKCU 策略值（任务管理器/锁屏/Win 键/GameDVR）在后台持续恢复，退出时还原原值。拦截遥控输入时 `SendInput` 返回"全部投递成功"而不是 0，减少被学生端察觉后重试的概率。
 * **采集层**：跟踪进程内取得的屏幕 DC（`GetDC(NULL)`/`GetWindowDC`/`CreateDCW("DISPLAY")`），冻结时把 `BitBlt`/`StretchBlt`/`PrintWindow` 的源改为开启瞬间抓取的 DIB，从而只影响学生端自己抓屏，不影响你本地显示。
 * **通信**：命名管道 `\\.\pipe\YZTrainer`，帧格式 `[magic 'YZT1'][opcode][len][payload]`；Hook DLL 主动连接并上报状态与日志。
 * **考试模式判定（强/弱信号分级）**：弱信号（`Exam.ads` / `ClassQuiz.ads` 已加载）只按节流记 INFO；强信号（独立 `ExamDlg.exe` 进程、进程内加载考试对话框组件、或**可见**且标题命中 `考试|测验|答题|试卷|快问快答|Exam|Quiz` 的远志窗口）任一命中才熔断并恢复策略、清零功能位。判据走严格目录前缀比较（避免 `...V9.0 StudentX` 这类前缀误判），窗口用 `IsWindowVisible` 过滤隐藏窗口；熔断时输出诊断（命中原因 / 考试进程路径 / 强信号模块 / 进程模块清单）到日志与 `%TEMP%\YZTrainer\exam-debug.txt`，同内容 30 秒节流 + FNV-1a 去重。开关 `EnableExamGuard`（默认 1）以控制位 `YZ_CFG_EXAM_GUARD` 随配置下发，用 `YZ_FLAG_FUNCTION_MASK` 剔除，保证功能位上报不被污染。
@@ -146,6 +150,8 @@ ProcessNames=Yistart.exe;TEACHCMD.exe;PlayerGUI.exe;ExdPaintHelper.exe
 5. 防监视从设计上只影响学生端自己抓屏的路径，不会改动系统显示驱动。
 6. **同一时间只能运行一份**：主程序用全局互斥体 `Global\YZTrainer_SingleInstance` 防重入，第二份会弹提示后退出。若另一份是**非提权**的旧副本，它还会因完整性级别不够而 `OpenProcess` 失败（错误 0x5），表现就是“什么都没发生”——现场先确认没有其它 YZTrainer 在跑（含 `YZTrainer-noelev.exe` 这类改名副本）。
 7. 主动拔钩依赖远志 DLL 已加载且导出签名与本地分析一致：签名不符时会被运行时自检拒绝（记 ERROR、功能不生效，但不影响其它功能）。本机 V9.0 Student 的 `KillHook` 为无参，`UnSetExdHooks` / `UnSetExdHooks2` 各带 1 个 DWORD 参数（与最初计划书“全部无参”的假设不同，实测内部调用点分别传 `0` 与调用者自身 tid）。
+8. 外部窗口纠正虽然不需要注入，但**跨进程改样式仍要过 win32k 的权限检查**：机房实测 `Yistart.exe` 以 SYSTEM（完整性 16384）运行，而 YZTrainer 以管理员（高完整性 12288）运行，两者相差一个级别。若目标窗口的样式写入被拒，日志会记 WARN、状态栏显示“有写入失败”——这条路径是否可用以机房实测为准，不要只看本地模拟目标（模拟目标与主程序同完整性，必然成功）。
+9. 外部窗口纠正依赖与注入器相同的结构判据，因此**广播窗口若带标题栏（`WS_CAPTION`）或既非 POPUP 也非置顶，同样会漏判**；2026-09-18 的探针报告是在无人广播时采集的，至今没有拿到"正在广播时"的窗口类名/样式证据（见下节）。
 
 ## 网管版（GZYZ）适配
 
@@ -155,8 +161,9 @@ ProcessNames=Yistart.exe;TEACHCMD.exe;PlayerGUI.exe;ExdPaintHelper.exe
 * **守卫进程 Nmdeputy.exe**：服务以 `Nmdeputy.exe /NormalApp /GlobalMutex /StopParam:stop /Delay:1000 /Delay2:3000 /DelayInit:3000 /SelfGuard /Protection /Name:… Service /"…\Yistart.exe" -AutoUninstall` 的形式拉起客户端。它是**守护与上报**进程，因此：**注入器显式排除它**（`IsGuardProcess`，日志里提示一次"检测到网管版守卫进程"，只注入客户端）；同时正因为它会重启/重新保护客户端，看门狗每 2 秒补注入这条机制在网管版上是必需的，不能省。
 * **目标优先级**：广播窗口宿主(+5) ＞ 主进程优先（`Yistart.exe` +3、`ExdPaintHelper.exe` +2、`TEACHCMD.exe`/`PlayerGUI.exe` +1）＞ 进程名在名单(+3) ＞ 安装路径匹配(+2)，守卫进程永不入选。这样即便名单里同时有多个客户端进程，也会稳定落到 `Yistart.exe` 或真正的广播窗口宿主上。
 * **客户端被定向剥夺句柄权限（2026-09-18 两台机房机器实测）**：`Yistart.exe` 的进程保护级别是**无保护**（`0xFFFFFFFE`，即不是 PPL），而 `Nmdeputy.exe` 可以正常枚举模块、`VirtualAllocEx`/`WriteProcessMemory` 全部成功——说明保护是**只针对客户端进程**的句柄权限剥夺（`ObRegisterCallbacks` 一类），不是进程保护机制。典型现象：注入时报 `VirtualAllocEx 失败 0x00000005`，连模块都枚举不到。首选免注入路线（`YZUnhookTest`），或把 `InjectMethod` 切成 1 试消息钩子。
+* **窗口化不依赖注入（v0.4.0 起）**：正因为上面这条，**广播窗口化改走双路**——进程内 Hook 拿不到目标进程时，主程序用跨进程 `SetWindowLongPtrW`/`SetWindowPos` 直接改那个窗口（`ExternalWindowFix=1` 默认开）。跨进程改样式是会话级操作，不需要目标进程配合，但需要过 win32k 的完整性检查（目标以 SYSTEM 运行、我们以管理员运行时是否放行，以机房实测为准，日志会记 WARN）。
 * **首要怀疑对象**：`BrDevfer`（`system32\Drivers\BRUsbFilter.sys`）——驱动清单里它挂在“Windows (R) Win 7 DDK provider”这个通用厂商字符串下（用 DDK 自建驱动常见），名字像 USB 过滤，但完全可能同时注册进程回调。下次上机把它的文件版本与签名一并记下来。
-* **打包提醒**：`build.ps1` 会在 `dist\<平台>\` 写入一份出厂默认 `YZTrainer.ini`（`Flags=5`、`LogLevel=2`、`EnableExamGuard=1`、`InjectMethod=0`），避免把调试配置（例如打开防监视的 `Flags=13`）随压缩包发出去。
+* **打包提醒**：`build.ps1` 会在 `dist\<平台>\` 写入一份出厂默认 `YZTrainer.ini`（`Flags=5`、`LogLevel=2`、`EnableExamGuard=1`、`ExternalWindowFix=1`、`InjectMethod=0`），避免把调试配置（例如打开防监视的 `Flags=13`）随压缩包发出去。
 
 ### 为什么注入会失败（`VirtualAllocEx` 返回 0x5）
 

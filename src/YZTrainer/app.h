@@ -27,6 +27,7 @@ struct AppConfig
     bool         autoInject;       /* 是否自动注入/补注入 */
     int          injectMethod;     /* 0=远程线程（默认） 1=消息钩子（SetWindowsHookEx） */
     bool         enableExamGuard;  /* 是否启用考试模式强信号熔断（EnableExamGuard） */
+    bool         externalWindowFix;/* 是否启用免注入的外部窗口纠正（ExternalWindowFix） */
     std::wstring targetDir;        /* 远志安装目录，空=按进程路径自动判定 */
     std::wstring hookDllPath;      /* 空=用内嵌资源；填路径则强制使用该文件 */
     std::vector<std::wstring> processNames;

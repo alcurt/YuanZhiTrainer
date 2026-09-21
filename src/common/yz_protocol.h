@@ -10,7 +10,7 @@
 #define YZ_PROTOCOL_VERSION 1u
 /* 产品版本（语义化版本）：主程序、探针、免注入验证工具与文件版本资源共用这一处。
    注意与上面的 YZ_PROTOCOL_VERSION（管道/结构体协议版本）区分开。 */
-#define YZ_VERSION_STR L"0.3.2"
+#define YZ_VERSION_STR L"0.4.0"
 #define YZ_PIPE_NAME        L"\\\\.\\pipe\\YZTrainer"
 #define YZ_FRAME_MAGIC      0x31545A59u  /* 'YZT1' */
 #define YZ_MAX_LOG_TEXT     400

@@ -4,11 +4,16 @@
 
     请以管理员身份运行（YZTrainer.exe 需要提权；自动测试时不希望弹 UAC）。
 
-    断言（4 条）：
+    阶段一（注入路径，ExternalWindowFix=0，只看进程内 Hook）断言 4 条：
       1. 模拟目标启动后处于全屏置顶状态
       2. YZTrainer 启动后模拟窗口被窗口化（不再是全屏）
       3. 窗口样式已包含 WS_CAPTION（真的变成普通窗口）
       4. 开启防监视后，模拟端连续抓帧哈希保持不变（画面被冻结）
+
+    阶段二（免注入兜底，AutoInject=0 + ExternalWindowFix=1）断言 2 条 + 1 条提示：
+      5. 完全不注入的情况下，模拟窗口仍被主程序跨进程改成普通窗口
+      6. 外部纠正后的窗口样式包含 WS_CAPTION
+      7. 日志里能看到“外部窗口纠正”记录（找不到只记 WARN，不影响结论）
 
     运行前请关闭其它 YZTrainer 实例（含改名副本）：主程序用全局互斥体防重入，
     别的实例在跑时本脚本启动的那份会静默退出，测试结果会变成假失败。
@@ -17,7 +22,10 @@
 #>
 param(
     [string]$DistDir,
-    [int]$StartupWaitSeconds = 6
+    [int]$StartupWaitSeconds = 6,
+    # 阶段二（免注入外部纠正）不需要管理员权限；阶段一需要。给出这个开关是为了
+    # 能在普通账户下单独验证外部纠正（例如用 asInvoker 的测试副本跑）。
+    [switch]$AllowUnelevated
 )
 
 $ErrorActionPreference = 'Stop'
@@ -33,7 +41,11 @@ foreach ($f in @($trainer, $sim)) {
 
 $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
 if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-    throw '请以管理员身份运行本测试脚本（否则 YZTrainer 无法注入模拟目标）。'
+    if ($AllowUnelevated) {
+        Write-Warning '当前不是管理员：阶段一（注入路径）可能失败，阶段二（免注入外部纠正）不受影响。'
+    } else {
+        throw '请以管理员身份运行本测试脚本（否则 YZTrainer 无法注入模拟目标）。只想验证免注入路径时加 -AllowUnelevated。'
+    }
 }
 
 $stamp     = Get-Date -Format 'yyyyMMdd-HHmmss'
@@ -53,6 +65,9 @@ $iniLines = @(
     'WindowPercent=60',
     'LogLevel=3',
     'AutoInject=1',
+    'InjectMethod=0',
+    'EnableExamGuard=1',
+    'ExternalWindowFix=0',
     'ProcessNames=Yistart.exe;TEACHCMD.exe;PlayerGUI.exe;ExdPaintHelper.exe;YZSimTarget.exe'
 )
 Set-Content -LiteralPath $iniFile -Value $iniLines -Encoding utf8
@@ -101,6 +116,71 @@ finally {
     if ($simProc -and -not $simProc.HasExited) { Stop-Process -Id $simProc.Id -Force -ErrorAction SilentlyContinue }
     Start-Sleep -Milliseconds 500
     if ($appProc -and -not $appProc.HasExited) { Stop-Process -Id $appProc.Id -Force -ErrorAction SilentlyContinue }
+}
+
+# ---------------------------------------------------------------------------
+# 阶段二：免注入兜底（ExternalWindowFix）
+# AutoInject=0 让主程序完全不注入，窗口化只能靠跨进程改样式完成；
+# 模拟目标每 3 秒抢回全屏、外部纠正每秒一次，所以这里轮询等待而不是只看一眼。
+# ---------------------------------------------------------------------------
+Write-Host ''
+Write-Host '==== 阶段二：免注入外部窗口纠正 ===='
+
+foreach ($f in @($stateFile, $capFile)) {
+    if (Test-Path $f) { Move-Item -LiteralPath $f -Destination "$f.bak2-$stamp" -Force }
+}
+
+$phase2Ini = @(
+    '[General]',
+    'Flags=5',
+    'WindowPercent=60',
+    'LogLevel=3',
+    'AutoInject=0',
+    'InjectMethod=0',
+    'EnableExamGuard=1',
+    'ExternalWindowFix=1',
+    'ProcessNames=Yistart.exe;TEACHCMD.exe;PlayerGUI.exe;ExdPaintHelper.exe;YZSimTarget.exe'
+)
+Set-Content -LiteralPath $iniFile -Value $phase2Ini -Encoding utf8
+
+$sim2Proc = $null
+$app2Proc = $null
+
+try {
+    $sim2Proc = Start-Process -FilePath $sim -PassThru
+    Start-Sleep -Seconds 3
+
+    $app2Proc = Start-Process -FilePath $trainer -PassThru
+
+    $fixed = $false
+    $state2 = ''
+    for ($i = 0; $i -lt 20; $i++) {
+        Start-Sleep -Milliseconds 700
+        $state2 = Get-Content -LiteralPath $stateFile -ErrorAction SilentlyContinue
+        if ($state2 -match 'fullscreen=0') { $fixed = $true; break }
+    }
+
+    Write-Host "免注入窗口化后状态: $state2"
+    if ($fixed) { $result.Add('PASS  免注入模式下窗口仍被窗口化（外部纠正生效）') }
+    else { $result.Add('FAIL  免注入模式下窗口仍是全屏（外部纠正未生效）') }
+
+    if ($fixed -and $state2 -match 'style=0x([0-9A-Fa-f]{8})') {
+        $style2 = [Convert]::ToUInt32($Matches[1], 16)
+        if (($style2 -band 0x00C00000) -eq 0x00C00000) { $result.Add('PASS  外部纠正后的窗口带标题栏(WS_CAPTION)') }
+        else { $result.Add('FAIL  外部纠正后的窗口样式不含 WS_CAPTION') }
+    }
+
+    $appLog = Join-Path (Join-Path $env:TEMP 'YZTrainer') 'yzt.log'
+    if ((Test-Path $appLog) -and (Select-String -LiteralPath $appLog -Pattern '外部窗口纠正' -Quiet)) {
+        $result.Add('PASS  主程序日志里出现“外部窗口纠正”记录')
+    } else {
+        $result.Add('WARN  未在 yzt.log 里找到“外部窗口纠正”记录（不影响窗口化结论）')
+    }
+}
+finally {
+    if ($sim2Proc -and -not $sim2Proc.HasExited) { Stop-Process -Id $sim2Proc.Id -Force -ErrorAction SilentlyContinue }
+    Start-Sleep -Milliseconds 500
+    if ($app2Proc -and -not $app2Proc.HasExited) { Stop-Process -Id $app2Proc.Id -Force -ErrorAction SilentlyContinue }
 }
 
 Write-Host ''

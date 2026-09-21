@@ -82,6 +82,7 @@
     <ClCompile Include="diag.cpp" />
     <ClCompile Include="main.cpp" />
     <ClCompile Include="payload.cpp" />
+    <ClCompile Include="winfix.cpp" />
     <ClCompile Include="..\common\yz_log.cpp" />
     <ClCompile Include="..\common\yz_util.cpp" />
   </ItemGroup>

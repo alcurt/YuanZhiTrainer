@@ -3,6 +3,8 @@
 #include "yz_log.h"
 #include "yz_util.h"
 
+#include "winfix.h"
+
 #include <stdlib.h>
 #include <string.h>
 #include <shellapi.h>
@@ -161,11 +163,15 @@ void UpdateStatusText()
     bool connected = IpcIsConnected(&clientPid);
     std::wstring target = g_app.targetPid != 0
         ? yz::Format(L"%u", g_app.targetPid) : L"未发现";
+    DWORD fixCount = 0;
+    DWORD fixCandidates = 0;
+    bool  fixFailed = false;
+    winfix::WinFixStats(&fixCount, &fixCandidates, &fixFailed);
     std::wstring text = yz::Format(
         L"连接状态: %s%s\r\n"
         L"目标进程 PID: %s\r\n"
         L"已启用 Hook 数: %u\r\n"
-        L"窗口化次数: %u\r\n"
+        L"窗口化次数: %u（Hook）/ %u（外部纠正%s）\r\n"
         L"注入次数: %u\r\n"
         L"考试模式: %s",
         connected ? L"已连接" : L"未连接",
@@ -173,6 +179,8 @@ void UpdateStatusText()
         target.c_str(),
         g_app.status.hooksInstalled,
         g_app.status.windowizeCount,
+        fixCount,
+        fixFailed ? L"，有写入失败" : L"",
         g_app.injectCount,
         g_app.examMode ? L"是（全部功能已停用）" : L"否");
 
@@ -741,6 +749,8 @@ void CmdShowAbout()
                 L"YZTrainer " YZ_VERSION_STR L"\n\n"
                 L"用途：在教师全屏广播时把广播画面改成可自由操作的窗口，"
                 L"并解除远志学生端对本机的键鼠封锁。\n"
+                L"窗口化有两条路：注入成功走进程内 Hook；注入被拒（VirtualAllocEx 0x5）时"
+                L"由主程序跨进程改窗口样式兜底（ExternalWindowFix，默认开）。\n"
                 L"原则：不修改远志文件、不卸载驱动、不干扰教师端；"
                 L"检测到考试强信号（独立考试进程 ExamDlg.exe、考试对话框组件或"
                 L"可见考试窗口）时全部功能自动停用；Exam.ads / ClassQuiz.ads 属于"
