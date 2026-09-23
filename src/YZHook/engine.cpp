@@ -434,6 +434,10 @@ void EngineThreadProc()
     yzhook::CaptureHooksInstall(true);
     yzhook::ExecHooksInstall(true);
     yzhook::PolicyBackup();
+    /* 只读自报：本进程的 HKCU 落在哪个 hive（\REGISTRY\USER\S-1-5-18 之类）。
+       有了它，现场就不必再靠外部脚本扫 HKU 去猜"策略被写进谁家"（P0 的日志镜像
+       会把这一行带回宿主日志/诊断包）。 */
+    yzhook::PolicyLogCurrentUserHive();
     g_hooksReady = true;
 
     InterlockedExchange(&yzhook::g_hooksInstalled, static_cast<LONG>(yzhook::HookActiveCount()));

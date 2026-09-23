@@ -174,7 +174,10 @@ ProcessNames=Yistart.exe;TEACHCMD.exe;PlayerGUI.exe;ExdPaintHelper.exe
 9. 外部窗口纠正依赖与注入器相同的结构判据，因此**广播窗口若带标题栏或既非 POPUP 也非置顶就会漏判**。2026-09-23 已经有了广播期的窗口证据：**全屏广播**下是 `Brw:…` 类、标题"屏幕广播系统"、置顶、无边框、不覆盖整屏；**窗口广播**下同一个类名的窗口处于**最小化**状态（style 含 `WS_MINIMIZE=0x20000000`，rect 为 -32000）。也就是说远志的广播窗口类名以 `Brw:` 开头，"覆盖整屏 + 无标题栏"只在其全屏形态下成立；要不要按类名前缀放宽判据，等下一次在**全屏广播中**同时跑主程序再定，现在改是盲改。
 10. 假全屏只是"看起来还是全屏"：它**不隐藏屏幕内容**，教师在抓屏/监视时看到的仍是你真实屏幕；而且窗口尺寸与置顶状态是远志有权查询的属性，不能排除教师端据此判断异常。它的定位是配合防监视使用，不是反检测手段。另外假全屏下 `YZ_FLAG_TOPMOST`（窗口置顶开关）不生效——这个模式的全部意义就是不置顶。
 11. 远程执行审计只看学生端进程内的用户态 API 调用：注入不进去时没有审计；教师端若通过内核驱动/服务通道直接下发动作（不经 `CreateProcess` 等），也记录不到。它是**审计**而不是防护，日志位置 `%TEMP%\YZTrainer\remote-exec.log`（导出诊断包时会一并复制进 `diag-<时间戳>\`）。
-12. **策略项（HKCU）的 hive 归属存疑（批次 2 待验证）**：`policy.cpp` 里全部走 `HKEY_CURRENT_USER`，而这段代码跑在**目标进程**里——`Yistart.exe` 以 SYSTEM 运行，解析出来的就是 SYSTEM 的 hive，不是登录学生那个用户的。后果是"把 `DisableTaskMgr` / `NoWinKeys` 改回来"对登录用户可能根本没生效，退出时的还原也可能是"执行了但用户侧没变"。**验证办法**：在被锁的机器上分别读 `HKU\<学生 SID>\...\Policies\...` 与 SYSTEM 的 hive，看远志写在哪一侧。确认前不引入 `WTSQueryUserToken`/跨 hive 穿透逻辑（注入本身还没稳，不想再加一层不确定性）。代码里已在 `policy.cpp` 顶部标注。
+12. **策略项（HKCU）的 hive 归属——已有本机实测证据，批次 2 待上机确认**：`policy.cpp` 里全部走 `HKEY_CURRENT_USER`，而这段代码跑在**目标进程**里（`Yistart.exe` 以 SYSTEM 运行时就是 SYSTEM 的 HKCU），跟登录学生那一家不是同一个。2026-09-23 本机实测（令牌复制方式启动、会话 1 的 SYSTEM 进程）：
+    * `RegOpenCurrentUser` + `NtQueryKey` 自报的 HKCU 是 `\REGISTRY\USER\.DEFAULT`，**不是** `S-1-5-18`；
+    * 但我们 `PolicyEnforce` 写下的值**同时**出现在 `HKU\.DEFAULT` 与 `HKU\S-1-5-18` 下，两处 `Environment` 内容逐字相同 → 这台机器上这两个名字是**同一个 hive**。
+    所以：外部只看 `S-1-5-18` 会得出"根本没写过策略"的错误结论。**v0.6.4 起注入侧自己会报一行 `PolicyHive: 本进程 HKCU → …`**（只读、不改状态），现场以它为准；确认前不引入 `WTSQueryUserToken`/跨 hive 穿透逻辑（注入本身还没稳，不想再加一层不确定性）。
 13. **消息层钩子的拦截是"可二分的风险点"**：`ShouldBlockHook` 也会拦 `WH_GETMESSAGE` / `WH_CALLWNDPROC`（远志的 `KeyboardHook.dll` 导出了 `SetMessageCallback`/`SetWndProcCallback`，这两类钩子可能是锁键鼠的载体，但也可能是广播消息链的一环）。现场若出现"广播画面不动/窗口消息异常"，第一件事就是把 `hooks_input.cpp` 顶部的 `YZ_BLOCK_MESSAGE_HOOKS` 改成 0 重新编译做对照；拦截日志里这两类会单独记成"已拦截远志消息层钩子安装"，便于定位。
 
 ## 网管版（GZYZ）适配
