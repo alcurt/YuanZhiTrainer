@@ -61,12 +61,27 @@ struct ProbeService
     DWORD        launchProtected;   /* SERVICE_CONFIG_LAUNCH_PROTECTED，0=未受保护启动 */
 };
 
-/* 对某个远志进程实测"能不能注入"：保护级别 + 句柄实际权限 + 逐项能力 */
+/* 逐权限位实测：单独请求某一位打开目标进程，再看句柄实得权限里有没有这一位。
+   ObRegisterCallbacks 一类的驱动是"保住句柄、削掉权限位"，只看组合掩码
+   分不清是哪几位被拿掉，必须逐位来测；只有这一列能证明"剥夺"而不是"没权限"。 */
+struct ProbeAccessRight
+{
+    std::wstring name;          /* 权限名 */
+    DWORD        requested;     /* 请求的位 */
+    bool         opened;        /* OpenProcess 是否成功 */
+    DWORD        err;           /* 失败时的 GetLastError */
+    DWORD        granted;       /* 成功时 NtQueryObject 报告的实得权限 */
+    DWORD        queryStatus;   /* NtQueryObject 返回的 NTSTATUS，非 0 便于排障 */
+    bool         stripped;      /* 打开成功，但请求的位不在实得权限里 */
+};
+
+/* 对某个远志进程实测"能不能注入"：保护级别 + 句柄实际权限 + 逐项能力 + 逐权限位 */
 struct ProbeAccess
 {
     DWORD        pid;
     DWORD        protectionLevel;
     DWORD        grantedAccess;     /* NtQueryObject 报告的实际授予权限，0=查不到 */
+    DWORD        grantedStatus;     /* 上面那次 NtQueryObject 的 NTSTATUS，0=成功 */
     std::wstring protectionText;
     std::wstring privNote;          /* SeDebug 启用情况等提示 */
     std::wstring moduleRead;        /* 模块枚举（Toolhelp 读目标内存） */
@@ -74,6 +89,8 @@ struct ProbeAccess
     std::wstring vmOperation;       /* VirtualAllocEx（一页，随即释放） */
     std::wstring vmWrite;           /* WriteProcessMemory（只写自己刚分配的那页） */
     std::wstring createThread;      /* 默认不测，避免在目标进程留线程 */
+    std::vector<ProbeAccessRight> rights;   /* 逐权限位实测 */
+    std::wstring threadProbe;       /* 目标进程首个线程的句柄权限实测 */
 };
 
 /* 非微软签名的内核驱动（保护件/杀软/还原卡都在这张表里） */

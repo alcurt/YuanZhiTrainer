@@ -196,8 +196,25 @@ std::wstring ProbeToJson(const ProbeData& data)
         j += L"      \"vmRead\": \"" + JsonEscape(a.vmRead) + L"\",\n";
         j += L"      \"vmOperation\": \"" + JsonEscape(a.vmOperation) + L"\",\n";
         j += L"      \"vmWrite\": \"" + JsonEscape(a.vmWrite) + L"\",\n";
-        j += L"      \"createThread\": \"" + JsonEscape(a.createThread) + L"\"\n";
-        j += L",\n      \"privNote\": \"" + JsonEscape(a.privNote) + L"\"\n";
+        j += L"      \"createThread\": \"" + JsonEscape(a.createThread) + L"\",\n";
+        j += yz::Format(L"      \"grantedStatus\": \"0x%08X\",\n", static_cast<unsigned>(a.grantedStatus));
+        j += L"      \"threadProbe\": \"" + JsonEscape(a.threadProbe) + L"\",\n";
+        j += L"      \"privNote\": \"" + JsonEscape(a.privNote) + L"\",\n";
+        j += L"      \"rights\": [";
+        for (size_t r = 0; r < a.rights.size(); r++)
+        {
+            const ProbeAccessRight& rt = a.rights[r];
+            j += L"\n        {\n";
+            j += L"          \"name\": \"" + JsonEscape(rt.name) + L"\",\n";
+            j += yz::Format(L"          \"requested\": \"0x%08X\",\n", static_cast<unsigned>(rt.requested));
+            j += yz::Format(L"          \"opened\": %s,\n", rt.opened ? L"true" : L"false");
+            j += yz::Format(L"          \"err\": \"0x%08X\",\n", static_cast<unsigned>(rt.err));
+            j += yz::Format(L"          \"granted\": \"0x%08X\",\n", static_cast<unsigned>(rt.granted));
+            j += yz::Format(L"          \"queryStatus\": \"0x%08X\",\n", static_cast<unsigned>(rt.queryStatus));
+            j += yz::Format(L"          \"stripped\": %s\n", rt.stripped ? L"true" : L"false");
+            j += (r + 1 == a.rights.size()) ? L"        }\n" : L"        },\n";
+        }
+        j += L"      ]\n";
         j += L"    }";
         if (i + 1 != data.access.size()) j += L",";
         j += L"\n";
@@ -396,10 +413,49 @@ std::wstring ProbeToMarkdown(const ProbeData& data)
                                 data.access[i].privNote.c_str());
             }
         }
-        m += L"\n权限位对照：`PROCESS_VM_OPERATION=0x0008`、`PROCESS_VM_WRITE=0x0020`、"
-             L"`PROCESS_VM_READ=0x0010`、`PROCESS_CREATE_THREAD=0x0002`。"
-             L"请求了这些位而“实得权限”里没有，就说明被内核组件（句柄权限剥夺）或进程保护机制拿掉了——"
-             L"这正是“OpenProcess 成功、VirtualAllocEx 返回 0x5”的原因。\n\n";
+        for (size_t i = 0; i < data.access.size(); i++)
+        {
+            const ProbeAccess& a = data.access[i];
+            if (a.rights.empty())
+                continue;
+
+            m += yz::Format(L"\n#### PID %u 的逐权限位实测\n\n", a.pid);
+            m += L"| 请求权限 | OpenProcess | 句柄实得权限 | NtQueryObject | 判定 |\n";
+            m += L"|---|---|---|---|---|\n";
+            for (size_t r = 0; r < a.rights.size(); r++)
+            {
+                const ProbeAccessRight& rt = a.rights[r];
+                const std::wstring openText = rt.opened
+                    ? std::wstring(L"成功")
+                    : yz::Format(L"失败 err=0x%08X", static_cast<unsigned>(rt.err));
+                const std::wstring grantedText = rt.opened
+                    ? yz::Format(L"0x%08X", static_cast<unsigned>(rt.granted))
+                    : std::wstring(L"-");
+                std::wstring verdict;
+                if (!rt.opened)
+                    verdict = L"打不开（无权限）";
+                else if (rt.stripped)
+                    verdict = L"**被削**（打开成功，但请求的位不在实得权限里）";
+                else
+                    verdict = L"完整";
+                m += yz::Format(L"| %s (0x%08X) | %s | %s | 0x%08X | %s |\n",
+                                rt.name.c_str(), static_cast<unsigned>(rt.requested),
+                                openText.c_str(), grantedText.c_str(),
+                                static_cast<unsigned>(rt.queryStatus), verdict.c_str());
+            }
+            if (!a.threadProbe.empty())
+                m += yz::Format(L"\n- 目标线程句柄（`OpenThread`+`NtQueryObject`）：%s\n", a.threadProbe.c_str());
+        }
+        m += L"\n怎么读这张表：\n\n";
+        m += L"* `打不开` = DACL/完整性级别不允许，属于“权限不够”，提权或换身份有效；\n";
+        m += L"* `被削` = `OpenProcess` 成功但句柄里没有请求的位，只有内核组件"
+             L"（`ObRegisterCallbacks` 一类）能在**不改 DACL、不受 `SeDebugPrivilege` 影响**的前提下做到——"
+             L"这正是“`OpenProcess` 成功、`VirtualAllocEx` 返回 0x5”的机制；\n";
+        m += L"* 权限位对照：`PROCESS_QUERY_LIMITED_INFORMATION=0x1000`、`PROCESS_QUERY_INFORMATION=0x0400`、"
+             L"`PROCESS_VM_READ=0x0010`、`PROCESS_VM_WRITE=0x0020`、`PROCESS_VM_OPERATION=0x0008`、"
+             L"`PROCESS_CREATE_THREAD=0x0002`。\n";
+        m += L"* `NtQueryObject` 一列应当是 `0x00000000`；若这里是非零 NTSTATUS（例如 `0xC0000004` "
+             L"= 缓冲区长度不符），说明权限位没读出来，那一行的“实得权限”不可信。\n\n";
     }
 
     m += L"## 疑似全屏/置顶窗口（按进程排序）\n\n";
@@ -508,7 +564,7 @@ int wmain(int argc, wchar_t** argv)
         {
             wprintf(L"用法: YZProbe.exe [-o 输出目录] [--modules] [--access <pid>] [--no-pause]\n");
             wprintf(L"  --modules       采集所有进程的模块（默认只采集远志相关进程）\n");
-            wprintf(L"  --access <pid>  对指定进程做注入能力探测（保护级别/句柄权限/读/分配/写）\n");
+        wprintf(L"  --access <pid>  对指定进程做注入能力探测（保护级别/句柄实得权限/逐权限位/读/分配/写/线程句柄）\n");
             wprintf(L"  双击运行时结束会等你按回车；脚本里用 --no-pause 跳过\n");
             if (!noPause)
                 yz::PauseIfSoleConsole();

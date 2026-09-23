@@ -1,6 +1,6 @@
 # YZTrainer
 
-> **v0.5.0** · 一款**远志多媒体教学管理软件 V9.0 网管版学生端**的解控软件 · 仅供**教育研究**与**技术学习**，禁止任何非法用途 · 与厂商无关联，使用者自行承担全部后果。
+> **v0.5.1** · 一款**远志多媒体教学管理软件 V9.0 网管版学生端**的解控软件 · 仅供**教育研究**与**技术学习**，禁止任何非法用途 · 与厂商无关联，使用者自行承担全部后果。
 
 针对 **广州远志（Howyar）YZinfo 多媒体教学网络系统 V9.0 网管版学生端** 的课堂辅助工具（普通学生端同样适用，实测机房部署的是网管版），参照 JiYuTrainer 的思路重新实现（不复制其代码）。
 
@@ -85,6 +85,7 @@ pwsh -File build.ps1 -Both
    * “疑似全屏/置顶窗口”里广播窗口的类名、样式与所属 PID（确认是否由 `ExdPaintHelper.exe` 承载）；
    * “远志相关服务/驱动”的 ImagePath，确认文件过滤/网卡过滤驱动的真实名字；
    * 进程模块里是否出现 `ExdDtDup.dll`（决定防监视能不能用）；`self` 段的完整性级别/提权/SeDebug。
+   * **“注入能力实测”表的 `句柄实得权限` 一列，以及每个进程下面的“逐权限位实测”子表**：判定为 **被削**（`OpenProcess` 成功、但句柄实得权限里没有请求的那一位）是内核驱动用 `ObRegisterCallbacks` 一类回调剥权限的铁证；`打不开（无权限）` 才是真的权限不够。这两处过去一直显示“未取到”（`NtQueryObject` 缓冲区长度 bug，v0.5.1 修复），所以历史报告里这一列为空**不等于**没有被削。
    * **尽量在教师正在广播时再采一份**：只有广播进行中才会出现广播窗口，"疑似全屏/置顶窗口"表里的那行（类名/样式/所属 PID）是判断窗口化判据够不够用的唯一硬证据。2026-09-18 的两份报告都是无人广播时采集的，这一点至今仍是空白。
 3. **报告留在 `YZTrainer.exe` 同目录**：诊断包会自动把它一起打包，省得漏带。
 4. **机房实测（再跑主程序）**：把 `YZTrainer.exe` 单文件拷过去，**先确认没有别的 YZTrainer 在跑**（全局互斥体，第二份会静默退出），管理员运行，日志里按顺序确认三件事：
@@ -154,7 +155,7 @@ ProcessNames=Yistart.exe;TEACHCMD.exe;PlayerGUI.exe;ExdPaintHelper.exe
 5. 防监视从设计上只影响学生端自己抓屏的路径，不会改动系统显示驱动。
 6. **同一时间只能运行一份**：主程序用全局互斥体 `Global\YZTrainer_SingleInstance` 防重入，第二份会弹提示后退出。若另一份是**非提权**的旧副本，它还会因完整性级别不够而 `OpenProcess` 失败（错误 0x5），表现就是“什么都没发生”——现场先确认没有其它 YZTrainer 在跑（含 `YZTrainer-noelev.exe` 这类改名副本）。
 7. 主动拔钩依赖远志 DLL 已加载且导出签名与本地分析一致：签名不符时会被运行时自检拒绝（记 ERROR、功能不生效，但不影响其它功能）。本机 V9.0 Student 的 `KillHook` 为无参，`UnSetExdHooks` / `UnSetExdHooks2` 各带 1 个 DWORD 参数（与最初计划书“全部无参”的假设不同，实测内部调用点分别传 `0` 与调用者自身 tid）。
-8. 外部窗口纠正虽然不需要注入，但**跨进程改样式仍要过 win32k 的权限检查**：机房实测 `Yistart.exe` 以 SYSTEM（完整性 16384）运行，而 YZTrainer 以管理员（高完整性 12288）运行，两者相差一个级别。若目标窗口的样式写入被拒，日志会记 WARN、状态栏显示“有写入失败”——这条路径是否可用以机房实测为准，不要只看本地模拟目标（模拟目标与主程序同完整性，必然成功）。
+8. 外部窗口纠正虽然不需要注入，但**跨进程改样式仍要过 win32k 的权限检查**（win32k 是拿内核句柄去打开目标进程的，因此同样会被"剥句柄权限"的驱动连带拦住）。2026-09-23 机房实测：找到候选广播窗口后，`写样式` / `写扩展样式` / `定位` 三处全部返回 `err=0x5`，30 次重试无一成功——即这条"免注入兜底"目前在学生端上也不成立。别把它归因成"完整性级别差"（反例见上文 `Nmdeputy.exe`）。写入被拒会记 WARN、状态栏显示"有写入失败"；本地模拟目标与主程序同完整性，必然成功，不能用来判断这条路径。
 9. 外部窗口纠正依赖与注入器相同的结构判据，因此**广播窗口若带标题栏（`WS_CAPTION`）或既非 POPUP 也非置顶，同样会漏判**；2026-09-18 的探针报告是在无人广播时采集的，至今没有拿到"正在广播时"的窗口类名/样式证据（见下节）。
 10. 假全屏只是"看起来还是全屏"：它**不隐藏屏幕内容**，教师在抓屏/监视时看到的仍是你真实屏幕；而且窗口尺寸与置顶状态是远志有权查询的属性，不能排除教师端据此判断异常。它的定位是配合防监视使用，不是反检测手段。另外假全屏下 `YZ_FLAG_TOPMOST`（窗口置顶开关）不生效——这个模式的全部意义就是不置顶。
 11. 远程执行审计只看学生端进程内的用户态 API 调用：注入不进去时没有审计；教师端若通过内核驱动/服务通道直接下发动作（不经 `CreateProcess` 等），也记录不到。它是**审计**而不是防护，日志位置 `%TEMP%\YZTrainer\remote-exec.log`（导出诊断包时会一并复制进 `diag-<时间戳>\`）。
@@ -168,7 +169,8 @@ ProcessNames=Yistart.exe;TEACHCMD.exe;PlayerGUI.exe;ExdPaintHelper.exe
 * **目标优先级**：广播窗口宿主(+5) ＞ 主进程优先（`Yistart.exe` +3、`ExdPaintHelper.exe` +2、`TEACHCMD.exe`/`PlayerGUI.exe` +1）＞ 进程名在名单(+3) ＞ 安装路径匹配(+2)，守卫进程永不入选。这样即便名单里同时有多个客户端进程，也会稳定落到 `Yistart.exe` 或真正的广播窗口宿主上。
 * **客户端被定向剥夺句柄权限（2026-09-18 两台机房机器实测）**：`Yistart.exe` 的进程保护级别是**无保护**（`0xFFFFFFFE`，即不是 PPL），而 `Nmdeputy.exe` 可以正常枚举模块、`VirtualAllocEx`/`WriteProcessMemory` 全部成功——说明保护是**只针对客户端进程**的句柄权限剥夺（`ObRegisterCallbacks` 一类），不是进程保护机制。典型现象：注入时报 `VirtualAllocEx 失败 0x00000005`，连模块都枚举不到。首选免注入路线（`YZUnhookTest`），或把 `InjectMethod` 切成 1 试消息钩子。
 * **窗口化不依赖注入（v0.4.0 起）**：正因为上面这条，**广播窗口化改走双路**——进程内 Hook 拿不到目标进程时，主程序用跨进程 `SetWindowLongPtrW`/`SetWindowPos` 直接改那个窗口（`ExternalWindowFix=1` 默认开）。跨进程改样式是会话级操作，不需要目标进程配合，但需要过 win32k 的完整性检查（目标以 SYSTEM 运行、我们以管理员运行时是否放行，以机房实测为准，日志会记 WARN）。
-* **首要怀疑对象**：`BrDevfer`（`system32\Drivers\BRUsbFilter.sys`）——驱动清单里它挂在“Windows (R) Win 7 DDK provider”这个通用厂商字符串下（用 DDK 自建驱动常见），名字像 USB 过滤，但完全可能同时注册进程回调。下次上机把它的文件版本与签名一并记下来。
+* **首要怀疑对象：`ProcessProtect.sys`**（2026-09-23 三台学生机交叉比对得出）：`C:\Windows\system32\Drivers\ProcessProtect.sys`，无厂商、无文件版本，在 `YZ-26.9.23-Mine`、`YZ-26.9.23-ClassmateA` 与 09-18 的学生机报告里**都出现**，而**教师机没有**——"保护只针对学生端"这件事与它的名字都对得上。名字相似的 `pkdsk` / `pkprot` / `pkdhlp` 教师机同样存在，可以排除；`BrDevfer`（`BRUsbFilter.sys`）降为次要候选。下次上机要做的是：用新版探针的逐权限位表确认它是否在有人打开 `Yistart.exe` 句柄时削减权限，并补记它的签名者与文件版本。
+* **不要再用“完整性级别差”解释 0x5**：同日实测里 `Nmdeputy.exe` 与学生端同为 SYSTEM / 系统完整性(16384)，而探针以高完整性(12288)对它的模块枚举、`ReadProcessMemory`、`VirtualAllocEx`、`WriteProcessMemory` **全部成功**。若是 `UIPI` / 强制完整性策略的写升拦截，Nmdeputy 也必须失败。所以 `VirtualAllocEx 0x5` 只能来自针对**特定进程**的句柄权限剥夺（内核回调），而不是级别不够——这条同时意味着"提到 SYSTEM 就能过"并不必然成立，必须以新版探针在 SYSTEM 身份下的复测为准。
 * **打包提醒**：`build.ps1` 会在 `dist\<平台>\` 写入一份出厂默认 `YZTrainer.ini`（`Flags=5`、`LogLevel=2`、`EnableExamGuard=1`、`ExternalWindowFix=1`、`InjectMethod=0`），避免把调试配置（例如打开防监视的 `Flags=13`）随压缩包发出去。
 
 ### 为什么注入会失败（`VirtualAllocEx` 返回 0x5）
@@ -182,7 +184,20 @@ ProcessNames=Yistart.exe;TEACHCMD.exe;PlayerGUI.exe;ExdPaintHelper.exe
 
 `VirtualAllocEx` 需要句柄带 `PROCESS_VM_OPERATION`。现在的情况是：`OpenProcess` **成功**（DACL 检查通过、`SeDebugPrivilege` 也开了），但拿到的句柄其 `GrantedAccess` 被**事后削减**——驱动用 `ObRegisterCallbacks` 注册进程回调，在每次有人打开受保护进程的句柄时剥掉 `PROCESS_VM_OPERATION`/`PROCESS_VM_WRITE`/`PROCESS_VM_READ`（可能还有 `PROCESS_CREATE_THREAD`）。于是第二步在对象管理器里被判 `STATUS_ACCESS_DENIED`，`GetLastError()` 得到 5。同一个原因也解释了为什么连模块枚举（内部要 `PROCESS_VM_READ`）都失败。
 
-这**不是权限不够**：已经是管理员 + `SeDebugPrivilege`，提权再多也没用（`SeDebug` 绕的是 DACL，不绕句柄权限削减）。可走的路只有两条：不写目标内存（`InjectMethod=1` 消息钩子，由系统加载器映射 DLL）或干脆不注入（`YZUnhookTest` 在本进程调用远志自己的拔钩导出）。
+这**不是权限不够**：已经是管理员 + `SeDebugPrivilege`，提权再多也没用（`SeDebug` 绕的是 DACL，不绕句柄权限削减）。
+
+2026-09-23 在教师真实全屏广播期间实测（`YZ-26.9.23-Mine` 的两份 diag），**四条路全都不通**：
+
+| 路线 | 实测结果 |
+|---|---|
+| 远程线程注入（`InjectMethod=0`） | 重试 10 次，全部 `VirtualAllocEx 失败 0x5` |
+| 消息钩子注入（`InjectMethod=1`） | `SetWindowsHookEx` 返回了 HHOOK，但 DLL 只进了**我们自己**的进程（日志里那句"宿主进程不是远志学生端"就是它），目标进程始终没连上管道：`连接=0 Hook数=0` |
+| 跨进程窗口化（`ExternalWindowFix`） | 找到候选广播窗口后，三处写操作全部 `err=0x5`，30 次 |
+| 免注入拔钩（`YZUnhookTest --apply`） | 三个入口都"调用成功"，但键鼠没有恢复 |
+
+其中一条判读经验：**`SetWindowsHookEx` 的返回值不能当作注入成功的证据**。系统是延迟映射 DLL 的，映射失败（被剥夺权限或被 `UIPI` 挡下）时不会回头报错。唯一可信的判据是"目标进程有没有连上管道、`Hook数` 是不是 0"。
+
+四条负面结论指向同一个机制（内核回调剥夺 `Yistart.exe` 的句柄权限），`ProcessProtect.sys` 是当前唯一符合"只在学生机上出现"的候选驱动。下一步的正确顺序是：**先用新版探针的逐权限位表把这个机制钉死**，再决定值不值得把主程序以 SYSTEM 身份上机重测——不要跳过探针直接改架构。
 
 ## 免责声明与使用边界
 

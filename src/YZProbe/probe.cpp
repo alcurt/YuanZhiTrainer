@@ -116,11 +116,27 @@ bool QueryProtectionLevel(DWORD pid, DWORD* outLevel)
     return true;
 }
 
-/* NtQueryObject(ObjectBasicInformation) 读出句柄的“真实”授予权限。
-   若内核组件（ObRegisterCallbacks）或 PPL 把 VM_* 剥掉了，这里会明显少于请求值。 */
-DWORD QueryGrantedAccess(HANDLE h)
+/* PUBLIC_OBJECT_BASIC_INFORMATION：4 + 4 + 10*4（保留字段）= 56 字节。
+   注意内核要求传入长度与它**完全相等**：传 64 字节会返回
+   STATUS_INFO_LENGTH_MISMATCH (0xC0000004) 而不是填满缓冲区。
+   0.5.0 之前这里传的就是 64，于是"句柄实得权限"这一列永远是空——
+   偏偏它才是区分"权限不够"和"句柄权限被驱动削掉"的唯一证据。 */
+struct YzObjectBasicInformation
 {
-    typedef LONG (NTAPI *PFN_NtQueryObject)(HANDLE, int, PVOID, ULONG, PULONG);
+    ULONG       attributes;
+    ACCESS_MASK grantedAccess;
+    ULONG       handleCount;
+    ULONG       pointerCount;
+    ULONG       reserved[10];
+};
+
+static_assert(sizeof(YzObjectBasicInformation) == 56,
+              "PUBLIC_OBJECT_BASIC_INFORMATION 必须是 56 字节");
+
+typedef LONG (NTAPI *PFN_NtQueryObject)(HANDLE, int, PVOID, ULONG, PULONG);
+
+PFN_NtQueryObject ResolveNtQueryObject()
+{
     static PFN_NtQueryObject s_fn       = nullptr;
     static bool             s_resolved = false;
     if (!s_resolved)
@@ -130,17 +146,132 @@ DWORD QueryGrantedAccess(HANDLE h)
         if (nt != nullptr)
             s_fn = reinterpret_cast<PFN_NtQueryObject>(GetProcAddress(nt, "NtQueryObject"));
     }
-    if (s_fn == nullptr)
-        return 0;
+    return s_fn;
+}
 
-    BYTE  info[64] = {0};
-    ULONG ret      = 0;
-    if (s_fn(h, 0, info, sizeof(info), &ret) != 0)
-        return 0;
+/* NtQueryObject(ObjectBasicInformation) 读出句柄的“真实”授予权限。
+   若内核组件（ObRegisterCallbacks）或 PPL 把 VM_* 剥掉了，这里会明显少于请求值。 */
+DWORD QueryGrantedAccess(HANDLE h, DWORD* outStatus)
+{
+    if (outStatus != nullptr)
+        *outStatus = 0;
 
-    DWORD granted = 0;
-    memcpy(&granted, info + 4, sizeof(granted));   /* Attributes(4B) 之后就是 GrantedAccess */
-    return granted;
+    PFN_NtQueryObject fn = ResolveNtQueryObject();
+    if (fn == nullptr)
+    {
+        if (outStatus != nullptr)
+            *outStatus = 0xFFFFFFFFu;   /* ntdll 里没有这个导出 */
+        return 0;
+    }
+
+    YzObjectBasicInformation info;
+    ZeroMemory(&info, sizeof(info));
+    ULONG ret = 0;
+    const LONG st = fn(h, 0, &info, sizeof(info), &ret);
+    if (outStatus != nullptr)
+        *outStatus = static_cast<DWORD>(st);
+    if (st != 0)
+        return 0;
+    return info.grantedAccess;
+}
+
+/* 逐权限位实测。放在组合掩码那次 OpenProcess **之前**跑完：
+   组合掩码打不开时会早退，而那时候逐位数据才最有用。 */
+void ProbeRightsOneByOne(DWORD pid, ProbeAccess& ap)
+{
+    struct RightName
+    {
+        DWORD        mask;
+        const wchar_t* name;
+    };
+    static const RightName kRights[] =
+    {
+        { PROCESS_QUERY_LIMITED_INFORMATION, L"PROCESS_QUERY_LIMITED_INFORMATION" },
+        { PROCESS_QUERY_INFORMATION,         L"PROCESS_QUERY_INFORMATION" },
+        { PROCESS_VM_READ,                   L"PROCESS_VM_READ" },
+        { PROCESS_VM_WRITE,                  L"PROCESS_VM_WRITE" },
+        { PROCESS_VM_OPERATION,              L"PROCESS_VM_OPERATION" },
+        { PROCESS_CREATE_THREAD,             L"PROCESS_CREATE_THREAD" },
+        { PROCESS_DUP_HANDLE,                L"PROCESS_DUP_HANDLE" },
+        { PROCESS_SUSPEND_RESUME,            L"PROCESS_SUSPEND_RESUME" },
+    };
+
+    for (size_t i = 0; i < ARRAYSIZE(kRights); i++)
+    {
+        ProbeAccessRight r;
+        r.name        = kRights[i].name;
+        r.requested   = kRights[i].mask;
+        r.opened      = false;
+        r.err         = 0;
+        r.granted     = 0;
+        r.queryStatus = 0;
+        r.stripped    = false;
+
+        HANDLE h = OpenProcess(kRights[i].mask, FALSE, pid);
+        if (h == nullptr)
+        {
+            r.err = GetLastError();
+        }
+        else
+        {
+            r.opened  = true;
+            r.granted = QueryGrantedAccess(h, &r.queryStatus);
+            r.stripped = (r.granted & kRights[i].mask) != kRights[i].mask;
+            CloseHandle(h);
+        }
+        ap.rights.push_back(r);
+    }
+}
+
+/* 线程句柄是否同样被削：这条决定"线程劫持"类注入路线还有没有可能。 */
+void ProbeThreadRight(DWORD pid, std::wstring& out)
+{
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    if (snap == INVALID_HANDLE_VALUE)
+    {
+        out = L"未测（线程快照失败）";
+        return;
+    }
+
+    THREADENTRY32 te;
+    ZeroMemory(&te, sizeof(te));
+    te.dwSize = sizeof(te);
+
+    DWORD tid = 0;
+    if (Thread32First(snap, &te))
+    {
+        do
+        {
+            if (te.th32OwnerProcessID == pid)
+            {
+                tid = te.th32ThreadID;
+                break;
+            }
+        } while (Thread32Next(snap, &te));
+    }
+    CloseHandle(snap);
+
+    if (tid == 0)
+    {
+        out = L"未测（找不到目标线程）";
+        return;
+    }
+
+    const DWORD want = THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_SET_CONTEXT |
+                       THREAD_QUERY_INFORMATION;
+    HANDLE ht = OpenThread(want, FALSE, tid);
+    if (ht == nullptr)
+    {
+        out = yz::Format(L"tid=%u 失败 err=0x%08X", tid, GetLastError());
+        return;
+    }
+
+    DWORD st = 0;
+    const DWORD granted = QueryGrantedAccess(ht, &st);
+    CloseHandle(ht);
+    out = yz::Format(L"tid=%u 成功 请求=0x%08X 实得=0x%08X%s（NtQueryObject=0x%08X）",
+                     tid, static_cast<unsigned>(want), static_cast<unsigned>(granted),
+                     (granted & want) == want ? L"" : L" 被削", st);
 }
 
 std::wstring StepText(bool ok, DWORD err)
@@ -188,6 +319,7 @@ void ProbeAccessCapability(DWORD pid, ProbeData& data)
     ap.pid             = pid;
     ap.protectionLevel = 0;
     ap.grantedAccess   = 0;
+    ap.grantedStatus   = 0;
 
     /* 与注入器同口径：先开 SeDebug，否则诊断结果会比真实注入更悲观 */
     const bool seDebug = yz::EnablePrivilege(SE_DEBUG_NAME);
@@ -213,6 +345,9 @@ void ProbeAccessCapability(DWORD pid, ProbeData& data)
     else
         ap.moduleRead = yz::Format(L"可枚举（%u 个模块）", modCount);
 
+    ProbeRightsOneByOne(pid, ap);
+    ProbeThreadRight(pid, ap.threadProbe);
+
     const DWORD want = PROCESS_VM_READ | PROCESS_VM_WRITE | PROCESS_VM_OPERATION |
                        PROCESS_CREATE_THREAD | PROCESS_QUERY_INFORMATION;
     HANDLE hp = OpenProcess(want, FALSE, pid);
@@ -227,7 +362,7 @@ void ProbeAccessCapability(DWORD pid, ProbeData& data)
         return;
     }
 
-    ap.grantedAccess = QueryGrantedAccess(hp);
+    ap.grantedAccess = QueryGrantedAccess(hp, &ap.grantedStatus);
 
     if (firstBase == 0)
     {
