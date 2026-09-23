@@ -23,6 +23,10 @@
      10. remote-exec.log 里出现 CreateProcessW 记录
      11. 该记录被标为 origin=remote（不是客户端自己拉起的辅助进程）
 
+    阶段五（主动拔钩的晚加载重试，v0.6.3）断言 1 条：
+     12. 钩子模块在注入之后才被加载时，主程序会重试主动拔钩
+         （日志出现"NativeUnhook: 目标模块 ExdHooks.dll 已加载，开始尝试"）
+
     运行前请关闭其它 YZTrainer 实例（含改名副本）：主程序用全局互斥体防重入，
     别的实例在跑时本脚本启动的那份会静默退出，测试结果会变成假失败。
 
@@ -299,6 +303,72 @@ finally {
     if ($sim4Proc -and -not $sim4Proc.HasExited) { Stop-Process -Id $sim4Proc.Id -Force -ErrorAction SilentlyContinue }
     Start-Sleep -Milliseconds 500
     if ($app4Proc -and -not $app4Proc.HasExited) { Stop-Process -Id $app4Proc.Id -Force -ErrorAction SilentlyContinue }
+}
+
+# ---------------------------------------------------------------------------
+# 阶段五：主动拔钩的"晚加载"重试（v0.6.3 / P1.3）
+# 模拟"注入已经发生、远志的钩子模块随后才被加载"：YZSimTarget 用 --load 在启动 4 秒后
+# 加载一个名叫 ExdHooks.dll 的替身 DLL（用系统自带的 version.dll 改名，避免依赖远志文件）。
+# 期望：主程序在 2 秒内重新发起一轮主动拔钩，日志里能看到
+#   NativeUnhook: 目标模块 ExdHooks.dll 已加载，开始尝试
+#   （随后因为替身没有那个导出，跟一条"找不到导出 … 跳过"）
+# 这条断言直接盯着"注入与模块加载的时序竞争"，是 v0.6.3 修 P1.3 的回归闸门。
+# ---------------------------------------------------------------------------
+Write-Host ''
+Write-Host '==== 阶段五：主动拔钩的晚加载重试 ===='
+
+$stubDir  = Join-Path $env:TEMP 'yzt-lateload'
+$stubDll  = Join-Path $stubDir 'ExdHooks.dll'
+$stubSrc  = @(
+    (Join-Path $env:WINDIR 'SysWOW64\version.dll'),
+    (Join-Path $env:WINDIR 'System32\version.dll')
+) | Where-Object { Test-Path $_ } | Select-Object -First 1
+
+$phase5Ini = @(
+    '[General]',
+    'Flags=5',
+    'WindowPercent=60',
+    'LogLevel=3',
+    'AutoInject=1',
+    'InjectMethod=0',
+    'EnableExamGuard=1',
+    'ExternalWindowFix=0',
+    'ProcessNames=Yistart.exe;TEACHCMD.exe;PlayerGUI.exe;ExdPaintHelper.exe;YZSimTarget.exe'
+)
+Set-Content -LiteralPath $iniFile -Value $phase5Ini -Encoding utf8
+
+$sim5Proc = $null
+$app5Proc = $null
+
+try {
+    if (-not $stubSrc) {
+        $result.Add('WARN  系统里没有 version.dll 可做替身，跳过阶段五')
+    }
+    else {
+        New-Item -ItemType Directory -Force -Path $stubDir | Out-Null
+        Copy-Item -LiteralPath $stubSrc -Destination $stubDll -Force
+
+        $sim5Proc = Start-Process -FilePath $sim -ArgumentList '--load', $stubDll -PassThru
+        Start-Sleep -Seconds 2
+        $app5Proc = Start-Process -FilePath $trainer -PassThru
+        Start-Sleep -Seconds 14
+
+        $retryHit = $false
+        $skipHit  = $false
+        if (Test-Path $appLog) {
+            $retryHit = (Select-String -LiteralPath $appLog -Pattern 'NativeUnhook: 目标模块 ExdHooks\.dll 已加载，开始尝试' -Quiet)
+            $skipHit  = (Select-String -LiteralPath $appLog -Pattern '找不到导出 UnSetExdHooks' -Quiet)
+        }
+        Write-Host ("晚加载重试命中: " + $retryHit + " ; 找不到导出(替身预期): " + $skipHit)
+
+        if ($retryHit) { $result.Add('PASS  钩子模块晚于注入出现时，主动拔钩会重试') }
+        else { $result.Add('FAIL  钩子模块晚加载后没有发起新一轮主动拔钩') }
+    }
+}
+finally {
+    if ($sim5Proc -and -not $sim5Proc.HasExited) { Stop-Process -Id $sim5Proc.Id -Force -ErrorAction SilentlyContinue }
+    Start-Sleep -Milliseconds 500
+    if ($app5Proc -and -not $app5Proc.HasExited) { Stop-Process -Id $app5Proc.Id -Force -ErrorAction SilentlyContinue }
 }
 
 Write-Host ''

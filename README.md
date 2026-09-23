@@ -1,6 +1,6 @@
 # YZTrainer
 
-> **v0.6.2** · 一款**远志多媒体教学管理软件 V9.0 网管版学生端**的解控软件 · 仅供**教育研究**与**技术学习**，禁止任何非法用途 · 与厂商无关联，使用者自行承担全部后果。
+> **v0.6.3** · 一款**远志多媒体教学管理软件 V9.0 网管版学生端**的解控软件 · 仅供**教育研究**与**技术学习**，禁止任何非法用途 · 与厂商无关联，使用者自行承担全部后果。
 
 针对 **广州远志（Howyar）YZinfo 多媒体教学网络系统 V9.0 网管版学生端** 的课堂辅助工具（普通学生端同样适用，实测机房部署的是网管版），参照 JiYuTrainer 的思路重新实现（不复制其代码）。
 
@@ -76,11 +76,11 @@ pwsh -File build.ps1 -Both
 | `YZProbe.exe` | 机房侦察工具，只读，建议先跑它 |
 | `YZSysRun.exe` | **以 SYSTEM 身份运行指定程序**的轻量启动器（令牌复制，不装服务、不写注册表）：用来复测"换个身份是否就不被剥句柄权限"。用法 `YZSysRun.exe -- YZProbe.exe -o <目录> --no-pause`。它从**当前会话**的 `winlogon.exe` 复制主令牌并以 `winsta0\default` 启动子进程，因此子进程仍在交互桌面上；启动后会打印令牌来源、子进程会话与完整性级别（应为 系统(16384) 且会话号与当前一致）。**控制台的全部输出同时写成同目录 `YZSysRun-<时间戳>.txt`（可用 `--log <文件>` 指定路径，exe 目录不可写时依次退当前目录、`%TEMP%\YZTrainer\`）**，免得现场来不及另存 |
 | `YZUnhookTest.exe` | 免注入拔钩验证工具：默认只体检（读文件导出表 + 调用约定自检）并把过程写入同目录 `YZUnhookTest-<时间戳>.txt`；`--apply` 才真正调用远志的拔钩导出，`--arm` 待机等你回车再执行，`--delay N` 待机 N 秒后自动执行（被锁键鼠时唯一可行的触发方式），`--no-pause` 供脚本调用。调用前后会打印对照节的**基址、大小、前 32 字节原始值**和三个 HHOOK/标志字（v0.6.2 起按**节名+节内偏移**定位；此前写死的 RVA 差了两个数量级，所以在现场报告里从来没出现过对照行） |
-| `YZSimTarget.exe` | 模拟学生端，仅本地测试用 |
+| `YZSimTarget.exe` | 模拟学生端，仅本地测试用。`--exam` 造考试窗口、`--exec` 4 秒后拉起子进程（验证审计）、**`--load <dll>` 4 秒后加载指定 DLL**（验证"钩子模块晚于注入出现"时主动拔钩的重试，见阶段五） |
 
 ## 建议的使用流程
 
-1. **本地先跑通**：管理员 PowerShell 执行 `pwsh -File tests\run_sim_test.ps1`，确认两阶段断言全部通过——阶段一（注入路径）四项：全屏置顶 / 窗口化 / 带 WS_CAPTION / 冻结画面；阶段二（免注入路径）两项：模拟目标仍被窗口化、外部纠正计数大于 0。
+1. **本地先跑通**：管理员 PowerShell 执行 `pwsh -File tests\run_sim_test.ps1`，确认五个阶段共 **12 项断言**全通过——阶段一（注入路径）4 项：全屏置顶 / 窗口化 / 带 WS_CAPTION / 冻结画面；阶段二（免注入路径）2 项 + 1 条 WARN；阶段三（假全屏）2 项；阶段四（远程执行审计）2 项；阶段五（主动拔钩的晚加载重试，v0.6.3 新增）1 项：`YZSimTarget --load` 在注入之后才加载一个名叫 `ExdHooks.dll` 的替身 DLL，日志里必须出现"NativeUnhook: 目标模块 ExdHooks.dll 已加载，开始尝试"。
 2. **机房侦察（先跑探针）**：把 `YZProbe.exe`（x64 版本信息最全）拷到机房机器，右键以管理员运行，生成 `YZProbe-report-*.json/.md`。重点看：
    * “远志相关进程”里哪个进程加载了 `Rmdesk.ads` / `PlayerGUI.dll` / `ExdHooks.dll`；
    * 远志模块导出表里 `KillHook` / `UnSetExdHooks` / `UnSetExdHooks2` 是否存在（与本地版本比对，决定主动拔钩可用性）；
@@ -100,7 +100,7 @@ pwsh -File build.ps1 -Both
    注意 `服务/驱动` 一栏只列远志相关服务（所以 0 条很正常），完整非微软驱动清单在 json 的 `thirdPartyDrivers` 里。
 5. **机房实测（再跑主程序）**：把 `YZTrainer.exe` 单文件拷过去，**先确认没有别的 YZTrainer 在跑**（全局互斥体，第二份会静默退出），管理员运行，日志里按顺序确认三件事：
    * `目标进程 pid=… (…) 命中: …`（应优先命中“广播窗口宿主”）；
-   * `已注入目标进程 pid=…` 与 Hook 侧的 `Hook 安装完成，共 27 个`；
+   * `已注入目标进程 pid=…` 与 Hook 侧的 `Hook 安装完成，共 28 个`；
    * `NativeUnhook: 已调用 …`（远志模块已加载时）——这是“能否解掉已经锁死的机器”的直接证据。
    随后让教师开始广播，看广播窗口是否变成可操作窗口、键鼠是否可用；`Ctrl+Alt+F8/F9/F10/F11/F12` 是对应开关，注意**假全屏与防监视默认关，只在明确要演示时按**。
    如果日志里只有 `注入失败: VirtualAllocEx 失败 …（拒绝访问 …）`，请把 `InjectMethod` 改成 `1` 再试消息钩子；两条路都不通时，窗口化仍由外部纠正负责，日志里会出现 `外部窗口纠正: 0x… -> x,y wxh`，状态栏“窗口化次数”的第二项就是它的计数。
@@ -137,6 +137,7 @@ ProcessNames=Yistart.exe;TEACHCMD.exe;PlayerGUI.exe;ExdPaintHelper.exe
 ```
 
 日志：`%TEMP%\YZTrainer\yzt.log`（超过 2MB 自动换用 `yzt-1.log`，不删除旧文件）；远程执行审计单独写在同目录 `remote-exec.log`。
+**v0.6.3 起 Hook DLL 的日志会镜像回主程序**：此前 hook DLL 写的是**目标进程**的日志目录（目标以 SYSTEM 运行时是 `C:\Windows\Temp\YZTrainer\`），那些行永远进不了宿主导出的诊断包——现场只剩显式转发的那几行，`HookAttach` 失败、主动拔钩跳过、策略备份这类关键证据会全部丢失。现在引擎注册了 `yz::LogSetSink`，目标进程里每一条 `YZLOG*` 都随管道回到宿主日志（形如 `[Hook pid=…] [时间][TID][YZHook][INF] …`）。注意：**注入没成功时没有这层镜像**，那种情况下仍然是"日志断链"的状态。
 
 ## 实现要点
 
@@ -150,7 +151,7 @@ ProcessNames=Yistart.exe;TEACHCMD.exe;PlayerGUI.exe;ExdPaintHelper.exe
 * **窗口层（两种模式）**：hook `SetWindowPos` / `MoveWindow` / `ShowWindow` / `SetWindowLongA/W`，命中“本进程 + 无标题栏 + 覆盖整块显示器 + 置顶或 POPUP”的窗口后按模式处理——**窗口化**改写 `WS_OVERLAPPEDWINDOW`（默认屏宽 60% 居中、不抢焦点），**假全屏**保留 `WS_POPUP` 全屏外观、只把 `WS_EX_TOPMOST` 去掉并强制 `HWND_NOTOPMOST`；两者都在客户端每 3 秒抢回全屏时按 500ms 节流重新纠正，假全屏另有"已达稳态就不再改"的判据，避免每秒白改一次。
 * **外部窗口纠正（免注入兜底）**：窗口样式是会话级对象，改别人的窗口不需要目标进程配合。主程序每秒按**同一套结构判据**枚举顶层窗口，命中"属于远志进程 + 无属主 + 无标题栏 + 非子窗口 + 非桌面壳类 + 覆盖整块显示器 + POPUP 或置顶"后用跨进程 `SetWindowLongPtrW` + `SetWindowPos(..., SWP_ASYNCWINDOWPOS)` 改成普通窗口（`ExternalWindowFix`），节流 1 秒；`Flags` 里给的是假全屏时同样支持跨进程做假全屏。这是"客户端被剥夺句柄权限、`VirtualAllocEx` 返回 0x5"时唯一还能生效的窗口手段；进程内 Hook 已生效的宿主进程会被跳过（避免两边抢同一个窗口），其余远志进程仍由它兜底。写入被拒（UIPI / win32k 权限检查）会记 WARN 并在状态栏显示"有写入失败"，不静默失败。
 * **远程执行审计层**：hook `kernel32!CreateProcessA/W`、`WinExec`、`user32!ExitWindowsEx`，以及（仅当目标进程已加载 `shell32` 时）`shell32!ShellExecuteExW`。一律**先调用原函数拿到真实结果，再写审计**，不做任何拦截。审计行同时落 `yzt.log` 侧的 INFO 与 `remote-exec.log`，按 exe 是否在远志安装目录里标注 `origin=self|remote`，界面日志只播报 `remote` 的条目。不为了审计去加载 shell32。
-* **输入层**：拦截学生端安装键盘钩子的调用——**线程内钩子（`hMod == NULL`）按回调地址反查所属模块**，只有落在远志目录里才拦，归属不明的放行并记账（避免误伤输入法/公共控件）；`RegisterHotKey` 只拦 Win / Alt+Tab / Alt+Esc / Alt+F4 / Alt+Space / Ctrl+Esc / Ctrl+Shift+Esc 这些"逃生键"；`SystemParametersInfoW`（屏保/快速任务切换）、`ClipCursor`、`BlockInput` 按开关放行或拦截；每秒强制 `ClipCursor(NULL)` 一次；被改写的 HKCU 策略值（任务管理器/锁屏/Win 键/GameDVR）在后台持续恢复，退出时还原原值。拦截遥控输入时 `SendInput` 返回"全部投递成功"而不是 0，减少被学生端察觉后重试的概率。
+* **输入层**：拦截学生端安装键盘钩子的调用——**线程内钩子（`hMod == NULL`）按回调地址反查所属模块**，只有落在远志目录里才拦，归属不明的放行并记账（避免误伤输入法/公共控件）；`RegisterHotKey` 只拦 Win / Alt+Tab / Alt+Esc / Alt+F4 / Alt+Space / Ctrl+Esc / Ctrl+Shift+Esc 这些"逃生键"；`SystemParametersInfoW` **和 `SystemParametersInfoA`**（屏保/快速任务切换；v0.6.3 补上 A 版——`KeyboardHook.dll` 导入的正是 A 版，只挂 W 会漏）、`ClipCursor`、`BlockInput` 按开关放行或拦截；每秒强制 `ClipCursor(NULL)` 一次；被改写的 HKCU 策略值（任务管理器/锁屏/Win 键/GameDVR）在后台持续恢复，退出时还原原值（**hive 归属存疑，见"已知限制"第 12 条**）。拦截遥控输入时 `SendInput` 返回"全部投递成功"而不是 0，减少被学生端察觉后重试的概率。
 * **采集层**：跟踪进程内取得的屏幕 DC（`GetDC(NULL)`/`GetWindowDC`/`CreateDCW("DISPLAY")`），冻结时把 `BitBlt`/`StretchBlt`/`PrintWindow` 的源改为开启瞬间抓取的 DIB，从而只影响学生端自己抓屏，不影响你本地显示。
 * **通信**：命名管道 `\\.\pipe\YZTrainer`，帧格式 `[magic 'YZT1'][opcode][len][payload]`；Hook DLL 主动连接并上报状态与日志。
 * **考试模式判定（强/弱信号分级）**：弱信号（`Exam.ads` / `ClassQuiz.ads` 已加载）只按节流记 INFO；强信号（独立 `ExamDlg.exe` 进程、进程内加载考试对话框组件、或**可见**且标题命中 `考试|测验|答题|试卷|快问快答|Exam|Quiz` 的远志窗口）任一命中才熔断并恢复策略、清零功能位。判据走严格目录前缀比较（避免 `...V9.0 StudentX` 这类前缀误判），窗口用 `IsWindowVisible` 过滤隐藏窗口；熔断时输出诊断（命中原因 / 考试进程路径 / 强信号模块 / 进程模块清单）到日志与 `%TEMP%\YZTrainer\exam-debug.txt`，同内容 30 秒节流 + FNV-1a 去重。开关 `EnableExamGuard`（默认 1）以控制位 `YZ_CFG_EXAM_GUARD` 随配置下发，用 `YZ_FLAG_FUNCTION_MASK` 剔除，保证功能位上报不被污染。
@@ -173,6 +174,8 @@ ProcessNames=Yistart.exe;TEACHCMD.exe;PlayerGUI.exe;ExdPaintHelper.exe
 9. 外部窗口纠正依赖与注入器相同的结构判据，因此**广播窗口若带标题栏或既非 POPUP 也非置顶就会漏判**。2026-09-23 已经有了广播期的窗口证据：**全屏广播**下是 `Brw:…` 类、标题"屏幕广播系统"、置顶、无边框、不覆盖整屏；**窗口广播**下同一个类名的窗口处于**最小化**状态（style 含 `WS_MINIMIZE=0x20000000`，rect 为 -32000）。也就是说远志的广播窗口类名以 `Brw:` 开头，"覆盖整屏 + 无标题栏"只在其全屏形态下成立；要不要按类名前缀放宽判据，等下一次在**全屏广播中**同时跑主程序再定，现在改是盲改。
 10. 假全屏只是"看起来还是全屏"：它**不隐藏屏幕内容**，教师在抓屏/监视时看到的仍是你真实屏幕；而且窗口尺寸与置顶状态是远志有权查询的属性，不能排除教师端据此判断异常。它的定位是配合防监视使用，不是反检测手段。另外假全屏下 `YZ_FLAG_TOPMOST`（窗口置顶开关）不生效——这个模式的全部意义就是不置顶。
 11. 远程执行审计只看学生端进程内的用户态 API 调用：注入不进去时没有审计；教师端若通过内核驱动/服务通道直接下发动作（不经 `CreateProcess` 等），也记录不到。它是**审计**而不是防护，日志位置 `%TEMP%\YZTrainer\remote-exec.log`（导出诊断包时会一并复制进 `diag-<时间戳>\`）。
+12. **策略项（HKCU）的 hive 归属存疑（批次 2 待验证）**：`policy.cpp` 里全部走 `HKEY_CURRENT_USER`，而这段代码跑在**目标进程**里——`Yistart.exe` 以 SYSTEM 运行，解析出来的就是 SYSTEM 的 hive，不是登录学生那个用户的。后果是"把 `DisableTaskMgr` / `NoWinKeys` 改回来"对登录用户可能根本没生效，退出时的还原也可能是"执行了但用户侧没变"。**验证办法**：在被锁的机器上分别读 `HKU\<学生 SID>\...\Policies\...` 与 SYSTEM 的 hive，看远志写在哪一侧。确认前不引入 `WTSQueryUserToken`/跨 hive 穿透逻辑（注入本身还没稳，不想再加一层不确定性）。代码里已在 `policy.cpp` 顶部标注。
+13. **消息层钩子的拦截是"可二分的风险点"**：`ShouldBlockHook` 也会拦 `WH_GETMESSAGE` / `WH_CALLWNDPROC`（远志的 `KeyboardHook.dll` 导出了 `SetMessageCallback`/`SetWndProcCallback`，这两类钩子可能是锁键鼠的载体，但也可能是广播消息链的一环）。现场若出现"广播画面不动/窗口消息异常"，第一件事就是把 `hooks_input.cpp` 顶部的 `YZ_BLOCK_MESSAGE_HOOKS` 改成 0 重新编译做对照；拦截日志里这两类会单独记成"已拦截远志消息层钩子安装"，便于定位。
 
 ## 网管版（GZYZ）适配
 

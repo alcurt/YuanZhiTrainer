@@ -16,6 +16,7 @@ typedef HHOOK (WINAPI *PFN_SetWindowsHookExW)(int, HOOKPROC, HINSTANCE, DWORD);
 typedef HHOOK (WINAPI *PFN_SetWindowsHookExA)(int, HOOKPROC, HINSTANCE, DWORD);
 typedef BOOL  (WINAPI *PFN_RegisterHotKey)(HWND, int, UINT, UINT);
 typedef BOOL  (WINAPI *PFN_SystemParametersInfoW)(UINT, UINT, PVOID, UINT);
+typedef BOOL  (WINAPI *PFN_SystemParametersInfoA)(UINT, UINT, PVOID, UINT);
 typedef BOOL  (WINAPI *PFN_ClipCursor)(const RECT*);
 typedef BOOL  (WINAPI *PFN_BlockInput)(BOOL);
 typedef void  (WINAPI *PFN_keybd_event)(BYTE, BYTE, DWORD, ULONG_PTR);
@@ -27,6 +28,7 @@ PFN_SetWindowsHookExW      g_realSetWindowsHookExW      = nullptr;
 PFN_SetWindowsHookExA      g_realSetWindowsHookExA      = nullptr;
 PFN_RegisterHotKey         g_realRegisterHotKey         = nullptr;
 PFN_SystemParametersInfoW  g_realSystemParametersInfoW  = nullptr;
+PFN_SystemParametersInfoA  g_realSystemParametersInfoA  = nullptr;
 PFN_ClipCursor             g_realClipCursor             = nullptr;
 PFN_BlockInput             g_realBlockInput             = nullptr;
 PFN_keybd_event            g_realkeybd_event            = nullptr;
@@ -41,6 +43,13 @@ volatile LONG g_blockedHookLogged = 0;
 volatile LONG g_unattributedHookCount = 0;
 volatile LONG g_unattributedHookLogged = 0;
 bool g_hooksReady = false;
+
+/* 拦不拦消息层钩子（WH_GETMESSAGE / WH_CALLWNDPROC）——已知风险开关。
+   它们未必只服务于输入封锁：远志的广播/窗口消息链也可能用（KeyboardHook.dll 导出了
+   SetMessageCallback / SetWndProcCallback）。目前保持 1（现场四次实测广播都没因此中断，
+   且这两类是"锁键鼠"的常见载体）；一旦现场出现"广播画面不动/窗口消息异常"，
+   把这里改成 0 重新编译，只留键盘/鼠标钩子做对照——这是最快的二分定位手段。 */
+#define YZ_BLOCK_MESSAGE_HOOKS 1
 
 /* 回调地址落在哪个模块里？跨模块判断"这个钩子是不是远志自己装的"靠它。
    GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS 对未知/已卸载地址会失败，失败即视为
@@ -83,8 +92,11 @@ bool ShouldBlockHook(int idHook, HOOKPROC lpfn, HINSTANCE hMod)
     case WH_MOUSE_LL:
     case WH_KEYBOARD:
     case WH_MOUSE:
+#if YZ_BLOCK_MESSAGE_HOOKS
+    /* 消息层：见文件头 YZ_BLOCK_MESSAGE_HOOKS 的风险说明 */
     case WH_GETMESSAGE:
     case WH_CALLWNDPROC:
+#endif
         break;
     default:
         return false;
@@ -145,7 +157,10 @@ HHOOK WINAPI Hook_SetWindowsHookExW(int idHook, HOOKPROC lpfn, HINSTANCE hMod, D
     if (ShouldBlockHook(idHook, lpfn, hMod))
     {
         InterlockedIncrement(&g_blockedHookCount);
-        LogHookDecision(L"已拦截远志键盘/鼠标钩子安装", idHook, threadId,
+        LogHookDecision((idHook == WH_GETMESSAGE || idHook == WH_CALLWNDPROC)
+                            ? L"已拦截远志消息层钩子安装"
+                            : L"已拦截远志键盘/鼠标钩子安装",
+                        idHook, threadId,
                         static_cast<DWORD>(reinterpret_cast<ULONG_PTR>(hMod)));
         SetLastError(ERROR_ACCESS_DENIED);
         result = nullptr;
@@ -221,6 +236,30 @@ BOOL WINAPI Hook_SystemParametersInfoW(UINT action, UINT param, PVOID data, UINT
     else
     {
         result = g_realSystemParametersInfoW(action, param, data, flags);
+    }
+
+    yzhook::LeaveHook();
+    return result;
+}
+
+/* A 版必须一起挂：Yistart.exe 自己走 SystemParametersInfoW，但被注入到同进程的
+   KeyboardHook.dll 导入的是 **SystemParametersInfoA**（dumpbin /imports 实证），
+   只挂 W 会漏掉它那条基于 SPI 的封锁（屏保 / 快速任务切换）。 */
+BOOL WINAPI Hook_SystemParametersInfoA(UINT action, UINT param, PVOID data, UINT flags)
+{
+    if (!yzhook::TryEnterHook())
+        return g_realSystemParametersInfoA(action, param, data, flags);
+
+    BOOL result = FALSE;
+    if ((yzhook::g_flags & YZ_FLAG_INPUT_UNLOCK) && IsBlockedSpi(action))
+    {
+        yzhook::SendLogToHost(YZ_LOG_INFO,
+            yz::Format(L"已拦截系统参数改写(A): action=0x%04X", action).c_str());
+        result = TRUE;
+    }
+    else
+    {
+        result = g_realSystemParametersInfoA(action, param, data, flags);
     }
 
     yzhook::LeaveHook();
@@ -361,6 +400,7 @@ bool InputHooksInstall(bool enableNow)
     ok = HookAttach("input", L"user32.dll", "SetWindowsHookExA", reinterpret_cast<void*>(&Hook_SetWindowsHookExA), false) && ok;
     ok = HookAttach("input", L"user32.dll", "RegisterHotKey", reinterpret_cast<void*>(&Hook_RegisterHotKey), false) && ok;
     ok = HookAttach("input", L"user32.dll", "SystemParametersInfoW", reinterpret_cast<void*>(&Hook_SystemParametersInfoW), false) && ok;
+    ok = HookAttach("input", L"user32.dll", "SystemParametersInfoA", reinterpret_cast<void*>(&Hook_SystemParametersInfoA), false) && ok;
     ok = HookAttach("input", L"user32.dll", "ClipCursor", reinterpret_cast<void*>(&Hook_ClipCursor), false) && ok;
     ok = HookAttach("input", L"user32.dll", "BlockInput", reinterpret_cast<void*>(&Hook_BlockInput), false) && ok;
     ok = HookAttach("input", L"user32.dll", "keybd_event", reinterpret_cast<void*>(&Hook_keybd_event), false) && ok;
@@ -372,6 +412,7 @@ bool InputHooksInstall(bool enableNow)
     g_realSetWindowsHookExA     = reinterpret_cast<PFN_SetWindowsHookExA>(HookGetOriginal(reinterpret_cast<void*>(&Hook_SetWindowsHookExA)));
     g_realRegisterHotKey        = reinterpret_cast<PFN_RegisterHotKey>(HookGetOriginal(reinterpret_cast<void*>(&Hook_RegisterHotKey)));
     g_realSystemParametersInfoW = reinterpret_cast<PFN_SystemParametersInfoW>(HookGetOriginal(reinterpret_cast<void*>(&Hook_SystemParametersInfoW)));
+    g_realSystemParametersInfoA = reinterpret_cast<PFN_SystemParametersInfoA>(HookGetOriginal(reinterpret_cast<void*>(&Hook_SystemParametersInfoA)));
     g_realClipCursor            = reinterpret_cast<PFN_ClipCursor>(HookGetOriginal(reinterpret_cast<void*>(&Hook_ClipCursor)));
     g_realBlockInput            = reinterpret_cast<PFN_BlockInput>(HookGetOriginal(reinterpret_cast<void*>(&Hook_BlockInput)));
     g_realkeybd_event           = reinterpret_cast<PFN_keybd_event>(HookGetOriginal(reinterpret_cast<void*>(&Hook_keybd_event)));
@@ -381,6 +422,7 @@ bool InputHooksInstall(bool enableNow)
 
     if (g_realSetWindowsHookExW == nullptr || g_realSetWindowsHookExA == nullptr ||
         g_realRegisterHotKey == nullptr || g_realSystemParametersInfoW == nullptr ||
+        g_realSystemParametersInfoA == nullptr ||
         g_realClipCursor == nullptr || g_realBlockInput == nullptr ||
         g_realkeybd_event == nullptr || g_realmouse_event == nullptr ||
         g_realSendInput == nullptr || g_realSetCursorPos == nullptr)

@@ -10,7 +10,7 @@
 #define YZ_PROTOCOL_VERSION 1u
 /* 产品版本（语义化版本）：主程序、探针、免注入验证工具与文件版本资源共用这一处。
    注意与上面的 YZ_PROTOCOL_VERSION（管道/结构体协议版本）区分开。 */
-#define YZ_VERSION_STR L"0.6.2"
+#define YZ_VERSION_STR L"0.6.3"
 #define YZ_PIPE_NAME        L"\\\\.\\pipe\\YZTrainer"
 #define YZ_FRAME_MAGIC      0x31545A59u  /* 'YZT1' */
 #define YZ_MAX_LOG_TEXT     400
@@ -92,6 +92,18 @@ struct YZ_LOG_EVENT
     DWORD   pid;
     wchar_t text[YZ_MAX_LOG_TEXT];
 };
+
+/* IPC 结构体是按字节流跨进程传的（主程序里内嵌的 Hook DLL 与主程序必须完全一致），
+   所以用编译期断言把尺寸钉死：一旦有人加字段/改宽度，**编译就失败**，而不是等到现场
+   出现字段错位、状态读成垃圾值。动结构体时必须同时递增 YZ_PROTOCOL_VERSION，
+   并在接收侧校验 cfg.version / cfg.size（见 engine.cpp 的 YZ_CMD_APPLY_CONFIG）。 */
+static_assert(sizeof(YZ_FRAME_HEADER) == 12, "YZ_FRAME_HEADER 必须是 12 字节");
+static_assert(sizeof(YZ_CONFIG) == 16,
+              "YZ_CONFIG 尺寸变了：请递增 YZ_PROTOCOL_VERSION 并同步两端");
+static_assert(sizeof(YZ_STATUS) == 8 * sizeof(DWORD) + MAX_PATH * sizeof(wchar_t),
+              "YZ_STATUS 尺寸变了：请递增 YZ_PROTOCOL_VERSION 并同步两端");
+static_assert(sizeof(YZ_LOG_EVENT) == 3 * sizeof(DWORD) + YZ_MAX_LOG_TEXT * sizeof(wchar_t),
+              "YZ_LOG_EVENT 尺寸变了：请递增 YZ_PROTOCOL_VERSION 并同步两端");
 
 #pragma pack(pop)
 

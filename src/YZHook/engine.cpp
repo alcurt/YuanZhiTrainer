@@ -251,6 +251,12 @@ void SweepTick()
     yzhook::WindowSweepTick();
     yzhook::InputEnforceTick();
     yzhook::PolicyEnforce();
+
+    /* 主动拔钩的重试（P1.3）：注入通常早于远志加载它自己的钩子 DLL，
+       所以要在解锁开启期间按节流反复试，而不是只试一次。考试模式已在上面早退。 */
+    if ((yzhook::g_flags & YZ_FLAG_INPUT_UNLOCK) != 0)
+        yzhook::NativeUnhookTick();
+
     InterlockedExchange(&yzhook::g_hooksInstalled, static_cast<LONG>(yzhook::HookActiveCount()));
 }
 
@@ -297,10 +303,29 @@ void HandleCommand(DWORD opcode, const std::vector<BYTE>& payload)
     switch (opcode)
     {
     case YZ_CMD_APPLY_CONFIG:
-        if (payload.size() >= sizeof(YZ_CONFIG))
+        if (payload.size() < sizeof(YZ_CONFIG))
+        {
+            YZLOGE(L"收到截断的配置帧（%u < %u 字节），忽略",
+                   static_cast<unsigned>(payload.size()),
+                   static_cast<unsigned>(sizeof(YZ_CONFIG)));
+            break;
+        }
         {
             YZ_CONFIG cfg;
             memcpy(&cfg, payload.data(), sizeof(cfg));
+
+            /* 结构体自述尺寸与协议版本必须对得上：主程序与 Hook DLL 版本不一致时
+               （例如 ini 里 HookDllPath 指向旧 DLL），宁可拒绝配置，也不要按错位的
+               字段去覆盖状态。拒绝时两边日志都要留痕。 */
+            if (cfg.size < sizeof(YZ_CONFIG) || cfg.version != YZ_PROTOCOL_VERSION)
+            {
+                YZLOGE(L"配置帧不兼容：size=%u（本进程 %u）version=%u（本进程 %u），已拒绝",
+                       cfg.size, static_cast<unsigned>(sizeof(YZ_CONFIG)),
+                       cfg.version, static_cast<unsigned>(YZ_PROTOCOL_VERSION));
+                yzhook::SendLogToHost(YZ_LOG_ERROR,
+                    L"配置帧与 Hook DLL 不兼容，配置已被拒绝（检查 ini 里的 HookDllPath 是否指向旧 DLL）");
+                break;
+            }
             yzhook::EngineApplyConfig(cfg);
         }
         break;
@@ -602,6 +627,21 @@ bool EngineIsExamMode()
     return g_examMode != 0;
 }
 
+namespace
+{
+/* 把引擎（跑在目标进程里）的每一条 YZLOG 镜像进管道。
+   动机（2026-09-23 复核 P0）：hook DLL 的日志目录是**目标进程**的 %TEMP%，目标以
+   SYSTEM 运行时那是 C:\Windows\Temp\YZTrainer\yzt.log，永远进不了宿主导出的诊断包——
+   现场只剩 SendLogToHost 显式发的那几行，HookAttach 失败、NativeUnhook 跳过、
+   PolicyBackup/PolicyRestore、hook 组安装失败这些关键证据全部丢失。
+   安全性：yz::LogWrite 是在离开它自己的临界区之后才回调 sink 的，而 SendLogToHost
+   只做"入队 + SetEvent"，不会再写日志，因此不会自激死锁或递归。 */
+void LogSinkToHost(int level, const wchar_t* text, void* /*ctx*/)
+{
+    SendLogToHost(level, text);
+}
+} /* namespace */
+
 void EngineStart()
 {
     if (g_running)
@@ -612,6 +652,9 @@ void EngineStart()
         InitializeCriticalSection(&g_cs);
         g_csInit = true;
     }
+
+    /* 必须在 g_csInit 之后注册：SendLogToHost 在临界区未初始化时会直接丢弃。 */
+    yz::LogSetSink(&LogSinkToHost, nullptr);
 
     g_targetDir = yz::ToLower(yz::DirNameOf(yz::GetSelfPath()));
     g_stopEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);

@@ -27,6 +27,10 @@ HHOOK g_keyHook = nullptr;
 int   g_frame = 0;
 bool  g_examRequested = false;
 bool  g_execRequested = false;
+/* --load <dll>：4 秒后再加载指定 DLL，用来验证"远志的钩子模块晚于注入出现"时
+   主动拔钩的重试（NativeUnhookTick）会不会真的再试一次。模块名必须与被查的名字
+   一致（例如把 ExdHooks.dll 复制出来单独放）。 */
+std::wstring g_lateLoadDll;
 HBITMAP g_captureBmp = nullptr;
 void*   g_captureBits = nullptr;
 int     g_captureW = 0;
@@ -184,6 +188,18 @@ void MakeFullscreen()
 
 /* 模拟"教师端远程执行命令"：在学生进程里跑一次 CreateProcess，
    审计 hook 应该把它记进 remote-exec.log（origin=remote） */
+/* --load：4 秒后加载一个 DLL，模拟"注入已经发生、远志的钩子模块随后才被加载"。
+   主程序侧应当在此之后 2 秒内再试一次主动拔钩（NativeUnhookTick）。 */
+void LoadLateDllOnce()
+{
+    if (g_lateLoadDll.empty())
+        return;
+    HMODULE mod = LoadLibraryW(g_lateLoadDll.c_str());
+    AppendFile(yz::JoinPath(g_exeDir, L"sim_log.txt"),
+               yz::Format(L"late-load %s -> %p err=%u", g_lateLoadDll.c_str(),
+                          reinterpret_cast<void*>(mod), mod ? 0u : GetLastError()));
+}
+
 void SpawnChildOnce()
 {
     wchar_t sysDir[MAX_PATH] = {0};
@@ -238,6 +254,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         {
             KillTimer(hwnd, 5);
             SpawnChildOnce();
+        }
+        else if (wParam == 6)
+        {
+            KillTimer(hwnd, 6);
+            LoadLateDllOnce();
         }
         return 0;
 
@@ -315,6 +336,31 @@ int WINAPI wWinMain(HINSTANCE hinst, HINSTANCE, LPWSTR cmdLine, int)
     SetTimer(g_main, 4, 1000, nullptr);   /* 状态落盘 */
     if (g_execRequested)
         SetTimer(g_main, 5, 4000, nullptr);   /* 一次性：模拟教师端远程执行 */
+
+    /* 一次性：4 秒后加载 --load 指定的 DLL（模拟"钩子模块晚于注入出现"） */
+    if (cmdLine != nullptr)
+    {
+        const wchar_t* loadArg = wcsstr(cmdLine, L"--load ");
+        if (loadArg != nullptr)
+        {
+            std::wstring p = yz::Trim(std::wstring(loadArg + 7));
+            if (!p.empty() && p[0] == L'"')
+            {
+                const size_t e = p.find(L'"', 1);
+                if (e != std::wstring::npos)
+                    p = p.substr(1, e - 1);
+            }
+            else
+            {
+                const size_t sp = p.find(L' ');
+                if (sp != std::wstring::npos)
+                    p = p.substr(0, sp);
+            }
+            g_lateLoadDll = p;
+            if (!g_lateLoadDll.empty())
+                SetTimer(g_main, 6, 4000, nullptr);
+        }
+    }
 
     g_keyHook = SetWindowsHookExW(WH_KEYBOARD_LL, KeyHookProc, nullptr, 0);
     ClipCursor(nullptr);

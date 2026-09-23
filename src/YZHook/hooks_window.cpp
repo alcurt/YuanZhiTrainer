@@ -154,7 +154,10 @@ void ApplyWindowize(HWND hwnd, const RECT& mon)
     int x = mon.left + (monW - w) / 2;
     int y = mon.top + (monH - h) / 2;
 
-    yzhook::TryEnterHook();
+    /* 本函数经常是在别的 hook（Hook_SetWindowPos / Hook_ShowWindow / Hook_MoveWindow）
+       内部被调用的，那时 TryEnterHook 会返回 false。必须严格成对：只有真进来过才 Leave，
+       否则会把外层的重入计数提前清零，后面再次调用被 hook 的 API 就会真的递归进来。 */
+    const bool entered = yzhook::TryEnterHook();
 
     LONG style = GetWindowLongW(hwnd, GWL_STYLE);
     LONG ex    = GetWindowLongW(hwnd, GWL_EXSTYLE);
@@ -172,7 +175,8 @@ void ApplyWindowize(HWND hwnd, const RECT& mon)
     SetWindowPos(hwnd, g_topmost ? HWND_TOPMOST : HWND_NOTOPMOST, x, y, w, h,
                  SWP_NOACTIVATE | SWP_FRAMECHANGED | SWP_SHOWWINDOW);
 
-    yzhook::LeaveHook();
+    if (entered)
+        yzhook::LeaveHook();
 
     MarkTracked(hwnd);
     g_windowizeCount++;
@@ -194,7 +198,8 @@ void ApplyFakeFullscreen(HWND hwnd, const RECT& mon)
     if (monW <= 0 || monH <= 0)
         return;
 
-    yzhook::TryEnterHook();
+    /* 同 ApplyWindowize：可能是嵌套调用，严格按 entered 成对释放 */
+    const bool entered = yzhook::TryEnterHook();
 
     const LONG style = GetWindowLongW(hwnd, GWL_STYLE);
     const LONG ex    = GetWindowLongW(hwnd, GWL_EXSTYLE);
@@ -214,7 +219,8 @@ void ApplyFakeFullscreen(HWND hwnd, const RECT& mon)
                  mon.left, mon.top, monW, monH,
                  SWP_NOACTIVATE | SWP_FRAMECHANGED | SWP_SHOWWINDOW);
 
-    yzhook::LeaveHook();
+    if (entered)
+        yzhook::LeaveHook();
 
     MarkTracked(hwnd);
     g_windowizeCount++;

@@ -4,6 +4,15 @@
 
 namespace
 {
+/* ⚠ 已知边界（批次 2 待验证，先不动）：
+   本文件全部用 HKEY_CURRENT_USER，而这段代码跑在**目标进程**里（Yistart.exe 以
+   SYSTEM 运行），所以解析出来的是 SYSTEM 的 hive，不是登录学生那个用户的 hive。
+   后果：把 DisableTaskMgr / NoWinKeys 之类"改回来"对登录用户可能根本没生效，
+   PolicyRestore 也可能是"执行了但用户侧没变化"。
+   2026-09-23 复核 P1.2。验证办法：在被锁的机器上分别读
+     HKU\<学生 SID>\Software\Microsoft\Windows\CurrentVersion\Policies\...
+   与 SYSTEM 的 hive，看远志到底写在哪一侧。确认后再决定是否引入
+   WTSQueryUserToken / 直接操作交互用户 hive —— 注入本身还没稳之前不加这层不确定性。 */
 struct Item
 {
     HKEY         root;
