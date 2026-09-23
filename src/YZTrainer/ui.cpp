@@ -254,7 +254,7 @@ void NotifyHiddenToTray()
     if (s_notified)
         return;
     s_notified = true;
-    Balloon(L"YZTrainer 提示", L"窗口已隐藏到托盘：双击托盘图标显示主界面，右键打开菜单");
+    Balloon(L"YZTrainer 提示", L"窗口已隐藏到托盘：左键单击托盘图标显示主界面，右键打开菜单");
 }
 
 void OnCommandWord(HWND hwnd, int id)
@@ -491,14 +491,16 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         return 0;
 
     case WM_YZ_TRAY:
-        if (LOWORD(lParam) == WM_LBUTTONDBLCLK)
+        /* 托盘交互与主流 Windows 程序一致：左键单击 = 显示并前置主界面，
+           右键单击 = 上下文菜单。双击也按"左键"处理——系统会先后发出
+           WM_LBUTTONUP 与 WM_LBUTTONDBLCLK，两个分支都指向同一动作。 */
+        if (LOWORD(lParam) == WM_LBUTTONUP || LOWORD(lParam) == WM_LBUTTONDBLCLK)
         {
-            /* 双击托盘图标 = 显示主界面（与隐藏提示里说的一致） */
-            ShowWindow(hwnd, SW_SHOW);
+            ShowWindow(hwnd, SW_RESTORE);
             SetForegroundWindow(hwnd);
             return 0;
         }
-        if (LOWORD(lParam) == WM_RBUTTONUP || LOWORD(lParam) == WM_LBUTTONUP)
+        if (LOWORD(lParam) == WM_RBUTTONUP)
             ShowTrayMenu(hwnd);
         return 0;
 

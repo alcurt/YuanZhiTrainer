@@ -399,6 +399,42 @@ void ProbeAccessCapability(DWORD pid, ProbeData& data)
 
 /* ---------- 非微软内核驱动（保护件/杀软/还原卡都会出现在这张表里） ---------- */
 
+/* 枚举服务/驱动。ERROR_MORE_DATA 表示缓冲区在两次调用之间不够用了，必须按新的
+   needed 重来；直接放弃会让整张表静默变空——服务与驱动两张表都栽在这上面过。 */
+bool EnumServicesEx(SC_HANDLE scm, DWORD type, std::vector<BYTE>& buffer, DWORD* count, DWORD* err)
+{
+    *count = 0;
+    *err   = 0;
+
+    for (int attempt = 0; attempt < 4; attempt++)
+    {
+        DWORD needed = 0, returned = 0, resume = 0;
+        const BOOL first = EnumServicesStatusExW(scm, SC_ENUM_PROCESS_INFO, type, SERVICE_STATE_ALL,
+                                                nullptr, 0, &needed, &returned, &resume, nullptr);
+        if (needed == 0)
+        {
+            *err = GetLastError();
+            return first != FALSE;          /* 成功但 0 字节 = 本机确实没有匹配项 */
+        }
+
+        /* 多留一点余量，减少"两次调用之间服务数变化"导致的重复失败 */
+        buffer.assign(static_cast<size_t>(needed) + 4096, 0);
+        resume = 0;
+        if (EnumServicesStatusExW(scm, SC_ENUM_PROCESS_INFO, type, SERVICE_STATE_ALL,
+                                  buffer.data(), static_cast<DWORD>(buffer.size()),
+                                  &needed, &returned, &resume, nullptr))
+        {
+            *count = returned;
+            return true;
+        }
+
+        *err = GetLastError();
+        if (*err != ERROR_MORE_DATA)
+            return false;
+    }
+    return false;
+}
+
 /* 取版本资源里的某个字符串（CompanyName / FileVersion …） */
 std::wstring FileVersionValue(const std::wstring& path, const wchar_t* key)
 {
@@ -458,21 +494,20 @@ void CollectThirdPartyDrivers(ProbeData& data)
 {
     SC_HANDLE scm = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_ENUMERATE_SERVICE);
     if (scm == nullptr)
-        return;
-
-    DWORD needed = 0, returned = 0, resume = 0;
-    EnumServicesStatusExW(scm, SC_ENUM_PROCESS_INFO, SERVICE_DRIVER, SERVICE_STATE_ALL,
-                          nullptr, 0, &needed, &returned, &resume, nullptr);
-    if (needed == 0)
     {
-        CloseServiceHandle(scm);
+        data.notes.push_back(yz::Format(L"驱动清单未采集：OpenSCManager 失败 err=%u",
+                                        GetLastError()));
         return;
     }
 
-    std::vector<BYTE> buffer(needed);
-    if (!EnumServicesStatusExW(scm, SC_ENUM_PROCESS_INFO, SERVICE_DRIVER, SERVICE_STATE_ALL,
-                               buffer.data(), needed, &needed, &returned, &resume, nullptr))
+    std::vector<BYTE> buffer;
+    DWORD             returned = 0;
+    DWORD             enumErr  = 0;
+    if (!EnumServicesEx(scm, SERVICE_DRIVER, buffer, &returned, &enumErr))
     {
+        data.notes.push_back(yz::Format(L"驱动清单未采集：服务枚举失败 %s"
+                                        L"（这张表为空时不要再下\"没有保护件\"的结论）",
+                                        yz::Win32ErrorMessage(enumErr).c_str()));
         CloseServiceHandle(scm);
         return;
     }
@@ -769,20 +804,13 @@ void CollectServices(ProbeData& data)
         return;
     }
 
-    DWORD needed = 0, returned = 0, resume = 0;
-    EnumServicesStatusExW(scm, SC_ENUM_PROCESS_INFO, SERVICE_DRIVER | SERVICE_WIN32,
-                          SERVICE_STATE_ALL, nullptr, 0, &needed, &returned, &resume, nullptr);
-    if (needed == 0)
+    std::vector<BYTE> buffer;
+    DWORD             returned = 0;
+    DWORD             enumErr  = 0;
+    if (!EnumServicesEx(scm, SERVICE_DRIVER | SERVICE_WIN32, buffer, &returned, &enumErr))
     {
-        CloseServiceHandle(scm);
-        return;
-    }
-
-    std::vector<BYTE> buffer(needed);
-    if (!EnumServicesStatusExW(scm, SC_ENUM_PROCESS_INFO, SERVICE_DRIVER | SERVICE_WIN32,
-                               SERVICE_STATE_ALL, buffer.data(), needed, &needed, &returned,
-                               &resume, nullptr))
-    {
+        data.notes.push_back(yz::Format(L"服务枚举失败: %s",
+                                        yz::Win32ErrorMessage(enumErr).c_str()));
         CloseServiceHandle(scm);
         return;
     }

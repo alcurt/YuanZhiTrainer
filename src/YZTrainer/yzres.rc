@@ -37,12 +37,12 @@ BEGIN
         BEGIN
             VALUE "CompanyName",      "alcurt"
             VALUE "FileDescription",  "YZTrainer - Yuanzhi classroom client unlock tool"
-            VALUE "FileVersion",      "0.5.1.0"
+            VALUE "FileVersion",      "0.6.0.0"
             VALUE "InternalName",     "YZTrainer"
             VALUE "LegalCopyright",   "MIT License"
             VALUE "OriginalFilename", "YZTrainer.exe"
             VALUE "ProductName",      "YZTrainer"
-            VALUE "ProductVersion",   "0.5.1"
+            VALUE "ProductVersion",   "0.6.0"
         END
     END
     BLOCK "VarFileInfo"
