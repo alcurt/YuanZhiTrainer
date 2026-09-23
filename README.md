@@ -1,6 +1,6 @@
 # YZTrainer
 
-> **v0.6.1** · 一款**远志多媒体教学管理软件 V9.0 网管版学生端**的解控软件 · 仅供**教育研究**与**技术学习**，禁止任何非法用途 · 与厂商无关联，使用者自行承担全部后果。
+> **v0.6.2** · 一款**远志多媒体教学管理软件 V9.0 网管版学生端**的解控软件 · 仅供**教育研究**与**技术学习**，禁止任何非法用途 · 与厂商无关联，使用者自行承担全部后果。
 
 针对 **广州远志（Howyar）YZinfo 多媒体教学网络系统 V9.0 网管版学生端** 的课堂辅助工具（普通学生端同样适用，实测机房部署的是网管版），参照 JiYuTrainer 的思路重新实现（不复制其代码）。
 
@@ -74,8 +74,8 @@ pwsh -File build.ps1 -Both
 | `YZTrainer.exe` | 主程序（清单要求管理员权限），已内嵌 YZHook.dll，单文件即可运行 |
 | `YZHook.dll` | 注入模块，运行时从 exe 资源释放；dist 下这份是回退/调试用，分发时不需要拷贝 |
 | `YZProbe.exe` | 机房侦察工具，只读，建议先跑它 |
-| `YZSysRun.exe` | **以 SYSTEM 身份运行指定程序**的轻量启动器（令牌复制，不装服务、不写注册表）：用来复测"换个身份是否就不被剥句柄权限"。用法 `YZSysRun.exe -- YZProbe.exe -o <目录> --no-pause`。它从**当前会话**的 `winlogon.exe` 复制主令牌并以 `winsta0\default` 启动子进程，因此子进程仍在交互桌面上；启动后会打印令牌来源、子进程会话与完整性级别（应为 系统(16384) 且会话号与当前一致） |
-| `YZUnhookTest.exe` | 免注入拔钩验证工具：默认只体检（读文件导出表 + 调用约定自检）并把过程写入同目录 `YZUnhookTest-<时间戳>.txt`；`--apply` 才真正调用远志的拔钩导出，`--arm` 待机等你回车再执行，`--delay N` 待机 N 秒后自动执行（被锁键鼠时唯一可行的触发方式），`--no-pause` 供脚本调用 |
+| `YZSysRun.exe` | **以 SYSTEM 身份运行指定程序**的轻量启动器（令牌复制，不装服务、不写注册表）：用来复测"换个身份是否就不被剥句柄权限"。用法 `YZSysRun.exe -- YZProbe.exe -o <目录> --no-pause`。它从**当前会话**的 `winlogon.exe` 复制主令牌并以 `winsta0\default` 启动子进程，因此子进程仍在交互桌面上；启动后会打印令牌来源、子进程会话与完整性级别（应为 系统(16384) 且会话号与当前一致）。**控制台的全部输出同时写成同目录 `YZSysRun-<时间戳>.txt`（可用 `--log <文件>` 指定路径，exe 目录不可写时依次退当前目录、`%TEMP%\YZTrainer\`）**，免得现场来不及另存 |
+| `YZUnhookTest.exe` | 免注入拔钩验证工具：默认只体检（读文件导出表 + 调用约定自检）并把过程写入同目录 `YZUnhookTest-<时间戳>.txt`；`--apply` 才真正调用远志的拔钩导出，`--arm` 待机等你回车再执行，`--delay N` 待机 N 秒后自动执行（被锁键鼠时唯一可行的触发方式），`--no-pause` 供脚本调用。调用前后会打印对照节的**基址、大小、前 32 字节原始值**和三个 HHOOK/标志字（v0.6.2 起按**节名+节内偏移**定位；此前写死的 RVA 差了两个数量级，所以在现场报告里从来没出现过对照行） |
 | `YZSimTarget.exe` | 模拟学生端，仅本地测试用 |
 
 ## 建议的使用流程
@@ -146,7 +146,7 @@ ProcessNames=Yistart.exe;TEACHCMD.exe;PlayerGUI.exe;ExdPaintHelper.exe
 * **调用约定自检（fail-closed）**：调用远志自带导出前，用内置的 HDE32 走真实指令流确认函数以 `ret` / `ret 0` 收尾、单参函数确实读取 `[esp+4]`；出现 `ret imm16 != 0`、远返回、thunk(`jmp`) 或解析失败一律拒绝调用并记 ERROR。裸字节扫描会被指令里的 ModRM 字节骗到（例如 `3B C3` 里的 `0xC3`），所以必须走解码。
 * **备用注入方式（消息钩子）**：`InjectMethod=1` 时，主程序用 `SetWindowsHookEx(WH_GETMESSAGE)` 把已释放的 `YZHook.dll` 挂到会话的 GUI 线程上，由系统加载器把 DLL 映射进目标进程——我们自己不写目标内存，因此能绕开"内核组件剥夺句柄 VM 权限"这一类保护（`OpenProcess` 成功、`VirtualAllocEx` 返回 0x5 的场景）。代价是 DLL 会被映射进本会话所有 GUI 进程（宿主识别不通过的进程里只是空转），因此默认仍用远程线程方式，只在被剥夺句柄权限的机器上切到 1。
 * **注入能力诊断（YZProbe）**：探针用 `GetProcessInformation(ProcessProtectionLevelInfo)` 读进程保护级别（`PROTECTION_LEVEL` 枚举，`0xFFFFFFFE`=无保护）、用 `NtQueryObject` 读句柄**实得权限**，再逐项实测模块枚举 / `ReadProcessMemory` / `VirtualAllocEx` / `WriteProcessMemory`（只写自己刚分配的一页并立刻释放）。`--access <pid>` 可对单个进程单独诊断。它同时列出非微软签名的内核驱动（保护件/杀软/还原卡）与服务的 `SERVICE_CONFIG_LAUNCH_PROTECTED` 标志。
-* **免注入拔钩（YZUnhookTest）**：工具在**本进程**里 `LoadLibrary` 远志那两个 DLL，再调用 `KillHook()` / `UnSetExdHooks(0)` / `UnSetExdHooks2(GetCurrentThreadId())`，完全不需要注入目标进程。**2026-09-23 静态纠正**：原先假设"两个 DLL 都靠跨进程共享节传递 HHOOK"，节表只对了一半——`ExdHooks.dll` 的 `.ExdHook` 是真共享节（flags `0xD0000040`，含 `MEM_SHARED`，RVA 0x7000，56 字节），而 `KeyboardHook.dll` 的 `HookData` **不是**（flags `0xC0000040`，没有共享位，导入表里也没有任何 file-mapping/共享内存 API），它在每个进程里都是私有副本。所以"在本进程调 `KillHook` 去拔远志的钩子"**结构上就不成立**，机器上表现为"调用成功但毫无效果"。工具默认只体检（读文件导出表 + 调用约定自检），`--apply` 才真调用，并在调用前后打印 `.ExdHook` 里的句柄/状态字作为对照。
+* **免注入拔钩（YZUnhookTest）**：工具在**本进程**里 `LoadLibrary` 远志那两个 DLL，再调用 `KillHook()` / `UnSetExdHooks(0)` / `UnSetExdHooks2(GetCurrentThreadId())`，完全不需要注入目标进程。**2026-09-23 静态纠正**：原先假设"两个 DLL 都靠跨进程共享节传递 HHOOK"，节表只对了一半——`ExdHooks.dll` 的 `.ExdHook` 是真共享节（flags `0xD0000040`，含 `MEM_SHARED`，RVA 0x7000，56 字节），而 `KeyboardHook.dll` 的 `HookData` **不是**（flags `0xC0000040`，没有共享位，导入表里也没有任何 file-mapping/共享内存 API），它在每个进程里都是私有副本。所以"在本进程调 `KillHook` 去拔远志的钩子"**结构上就不成立**，机器上表现为"调用成功但毫无效果"。工具默认只体检（读文件导出表 + 调用约定自检），`--apply` 才真调用，并在调用前后打印对照节的基址/大小/前 32 字节原始值与三个 HHOOK/标志字——**这些值全为 0 就说明那一层当时根本没装钩子**，这是判断"锁在哪一层"的第一手证据。
 * **窗口层（两种模式）**：hook `SetWindowPos` / `MoveWindow` / `ShowWindow` / `SetWindowLongA/W`，命中“本进程 + 无标题栏 + 覆盖整块显示器 + 置顶或 POPUP”的窗口后按模式处理——**窗口化**改写 `WS_OVERLAPPEDWINDOW`（默认屏宽 60% 居中、不抢焦点），**假全屏**保留 `WS_POPUP` 全屏外观、只把 `WS_EX_TOPMOST` 去掉并强制 `HWND_NOTOPMOST`；两者都在客户端每 3 秒抢回全屏时按 500ms 节流重新纠正，假全屏另有"已达稳态就不再改"的判据，避免每秒白改一次。
 * **外部窗口纠正（免注入兜底）**：窗口样式是会话级对象，改别人的窗口不需要目标进程配合。主程序每秒按**同一套结构判据**枚举顶层窗口，命中"属于远志进程 + 无属主 + 无标题栏 + 非子窗口 + 非桌面壳类 + 覆盖整块显示器 + POPUP 或置顶"后用跨进程 `SetWindowLongPtrW` + `SetWindowPos(..., SWP_ASYNCWINDOWPOS)` 改成普通窗口（`ExternalWindowFix`），节流 1 秒；`Flags` 里给的是假全屏时同样支持跨进程做假全屏。这是"客户端被剥夺句柄权限、`VirtualAllocEx` 返回 0x5"时唯一还能生效的窗口手段；进程内 Hook 已生效的宿主进程会被跳过（避免两边抢同一个窗口），其余远志进程仍由它兜底。写入被拒（UIPI / win32k 权限检查）会记 WARN 并在状态栏显示"有写入失败"，不静默失败。
 * **远程执行审计层**：hook `kernel32!CreateProcessA/W`、`WinExec`、`user32!ExitWindowsEx`，以及（仅当目标进程已加载 `shell32` 时）`shell32!ShellExecuteExW`。一律**先调用原函数拿到真实结果，再写审计**，不做任何拦截。审计行同时落 `yzt.log` 侧的 INFO 与 `remote-exec.log`，按 exe 是否在远志安装目录里标注 `origin=self|remote`，界面日志只播报 `remote` 的条目。不为了审计去加载 shell32。

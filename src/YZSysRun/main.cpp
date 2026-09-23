@@ -42,7 +42,21 @@
 
 namespace
 {
-/* ---------- 输出：控制台优先走 WriteConsoleW，避免重定向/代码页把中文变成 '?' ---------- */
+HANDLE g_log = INVALID_HANDLE_VALUE;
+
+void WriteUtf8(HANDLE h, const wchar_t* text)
+{
+    char  utf8[8192] = {0};
+    const int n      = WideCharToMultiByte(CP_UTF8, 0, text, -1, utf8, sizeof(utf8) - 1,
+                                           nullptr, nullptr);
+    DWORD written = 0;
+    if (n > 0)
+        WriteFile(h, utf8, static_cast<DWORD>(n - 1), &written, nullptr);
+}
+
+/* ---------- 输出：控制台优先走 WriteConsoleW，避免重定向/代码页把中文变成 '?'；
+   同时整份写进 txt——现场着急时来不及另存控制台内容，而"令牌来源 / 子进程会话与
+   完整性"这几行本身就是判据，丢了就没法复盘。 ---------- */
 void Out(const wchar_t* fmt, ...)
 {
     wchar_t buf[4096] = {0};
@@ -60,10 +74,32 @@ void Out(const wchar_t* fmt, ...)
     }
     else if (out != nullptr && out != INVALID_HANDLE_VALUE)
     {
-        const std::string utf8    = yz::WideToUtf8(buf);
-        DWORD             written = 0;
-        WriteFile(out, utf8.c_str(), static_cast<DWORD>(utf8.size()), &written, nullptr);
+        WriteUtf8(out, buf);
     }
+
+    if (g_log != INVALID_HANDLE_VALUE)
+        WriteUtf8(g_log, buf);
+}
+
+bool OpenLogFile(const std::wstring& path)
+{
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr,
+                           CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE)
+        return false;
+    g_log = h;
+    return true;
+}
+
+/* 所有 return 都走这里，保证日志文件句柄被关掉 */
+int Finish(int code)
+{
+    if (g_log != INVALID_HANDLE_VALUE)
+    {
+        CloseHandle(g_log);
+        g_log = INVALID_HANDLE_VALUE;
+    }
+    return code;
 }
 
 const wchar_t* IntegrityText(DWORD rid)
@@ -185,9 +221,11 @@ void Usage()
     Out(L"      YZSysRun.exe [--no-wait] <程序> [参数...]\n\n");
     Out(L"  --no-wait    不等待子进程结束\n");
     Out(L"  --session N  从第 N 个会话的 winlogon 取令牌（默认取当前会话）\n");
+    Out(L"  --log <文件> 控制台输出同时写进这个文件（默认写 exe 同目录 YZSysRun-<时间戳>.txt）\n");
     Out(L"  --           之后的参数全部交给目标程序\n\n");
     Out(L"说明: 令牌从当前会话的 winlogon.exe 复制，子进程留在同一会话、同一桌面\n");
     Out(L"      (winsta0\\default)，因此仍能操作交互桌面上的窗口。\n");
+    Out(L"      控制台的全部内容会自动存成 txt，退出时会打印文件路径。\n");
 }
 } /* namespace */
 
@@ -200,6 +238,7 @@ int wmain(int argc, wchar_t** argv)
     bool                      wait    = true;
     bool                      target  = false;   /* 见到第一个非选项参数后全是目标程序与参数 */
     DWORD                     session = yz::SessionIdOfCurrentProcess();
+    std::wstring              logPathArg;
     std::vector<std::wstring> rest;
 
     for (size_t i = 0; i < args.size(); i++)
@@ -227,21 +266,60 @@ int wmain(int argc, wchar_t** argv)
                 session = static_cast<DWORD>(_wtoi(args[++i].c_str()));
                 continue;
             }
+            if (a == L"--log" && i + 1 < args.size())
+            {
+                logPathArg = args[++i];
+                continue;
+            }
             target = true;
         }
         rest.push_back(a);
     }
 
+    /* 日志文件：优先用 --log 指定；否则按 exe 同目录 → 当前目录 → %TEMP%\YZTrainer\ 依次尝试。
+       放到 exe 同目录是与 YZUnhookTest 一致的约定，多份 txt 聚在一起便于整包带走。 */
+    std::wstring logPath;
+    if (!logPathArg.empty())
+    {
+        if (OpenLogFile(logPathArg))
+            logPath = logPathArg;
+    }
+    else
+    {
+        const std::wstring        stamp = yz::NowStamp();
+        std::vector<std::wstring> cands;
+        cands.push_back(yz::JoinPath(yz::GetExeDir(), L"YZSysRun-" + stamp + L".txt"));
+
+        wchar_t cwd[MAX_PATH * 2] = {0};
+        if (GetCurrentDirectoryW(ARRAYSIZE(cwd), cwd) != 0)
+            cands.push_back(yz::JoinPath(cwd, L"YZSysRun-" + stamp + L".txt"));
+
+        const std::wstring tempDir = yz::JoinPath(yz::GetTempDir(), L"YZTrainer");
+        yz::EnsureDirectory(tempDir);
+        cands.push_back(yz::JoinPath(tempDir, L"YZSysRun-" + stamp + L".txt"));
+
+        for (size_t i = 0; i < cands.size(); i++)
+        {
+            if (OpenLogFile(cands[i]))
+            {
+                logPath = cands[i];
+                break;
+            }
+        }
+    }
+
+    Out(L"YZSysRun %s\n", YZ_VERSION_STR);
+    Out(L"日志文件: %s\n", logPath.empty() ? L"（创建失败，只有控制台输出）" : logPath.c_str());
+
     if (rest.empty())
     {
         Usage();
-        return 2;
+        return Finish(2);
     }
 
     const DWORD myPid     = GetCurrentProcessId();
     const DWORD mySession = yz::SessionIdOfCurrentProcess();
 
-    Out(L"YZSysRun %s\n", YZ_VERSION_STR);
     Out(L"本进程 : pid=%u 会话=%u 完整性=%s\n", myPid, mySession,
         IntegrityText(yz::GetHandleIntegrityRid(GetCurrentProcess())));
     Out(L"目标   : %s", rest[0].c_str());
@@ -267,7 +345,7 @@ int wmain(int argc, wchar_t** argv)
     if (winlogonPid == 0)
     {
         Out(L"错误    : 会话 %u 里找不到 winlogon.exe，无法复制 SYSTEM 令牌。\n", session);
-        return 3;
+        return Finish(3);
     }
     Out(L"令牌来源: winlogon.exe pid=%u（会话 %u）\n", winlogonPid, session);
 
@@ -278,7 +356,7 @@ int wmain(int argc, wchar_t** argv)
     {
         Out(L"错误    : OpenProcess(winlogon) 失败: %s\n",
             yz::Win32ErrorMessage(GetLastError()).c_str());
-        return 4;
+        return Finish(4);
     }
 
     HANDLE ht = nullptr;
@@ -287,7 +365,7 @@ int wmain(int argc, wchar_t** argv)
         Out(L"错误    : OpenProcessToken 失败: %s\n",
             yz::Win32ErrorMessage(GetLastError()).c_str());
         CloseHandle(hp);
-        return 5;
+        return Finish(5);
     }
     CloseHandle(hp);
 
@@ -297,7 +375,7 @@ int wmain(int argc, wchar_t** argv)
         Out(L"错误    : DuplicateTokenEx 失败: %s\n",
             yz::Win32ErrorMessage(GetLastError()).c_str());
         CloseHandle(ht);
-        return 6;
+        return Finish(6);
     }
     CloseHandle(ht);
 
@@ -364,7 +442,7 @@ int wmain(int argc, wchar_t** argv)
     if (!ok)
     {
         CloseHandle(token);
-        return 7;
+        return Finish(7);
     }
     CloseHandle(token);
     CloseHandle(pi.hThread);
@@ -395,10 +473,14 @@ int wmain(int argc, wchar_t** argv)
         GetExitCodeProcess(pi.hProcess, &code);
         Out(L"子进程退出码 = %u\n", code);
         CloseHandle(pi.hProcess);
-        return static_cast<int>(code);
+        if (!logPath.empty())
+            Out(L"日志已保存: %ls\n", logPath.c_str());
+        return Finish(static_cast<int>(code));
     }
 
     Out(L"--no-wait: 不等待子进程。\n");
     CloseHandle(pi.hProcess);
-    return 0;
+    if (!logPath.empty())
+        Out(L"日志已保存: %ls\n", logPath.c_str());
+    return Finish(0);
 }

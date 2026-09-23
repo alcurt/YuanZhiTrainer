@@ -103,22 +103,30 @@ const TargetEntry kTargets[] =
     { L"KsFiles\\ExdHooks.dll",    "UnSetExdHooks2", true,  true,  L"ExdHooks!UnSetExdHooks2(本线程tid)" },
 };
 
-/* 共享节里“钩子句柄/状态字”的 RVA：只用于调用前后对照，来自本机 V9.0 Student 静态分析。
-   目标机版本不同只会让对照值失去意义，不影响调用本身。 */
+/* 共享节里“钩子句柄/状态字”的位置：用**节名 + 节内偏移**描述，运行时从加载进来的模块
+   PE 节表里取节基址，这样换 DLL 版本也不会像写死 RVA 那样静默读错地方
+   （v0.6.1 之前这里写的是 0x23302C / 0x700000 这种偏移，实际 RVA 是 0x3302C / 0x7000，
+     读的全是模块外的地址，所以现场输出里从来没出现过对照行）。
+   偏移来自本机 V9.0 Student 静态分析（dumpbin 节表 + 三个导出反汇编）：
+     KeyboardHook!KillHook  —— 标志字在 HookData+0x148，三个 HHOOK 在 +0x2C / +0x30 / +0x34
+     ExdHooks!UnSetExdHooks —— 三个 HHOOK 在 .ExdHook+0x00 / +0x04 / +0x08
+     ExdHooks!UnSetExdHooks2—— 另有 +0x0C 的第 4 个句柄、+0x10 的安装线程 tid
+   只用于调用前后对照，读不到不影响调用本身。 */
 struct SnapshotSpec
 {
     const wchar_t* relPath;
+    const wchar_t* section;     /* PE 节名，精确匹配 */
     const wchar_t* note;
-    DWORD          rvas[6];
+    DWORD          offsets[6];  /* 相对节基址 */
     int            count;
 };
 
 const SnapshotSpec kSnapshots[] =
 {
-    { L"Organs\\KeyboardHook.dll", L"HookData: 句柄0/1/2 + 标志字",
-      { 0x23302C, 0x233030, 0x233034, 0x233148, 0, 0 }, 4 },
-    { L"KsFiles\\ExdHooks.dll", L".ExdHook: 句柄/归属/状态字",
-      { 0x700000, 0x700004, 0x700008, 0x70000C, 0x700010, 0 }, 5 },
+    { L"Organs\\KeyboardHook.dll", L"HookData", L"HookData: 三个 HHOOK + 标志字(+0x148)",
+      { 0x2C, 0x30, 0x34, 0x148 }, 4 },
+    { L"KsFiles\\ExdHooks.dll", L".ExdHook", L".ExdHook: 三个 HHOOK + 第4句柄 + 安装线程tid",
+      { 0x00, 0x04, 0x08, 0x0C, 0x10 }, 5 },
 };
 
 /* ---------- 只读 PE 解析：体检阶段拿导出 RVA 与代码字节 ---------- */
@@ -298,18 +306,94 @@ CallArgs* CallTimed(void* proc, bool takesArg, DWORD arg, DWORD waitMs, bool* co
     return a;
 }
 
-bool ReadGlobals(HMODULE mod, const DWORD* rvas, int count, DWORD* out)
+/* 在已加载模块的 PE 头里按名字找节。手算节表偏移（不用 IMAGE_FIRST_SECTION），
+   这样 32/64 位构建都能正确解析 PE32 与 PE32+ 的节表。 */
+BYTE* FindSectionBase(HMODULE mod, const wchar_t* sectionName, DWORD* outSize)
 {
+    if (mod == nullptr || sectionName == nullptr)
+        return nullptr;
+
+    __try
+    {
+        const BYTE* base = reinterpret_cast<const BYTE*>(mod);
+        const IMAGE_DOS_HEADER* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+        if (dos->e_magic != IMAGE_DOS_SIGNATURE)
+            return nullptr;
+
+        const BYTE* nt = base + dos->e_lfanew;
+        if (*reinterpret_cast<const DWORD*>(nt) != IMAGE_NT_SIGNATURE)
+            return nullptr;
+
+        const BYTE* fh       = nt + 4;                                   /* IMAGE_FILE_HEADER */
+        const WORD  nsec     = *reinterpret_cast<const WORD*>(fh + 2);
+        const WORD  optSize  = *reinterpret_cast<const WORD*>(fh + 16);
+        const BYTE* firstSec = fh + 20 + optSize;                        /* 节表起点 */
+
+        for (WORD i = 0; i < nsec; i++)
+        {
+            const BYTE* s      = firstSec + static_cast<size_t>(i) * 40;
+            const DWORD vsize  = *reinterpret_cast<const DWORD*>(s + 8);
+            const DWORD va     = *reinterpret_cast<const DWORD*>(s + 12);
+
+            wchar_t wname[9] = {0};
+            for (int k = 0; k < 8; k++)
+                wname[k] = static_cast<wchar_t>(s[k]);
+            if (_wcsicmp(wname, sectionName) != 0)
+                continue;
+
+            if (outSize != nullptr)
+                *outSize = vsize;
+            return const_cast<BYTE*>(base) + va;
+        }
+        return nullptr;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        return nullptr;
+    }
+}
+
+bool ReadDwords(const BYTE* base, const DWORD* offsets, int count, DWORD* out)
+{
+    if (base == nullptr || offsets == nullptr)
+        return false;
     __try
     {
         for (int i = 0; i < count; i++)
-            out[i] = *reinterpret_cast<const DWORD*>(reinterpret_cast<const BYTE*>(mod) + rvas[i]);
+            out[i] = *reinterpret_cast<const DWORD*>(base + offsets[i]);
         return true;
     }
     __except (EXCEPTION_EXECUTE_HANDLER)
     {
         return false;
     }
+}
+
+/* SEH 必须放在没有 C++ 对象的函数里（C2712），所以读字节单独一个帮手 */
+bool ReadBytes(const BYTE* p, BYTE* out, int count)
+{
+    __try
+    {
+        memcpy(out, p, static_cast<size_t>(count));
+        return true;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        return false;
+    }
+}
+
+/* 节头 32 字节的原始十六进制：偏移万一随版本漂移，这张 dump 还能人工判读 */
+std::wstring Hex32(const BYTE* p)
+{
+    BYTE buf[32] = {0};
+    if (!ReadBytes(p, buf, sizeof(buf)))
+        return std::wstring(L"<读取失败>");
+
+    std::wstring s;
+    for (int i = 0; i < 32; i++)
+        s += yz::Format(L"%02X ", buf[i]);
+    return s;
 }
 
 /* ---------- 安装目录推断：找正在运行的远志进程 ---------- */
@@ -564,16 +648,33 @@ int wmain(int argc, wchar_t** argv)
         }
 
         /* 调用前后读一次共享节里的句柄/状态字（仅对照，读失败不影响调用） */
-        DWORD before[6] = {0};
-        DWORD after[6]  = {0};
-        bool  haveSnap  = false;
+        DWORD  before[6] = {0};
+        DWORD  after[6]  = {0};
+        size_t snapIndex = static_cast<size_t>(-1);
+        BYTE*  snapBase  = nullptr;
+        DWORD  snapSize  = 0;
         for (size_t s = 0; s < sizeof(kSnapshots) / sizeof(kSnapshots[0]); s++)
         {
             if (_wcsicmp(kSnapshots[s].relPath, t.relPath) == 0)
             {
-                haveSnap = ReadGlobals(mod, kSnapshots[s].rvas, kSnapshots[s].count, before);
+                snapIndex = s;
+                snapBase  = FindSectionBase(mod, kSnapshots[s].section, &snapSize);
                 break;
             }
+        }
+
+        const bool haveSnap = (snapIndex != static_cast<size_t>(-1)) &&
+                              ReadDwords(snapBase, kSnapshots[snapIndex].offsets,
+                                         kSnapshots[snapIndex].count, before);
+        if (snapIndex != static_cast<size_t>(-1))
+        {
+            if (snapBase == nullptr)
+                Out(L"  [注意] %ls 里找不到节 %ls，对照值不可用（不影响调用本身）\n",
+                    t.relPath, kSnapshots[snapIndex].section);
+            else
+                Out(L"           节 %-10ls 基址=%p 大小=0x%X 前 32 字节: %ls\n",
+                    kSnapshots[snapIndex].section, static_cast<void*>(snapBase), snapSize,
+                    Hex32(snapBase).c_str());
         }
 
         const DWORD arg = t.argSelfTid ? GetCurrentThreadId() : 0;
@@ -599,17 +700,12 @@ int wmain(int argc, wchar_t** argv)
 
         if (haveSnap)
         {
-            for (size_t s = 0; s < sizeof(kSnapshots) / sizeof(kSnapshots[0]); s++)
-            {
-                if (_wcsicmp(kSnapshots[s].relPath, t.relPath) != 0)
-                    continue;
-                const bool okAfter = ReadGlobals(mod, kSnapshots[s].rvas, kSnapshots[s].count, after);
-                Out(L"           对照 %ls\n", kSnapshots[s].note);
-                Out(L"             调用前: %ls\n", FormatDwords(before, kSnapshots[s].count).c_str());
-                Out(L"             调用后: %ls%ls\n", okAfter ? L"" : L"(读取失败) ",
-                        FormatDwords(after, kSnapshots[s].count).c_str());
-                break;
-            }
+            const SnapshotSpec& sp = kSnapshots[snapIndex];
+            const bool okAfter = ReadDwords(snapBase, sp.offsets, sp.count, after);
+            Out(L"           对照 %ls\n", sp.note);
+            Out(L"             调用前: %ls\n", FormatDwords(before, sp.count).c_str());
+            Out(L"             调用后: %ls%ls\n", okAfter ? L"" : L"(读取失败) ",
+                FormatDwords(after, sp.count).c_str());
         }
     }
 
