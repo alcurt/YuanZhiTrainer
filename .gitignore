@@ -18,11 +18,11 @@ YZProbe-report-*.md
 # 诊断包
 diag-*/
 
-# 机房实测档案：命名形如 YZ-<日期>-<角色>，例如
-#   YZ-26.9.18-ClassmateA / YZ-26.9.18-ClassmateB
-#   YZ-26.9.23-ClassmateA / YZ-26.9.23-Mine / YZ-26.9.23-Teacher
-# 这些目录含机器名、账户、IP、端口等现场信息，只留本地磁盘、绝不入库。
-# 根目录下的 YZ-* 一律忽略（一整份档案，包括其中的 exe/日志/配置）；
+# 机房实测档案：**统一归档到 archive/**，原始目录名形如 YZ-<日期>-<角色>，
+# 例如 archive/YZ-26.9.23Afternoon-Mine、archive/YZ-26.9.23-Mine。
+# 这些内容含机位名、账户、IP、端口等现场信息，只留本地磁盘、绝不入库。
+/archive/
+# 兜底：万一又有档案直接落在根目录（旧习惯），也一并忽略，避免误提交。
 # src/YZHook、src/YZTrainer 等源码目录不受影响。
 /YZ-*/
 

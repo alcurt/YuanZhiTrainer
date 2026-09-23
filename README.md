@@ -1,6 +1,6 @@
 # YZTrainer
 
-> **v0.6.0** · 一款**远志多媒体教学管理软件 V9.0 网管版学生端**的解控软件 · 仅供**教育研究**与**技术学习**，禁止任何非法用途 · 与厂商无关联，使用者自行承担全部后果。
+> **v0.6.1** · 一款**远志多媒体教学管理软件 V9.0 网管版学生端**的解控软件 · 仅供**教育研究**与**技术学习**，禁止任何非法用途 · 与厂商无关联，使用者自行承担全部后果。
 
 针对 **广州远志（Howyar）YZinfo 多媒体教学网络系统 V9.0 网管版学生端** 的课堂辅助工具（普通学生端同样适用，实测机房部署的是网管版），参照 JiYuTrainer 的思路重新实现（不复制其代码）。
 
@@ -142,11 +142,11 @@ ProcessNames=Yistart.exe;TEACHCMD.exe;PlayerGUI.exe;ExdPaintHelper.exe
 
 * **注入**：主程序启用 `SeDebugPrivilege`，`CreateRemoteThread` + `LoadLibraryW` 把内嵌在 exe 资源里的 `YZHook.dll` 注入目标进程（释放到 `%ProgramData%\YZTrainer\cache\`、按内容哈希命名、先校验 PE 架构）；每 2 秒巡检，客户端被服务重启后自动补注入。
 * **目标选择（三路打分 + 一路兜底）**：① 正在全屏广播的窗口宿主 PID，**+5**，判据与 Hook 侧完全一致（无属主 / 无标题栏 / 非子窗口 / 非桌面壳类 / 覆盖整块显示器 / POPUP 或置顶）；② 进程名在 `ProcessNames` 名单，**+3**；③ 安装路径含 `YZinfo Multimedia teaching software` 或 `GYZY`，**+2**。三者都没命中时，才逐个查进程模块是否加载了 `Rmdesk.ads` / `PlayerGUI.dll` / `ExdHooks.dll`（代价高，仅兜底）。选中后在日志里写明命中原因。
-* **主动拔钩**：用户态没有受支持的 API 能摘掉别人装的钩子，但远志自己导出了卸载入口——解锁开关生效时调用 `KeyboardHook.dll!KillHook()`、`ExdHooks.dll!UnSetExdHooks(0)`、`ExdHooks.dll!UnSetExdHooks2(GetCurrentThreadId())`，拔掉“注入之前”就已经装好的全局/线程钩子。调用放在独立工作线程并限时等待（`KillHook` 结尾是 `WaitForSingleObject(..., INFINITE)`，直接在引擎线程调用有挂死风险），调用点用 SEH 兜底。
+* **主动拔钩（只在本进程真正持有钩子时才有意义）**：用户态没有受支持的 API 能摘掉**别人**装的钩子，但远志自己导出了卸载入口——解锁开关生效时调用 `KeyboardHook.dll!KillHook()`、`ExdHooks.dll!UnSetExdHooks(0)`、`ExdHooks.dll!UnSetExdHooks2(GetCurrentThreadId())`。注意 `UnhookWindowsHookEx` 只能由**安装钩子的那个进程**调用，所以这三个入口只有在"远志确实把钩子装进了当前进程"时才会真起作用。调用放在独立工作线程并限时等待（`KillHook` 结尾是 `WaitForSingleObject(..., INFINITE)`，直接在引擎线程调用有挂死风险），调用点用 SEH 兜底。
 * **调用约定自检（fail-closed）**：调用远志自带导出前，用内置的 HDE32 走真实指令流确认函数以 `ret` / `ret 0` 收尾、单参函数确实读取 `[esp+4]`；出现 `ret imm16 != 0`、远返回、thunk(`jmp`) 或解析失败一律拒绝调用并记 ERROR。裸字节扫描会被指令里的 ModRM 字节骗到（例如 `3B C3` 里的 `0xC3`），所以必须走解码。
 * **备用注入方式（消息钩子）**：`InjectMethod=1` 时，主程序用 `SetWindowsHookEx(WH_GETMESSAGE)` 把已释放的 `YZHook.dll` 挂到会话的 GUI 线程上，由系统加载器把 DLL 映射进目标进程——我们自己不写目标内存，因此能绕开"内核组件剥夺句柄 VM 权限"这一类保护（`OpenProcess` 成功、`VirtualAllocEx` 返回 0x5 的场景）。代价是 DLL 会被映射进本会话所有 GUI 进程（宿主识别不通过的进程里只是空转），因此默认仍用远程线程方式，只在被剥夺句柄权限的机器上切到 1。
 * **注入能力诊断（YZProbe）**：探针用 `GetProcessInformation(ProcessProtectionLevelInfo)` 读进程保护级别（`PROTECTION_LEVEL` 枚举，`0xFFFFFFFE`=无保护）、用 `NtQueryObject` 读句柄**实得权限**，再逐项实测模块枚举 / `ReadProcessMemory` / `VirtualAllocEx` / `WriteProcessMemory`（只写自己刚分配的一页并立刻释放）。`--access <pid>` 可对单个进程单独诊断。它同时列出非微软签名的内核驱动（保护件/杀软/还原卡）与服务的 `SERVICE_CONFIG_LAUNCH_PROTECTED` 标志。
-* **免注入拔钩（YZUnhookTest）**：`KeyboardHook.dll` 的 `HookData` 与 `ExdHooks.dll` 的 `.ExdHook` 都是跨进程共享节，HHOOK 又是会话级对象——因此在**本进程**里加载这两个 DLL 并调用 `KillHook()` / `UnSetExdHooks(0)` / `UnSetExdHooks2(GetCurrentThreadId())`，撤销的是同一个钩子集合，完全不需要注入。工具默认只体检（读文件导出表 + 调用约定自检），`--apply` 才真调用，并在调用前后打印共享节里的句柄/状态字作为对照。
+* **免注入拔钩（YZUnhookTest）**：工具在**本进程**里 `LoadLibrary` 远志那两个 DLL，再调用 `KillHook()` / `UnSetExdHooks(0)` / `UnSetExdHooks2(GetCurrentThreadId())`，完全不需要注入目标进程。**2026-09-23 静态纠正**：原先假设"两个 DLL 都靠跨进程共享节传递 HHOOK"，节表只对了一半——`ExdHooks.dll` 的 `.ExdHook` 是真共享节（flags `0xD0000040`，含 `MEM_SHARED`，RVA 0x7000，56 字节），而 `KeyboardHook.dll` 的 `HookData` **不是**（flags `0xC0000040`，没有共享位，导入表里也没有任何 file-mapping/共享内存 API），它在每个进程里都是私有副本。所以"在本进程调 `KillHook` 去拔远志的钩子"**结构上就不成立**，机器上表现为"调用成功但毫无效果"。工具默认只体检（读文件导出表 + 调用约定自检），`--apply` 才真调用，并在调用前后打印 `.ExdHook` 里的句柄/状态字作为对照。
 * **窗口层（两种模式）**：hook `SetWindowPos` / `MoveWindow` / `ShowWindow` / `SetWindowLongA/W`，命中“本进程 + 无标题栏 + 覆盖整块显示器 + 置顶或 POPUP”的窗口后按模式处理——**窗口化**改写 `WS_OVERLAPPEDWINDOW`（默认屏宽 60% 居中、不抢焦点），**假全屏**保留 `WS_POPUP` 全屏外观、只把 `WS_EX_TOPMOST` 去掉并强制 `HWND_NOTOPMOST`；两者都在客户端每 3 秒抢回全屏时按 500ms 节流重新纠正，假全屏另有"已达稳态就不再改"的判据，避免每秒白改一次。
 * **外部窗口纠正（免注入兜底）**：窗口样式是会话级对象，改别人的窗口不需要目标进程配合。主程序每秒按**同一套结构判据**枚举顶层窗口，命中"属于远志进程 + 无属主 + 无标题栏 + 非子窗口 + 非桌面壳类 + 覆盖整块显示器 + POPUP 或置顶"后用跨进程 `SetWindowLongPtrW` + `SetWindowPos(..., SWP_ASYNCWINDOWPOS)` 改成普通窗口（`ExternalWindowFix`），节流 1 秒；`Flags` 里给的是假全屏时同样支持跨进程做假全屏。这是"客户端被剥夺句柄权限、`VirtualAllocEx` 返回 0x5"时唯一还能生效的窗口手段；进程内 Hook 已生效的宿主进程会被跳过（避免两边抢同一个窗口），其余远志进程仍由它兜底。写入被拒（UIPI / win32k 权限检查）会记 WARN 并在状态栏显示"有写入失败"，不静默失败。
 * **远程执行审计层**：hook `kernel32!CreateProcessA/W`、`WinExec`、`user32!ExitWindowsEx`，以及（仅当目标进程已加载 `shell32` 时）`shell32!ShellExecuteExW`。一律**先调用原函数拿到真实结果，再写审计**，不做任何拦截。审计行同时落 `yzt.log` 侧的 INFO 与 `remote-exec.log`，按 exe 是否在远志安装目录里标注 `origin=self|remote`，界面日志只播报 `remote` 的条目。不为了审计去加载 shell32。
@@ -164,9 +164,13 @@ ProcessNames=Yistart.exe;TEACHCMD.exe;PlayerGUI.exe;ExdPaintHelper.exe
 4. 载荷已内嵌（RCDATA）：运行时释放到 `%ProgramData%\YZTrainer\cache\YZHook_<arch>_<hash>.dll`，复用前整文件比对；目录不可写时退 `%TEMP%\YZTrainer-cache\`，再失败才回退 exe 同目录的 `YZHook.dll`。释放出来的文件保留不删，便于排障。
 5. 防监视从设计上只影响学生端自己抓屏的路径，不会改动系统显示驱动。
 6. **同一时间只能运行一份**：主程序用全局互斥体 `Global\YZTrainer_SingleInstance` 防重入，第二份会弹提示后退出。若另一份是**非提权**的旧副本，它还会因完整性级别不够而 `OpenProcess` 失败（错误 0x5），表现就是“什么都没发生”——现场先确认没有其它 YZTrainer 在跑（含 `YZTrainer-noelev.exe` 这类改名副本）。
-7. 主动拔钩依赖远志 DLL 已加载且导出签名与本地分析一致：签名不符时会被运行时自检拒绝（记 ERROR、功能不生效，但不影响其它功能）。本机 V9.0 Student 的 `KillHook` 为无参，`UnSetExdHooks` / `UnSetExdHooks2` 各带 1 个 DWORD 参数（与最初计划书“全部无参”的假设不同，实测内部调用点分别传 `0` 与调用者自身 tid）。
+7. **主动拔钩的真实边界（2026-09-23 逐条反汇编核对）**：
+   * `KeyboardHook.dll` 的 `HookData`（RVA 0x33000）**不是共享节**，跨进程看不到任何句柄——`KillHook` 只有在"远志把这个 DLL 注入进了当前进程"时才有可能有效。
+   * `ExdHooks.dll` 的 `.ExdHook`（RVA 0x7000，56 字节）是**真共享节**，其中 0x70000 / 0x70004 / 0x70008 三个字段是三支钩子的 HHOOK。`UnSetExdHooks(0)` 的流程是：`EnumWindows` 回调里对每个顶层窗口 `RemovePropA(hwnd, atom)`（atom 取自**私有**全局 0x6418，在我们进程里是 0），然后对那三个字段逐个 `UnhookWindowsHookEx` 并清零；`UnSetExdHooks2(tid)` 要求传入 tid 等于共享节里记录的安装线程 tid，否则直接返回 0（`KillHook` 无参，`UnSetExdHooks`/`2` 各带 1 个 DWORD，与最初计划书"全部无参"的假设不同）。
+   * 机房实测 `UnSetExdHooks` 返回 1 → 它走到的是"三个字段都是 0"的分支，即 **ExdHooks 这一层当时没有装钩子**；`UnSetExdHooks2` 返回 0 → tid 不匹配，符合预期（钩子不是我们这个进程装的）。**结论：这条路线目前没有证据支持，别再重复投入。**
+   * 导出签名不符时会被运行时自检拒绝（记 ERROR、功能不生效，不影响其它功能）——这层保护仍然有效。
 8. 外部窗口纠正虽然不需要注入，但**跨进程改样式仍要过 win32k 的权限检查**（win32k 是拿内核句柄去打开目标进程的，因此同样会被"剥句柄权限"的驱动连带拦住）。2026-09-23 机房实测：找到候选广播窗口后，`写样式` / `写扩展样式` / `定位` 三处全部返回 `err=0x5`，30 次重试无一成功——即这条"免注入兜底"目前在学生端上也不成立。别把它归因成"完整性级别差"（反例见上文 `Nmdeputy.exe`）。写入被拒会记 WARN、状态栏显示"有写入失败"；本地模拟目标与主程序同完整性，必然成功，不能用来判断这条路径。
-9. 外部窗口纠正依赖与注入器相同的结构判据，因此**广播窗口若带标题栏（`WS_CAPTION`）或既非 POPUP 也非置顶，同样会漏判**；2026-09-18 的探针报告是在无人广播时采集的，至今没有拿到"正在广播时"的窗口类名/样式证据（见下节）。
+9. 外部窗口纠正依赖与注入器相同的结构判据，因此**广播窗口若带标题栏或既非 POPUP 也非置顶就会漏判**。2026-09-23 已经有了广播期的窗口证据：**全屏广播**下是 `Brw:…` 类、标题"屏幕广播系统"、置顶、无边框、不覆盖整屏；**窗口广播**下同一个类名的窗口处于**最小化**状态（style 含 `WS_MINIMIZE=0x20000000`，rect 为 -32000）。也就是说远志的广播窗口类名以 `Brw:` 开头，"覆盖整屏 + 无标题栏"只在其全屏形态下成立；要不要按类名前缀放宽判据，等下一次在**全屏广播中**同时跑主程序再定，现在改是盲改。
 10. 假全屏只是"看起来还是全屏"：它**不隐藏屏幕内容**，教师在抓屏/监视时看到的仍是你真实屏幕；而且窗口尺寸与置顶状态是远志有权查询的属性，不能排除教师端据此判断异常。它的定位是配合防监视使用，不是反检测手段。另外假全屏下 `YZ_FLAG_TOPMOST`（窗口置顶开关）不生效——这个模式的全部意义就是不置顶。
 11. 远程执行审计只看学生端进程内的用户态 API 调用：注入不进去时没有审计；教师端若通过内核驱动/服务通道直接下发动作（不经 `CreateProcess` 等），也记录不到。它是**审计**而不是防护，日志位置 `%TEMP%\YZTrainer\remote-exec.log`（导出诊断包时会一并复制进 `diag-<时间戳>\`）。
 
@@ -207,7 +211,13 @@ ProcessNames=Yistart.exe;TEACHCMD.exe;PlayerGUI.exe;ExdPaintHelper.exe
 
 其中一条判读经验：**`SetWindowsHookEx` 的返回值不能当作注入成功的证据**。系统是延迟映射 DLL 的，映射失败（被剥夺权限或被 `UIPI` 挡下）时不会回头报错。唯一可信的判据是"目标进程有没有连上管道、`Hook数` 是不是 0"。
 
-四条负面结论指向同一个机制（内核回调剥夺 `Yistart.exe` 的句柄权限），`ProcessProtect.sys` 是当前唯一符合"只在学生机上出现"的候选驱动。下一步的正确顺序是：**先用新版探针的逐权限位表把这个机制钉死**，再决定值不值得把主程序以 SYSTEM 身份上机重测——不要跳过探针直接改架构。
+四条负面结论指向同一个机制（内核回调剥夺 `Yistart.exe` 的句柄权限），`ProcessProtect.sys` 是当前唯一符合"只在学生机上出现"的候选驱动。
+
+2026-09-23 下午补齐了**身份对照实验**（用 `YZSysRun.exe` 在交互会话里以 SYSTEM 跑探针，档案见 `archive/YZ-26.9.23Afternoon-Mine/`）：管理员(12288) 与 SYSTEM(16384) 两份报告的"注入能力实测"**逐字段相同**——`Yistart.exe` 的 `GrantedAccess` 都是 `0x00001402` = `PROCESS_QUERY_LIMITED_INFORMATION`(0x1000) | `PROCESS_QUERY_INFORMATION`(0x0400) | `PROCESS_CREATE_THREAD`(0x0002)，被削掉的正是 `PROCESS_VM_READ` / `PROCESS_VM_WRITE` / `PROCESS_VM_OPERATION` 这三位（`0x1402 + 0x38 = 0x143A`，与同机不受保护的 `Nmdeputy.exe` 拿到的完整掩码刚好差这三位）。**结论：保护是按"目标进程"判定的，与调用者身份无关**——提到 SYSTEM 没有意义，基于 `VirtualAllocEx` 的远程线程注入路线可以正式判定为不可行。
+
+同时留了两条残余能力，值得记着但别高估：`PROCESS_CREATE_THREAD` 与 `PROCESS_DUP_HANDLE` 没被削，目标**线程**句柄也是完整的（`OpenThread` 实得 `0x0000185A`，含 `THREAD_SET_CONTEXT|THREAD_SUSPEND_RESUME`）——说明驱动只给 `PsProcessType` 注册了回调、漏了 `PsThreadType`。但"线程劫持"落地时仍要把字符串/参数写进目标内存，而 `PROCESS_VM_WRITE` 恰好在被削的那三位里，所以它不是免费的替代路线。
+
+下面只剩两条真正值得做的：① 用「以 SYSTEM 身份跑主程序」验证免注入的**窗口**路径（`SetWindowLongPtrW`/`SetWindowPos` 会不会因为 UIPI 消失而放行）；② 用 `PROCESS_DUP_HANDLE` 枚举客户端句柄表，查清输入封锁到底挂在哪个模块或设备上。
 
 ## 免责声明与使用边界
 
