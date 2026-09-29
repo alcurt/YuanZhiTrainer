@@ -1,6 +1,6 @@
 # YZTrainer
 
-> **v0.6.6** · 一款**远志多媒体教学管理软件 V9.0 网管版学生端**的解控软件 · 仅供**教育研究**与**技术学习**，禁止任何非法用途 · 与厂商无关联，使用者自行承担全部后果。
+> **v0.6.7** · 一款**远志多媒体教学管理软件 V9.0 网管版学生端**的解控软件 · 仅供**教育研究**与**技术学习**，禁止任何非法用途 · 与厂商无关联，使用者自行承担全部后果。
 
 > **部署硬要求（2026-09-29 机房实测）**：学生端以 SYSTEM 运行，而本程序默认是管理员（高完整性）。
 > 两者差一级完整性，`VirtualAllocEx` 注入、`SetWindowsHookEx` 消息钩子、跨进程改窗口**三样都会被 UIPI 挡住**
@@ -187,8 +187,8 @@ ProcessNames=Yistart.exe;TEACHCMD.exe;PlayerGUI.exe;ExdPaintHelper.exe
     * 但我们 `PolicyEnforce` 写下的值**同时**出现在 `HKU\.DEFAULT` 与 `HKU\S-1-5-18` 下，两处 `Environment` 内容逐字相同 → 这台机器上这两个名字是**同一个 hive**。
     所以：外部只看 `S-1-5-18` 会得出"根本没写过策略"的错误结论。**v0.6.4 起注入侧自己会报一行 `PolicyHive: 本进程 HKCU → …`**（只读、不改状态），现场以它为准；确认前不引入 `WTSQueryUserToken`/跨 hive 穿透逻辑（注入本身还没稳，不想再加一层不确定性）。
 13. **消息层钩子的拦截是"可二分的风险点"**：`ShouldBlockHook` 也会拦 `WH_GETMESSAGE` / `WH_CALLWNDPROC`（远志的 `KeyboardHook.dll` 导出了 `SetMessageCallback`/`SetWndProcCallback`，这两类钩子可能是锁键鼠的载体，但也可能是广播消息链的一环）。现场若出现"广播画面不动/窗口消息异常"，第一件事就是把 `hooks_input.cpp` 顶部的 `YZ_BLOCK_MESSAGE_HOOKS` 改成 0 重新编译做对照；拦截日志里这两类会单独记成"已拦截远志消息层钩子安装"，便于定位。
-14. **键鼠封锁在设备层，用户态解不掉（2026-09-29 实测，证据链完整）**：客户端进程内没有任何 `ClipCursor`/`BlockInput` 调用（输入 hook 拦不到东西），而封锁由 `Yistart.exe` 每 2~3 秒拉起的 `KillMain.exe -d:set` 维持；`KillMain.exe` 只导入 `DeviceIoControl`/`CreateFileW`/`WriteFile`，没有任何用户态输入 API。即使消息钩子已把 29 个 hook 装进客户端、并成功拦掉它的 `WH_MOUSE_LL` 安装（日志可见 2 次拦截），鼠标仍被钳在左上角、键盘仍被禁。**结论：v1 的键鼠解锁标记为未解决**，不再投入（要继续就得碰驱动或拦截厂商进程，均属硬边界之外）。
-15. **策略项（HKCU）在机房机器上的实测结论**：学生 hive（`S-1-5-21-…-500`）里**一条策略值都没有**；有值的只有 `.DEFAULT`/`S-1-5-18`（同一 hive）——而那正是我们自己的 `PolicyEnforce` 写进去的（注入侧自报 `PolicyHive: 本进程 HKCU → \REGISTRY\USER\.DEFAULT`）。也就是说：远志的封锁**不走 HKCU 策略**，我们那套策略读写既没作用在正确位置、也没必要——批次 2 若还要保留它，方向是"主程序侧跨 hive 操作 `HKU\<学生 SID>`"（见已知限制 12）。
+14. **键鼠封锁（2026-09-29 实测）**：客户端进程内没有任何 `ClipCursor`/`BlockInput` 调用（输入 hook 拦不到东西），封锁由 `Yistart.exe` 每 2~3 秒拉起的 `KillMain.exe -d:set` 维持；`KillMain.exe` 只导入 `DeviceIoControl`/`CreateFileW`/`WriteFile`，没有任何用户态输入 API。即使消息钩子已把 29 个 hook 装进客户端、并成功拦掉它的 `WH_MOUSE_LL` 安装（日志可见 2 次拦截），鼠标仍被钳在左上角、键盘仍被禁。**倾向结论是"封锁在设备层，用户态无解"**；v0.6.7 为此加了**只读探针**（`ClipCursor 探针: clip=… cursor=…（连续 N 次采样未变）`，每秒采样、变化即记、每 5 秒心跳）用于终结这一判断：`clip` 被压成 1x1 → 还有人在用 ClipCursor（尚有讨论余地）；`clip` 是整屏而光标仍被拉回 → 输入在 win32k 之下就被过滤，**永久结案**。在结论落地前，v1 的键鼠解锁标记为**未解决**，不再投入。
+15. **策略项（HKCU）在机房机器上的实测结论**：学生 hive（`S-1-5-21-…-500`）里**一条策略值都没有**；有值的只有 `.DEFAULT`/`S-1-5-18`（同一 hive）——而那正是我们自己的 `PolicyEnforce` 写进去的（注入侧自报 `PolicyHive: 本进程 HKCU → \REGISTRY\USER\.DEFAULT`）。也就是说：远志的封锁**不走 HKCU 策略**，我们那套策略读写既没作用在正确位置、也没必要。**据此"批次 2（改主程序侧跨 hive 修策略）"已取消**：留着只会多一个与真实机制无关、还得长期维护的模块。`policy.cpp` 暂时保留原样（它现在的副作用只是把几个 0/1 写进默认 hive，无害），等下次动代码时再决定是删掉还是显式降级为"默认关闭"。
 
 ## 网管版（GZYZ）适配
 

@@ -455,6 +455,45 @@ void InputEnforceTick()
         g_realClipCursor(nullptr);
     if (g_realBlockInput != nullptr)
         g_realBlockInput(FALSE);
+
+    /* 键鼠封锁的定性探针（v0.6.7）：只读，用来区分
+       ① 有进程在抢设 ClipCursor（裁剪区被压成 1x1）
+       ② 裁剪区正常、但光标仍被强行拉回（输入在 win32k 之下就被过滤 = 设备层，用户态无解）
+       每秒采一次，裁剪区变化时立刻记一行，另每 5 秒记一行心跳（含"光标连续几次没变"）。
+       注意"光标没变"本身有歧义（也可能只是没人动鼠标），所以只作为旁证，结论看 clip。 */
+    static DWORD s_lastSample = 0;
+    static RECT  s_lastClip   = {0, 0, 0, 0};
+    static POINT s_lastCursor = {0, 0};
+    static int   s_stableSamples = 0;
+    static DWORD s_lastHeartbeat = 0;
+
+    const DWORD now = GetTickCount();
+    if (s_lastSample != 0 && (now - s_lastSample) < 1000)
+        return;
+    s_lastSample = now;
+
+    RECT  clip = {0, 0, 0, 0};
+    POINT cur  = {0, 0};
+    const BOOL hasClip = (g_realClipCursor != nullptr) ? GetClipCursor(&clip) : FALSE;
+    GetCursorPos(&cur);
+
+    const bool clipChanged  = hasClip && (clip.left != s_lastClip.left || clip.top != s_lastClip.top ||
+                                          clip.right != s_lastClip.right || clip.bottom != s_lastClip.bottom);
+    const bool cursorMoved  = (cur.x != s_lastCursor.x) || (cur.y != s_lastCursor.y);
+    s_stableSamples = cursorMoved ? 0 : (s_stableSamples + 1);
+    s_lastCursor    = cur;
+
+    const bool heartbeat = (s_lastHeartbeat == 0) || ((now - s_lastHeartbeat) >= 5000);
+    if (!clipChanged && !heartbeat)
+        return;
+    s_lastHeartbeat = now;
+    s_lastClip      = clip;
+
+    yzhook::SendLogToHost(YZ_LOG_INFO,
+        yz::Format(L"ClipCursor 探针: clip=%s cursor=%d,%d（连续 %d 次采样未变）",
+                   hasClip ? yz::Format(L"%d,%d,%d,%d", clip.left, clip.top, clip.right, clip.bottom).c_str()
+                           : L"(取不到)",
+                   cur.x, cur.y, s_stableSamples).c_str());
 }
 
 DWORD InputBlockedHookCount()
