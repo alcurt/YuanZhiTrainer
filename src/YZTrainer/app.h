@@ -55,6 +55,15 @@ struct AppRuntime
     DWORD            injectCount;
     DWORD            lastInjectTick;
     HHOOK            injectHook;      /* 消息钩子注入方式下保存的 HHOOK */
+    /* 只在"目标完整性高于本程序"时提示一次：这种情况注入、消息钩子、跨进程窗口写
+       都会被 UIPI 挡住，必须改用 YZSysRun 以 SYSTEM 启动（09-29 机房实测结论）。 */
+    bool             integrityHintLogged;
+    /* 远程线程注入连续失败的次数与"换过目标就重新计数"用的 pid。
+       连续失败到阈值就运行期自动改用消息钩子（不改 ini）：09-29 实测里受保护的客户端
+       永远注入不进去，而消息钩子在同级/更高完整性下是通的。 */
+    DWORD            injectFailStreak;
+    DWORD            injectFailPid;
+    bool             autoHookFallback;
 };
 
 extern AppRuntime g_app;

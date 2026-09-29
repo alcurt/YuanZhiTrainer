@@ -581,8 +581,15 @@ void WatchdogTick()
 
     g_app.lastInjectTick = now;
 
+    /* 换目标（客户端被服务重启）就重新计失败次数 */
+    if (g_app.injectFailPid != pid)
+    {
+        g_app.injectFailPid    = pid;
+        g_app.injectFailStreak = 0;
+    }
+
     /* 备用注入方式：消息钩子。挂上之后就不再重复挂，等目标连上管道。 */
-    if (g_app.cfg.injectMethod == 1)
+    if (g_app.cfg.injectMethod == 1 || g_app.autoHookFallback)
     {
         if (g_app.injectHook != nullptr)
             return;
@@ -607,14 +614,50 @@ void WatchdogTick()
     std::wstring err;
     if (InjectHookDll(pid, ResolveHookDllPath(), &err))
     {
+        g_app.injectFailStreak = 0;
         g_app.injectCount++;
         YZLOGI(L"已注入目标进程 pid=%u (第 %u 次)", pid, g_app.injectCount);
         UiAppendLog(yz::kLogInfo, yz::Format(L"已注入目标进程 PID=%u", pid));
     }
     else
     {
+        g_app.injectFailStreak++;
         YZLOGW(L"注入 pid=%u 失败: %s", pid, err.c_str());
         UiAppendLog(yz::kLogWarn, yz::Format(L"注入失败: %s", err.c_str()));
+
+        /* 09-29 机房实测：目标（Yistart.exe）跑在 SYSTEM/16384，而本程序是管理员/12288。
+           这种情况下三条路（VirtualAllocEx 注入、SetWindowsHookEx 消息钩子、跨进程改窗口）
+           都会被 UIPI 一致性检查挡住；用 YZSysRun 以 SYSTEM 启动本程序后，后两条都立刻通了。
+           所以这里给一句明确提示，免得下一轮又在同一个坑里拆半天。 */
+        if (!g_app.integrityHintLogged)
+        {
+            HANDLE hp = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+            if (hp != nullptr)
+            {
+                const DWORD targetIl = yz::GetHandleIntegrityRid(hp);
+                CloseHandle(hp);
+                const DWORD selfIl = yz::GetHandleIntegrityRid(GetCurrentProcess());
+                if (targetIl > selfIl && targetIl >= 0x4000u && selfIl != 0)
+                {
+                    g_app.integrityHintLogged = true;
+                    YZLOGW(L"目标完整性=0x%X 高于本程序=0x%X：注入/消息钩子/跨进程窗口写都会被 UIPI 挡下。"
+                           L"请改用 YZSysRun.exe -- YZTrainer.exe 以 SYSTEM 身份重新启动。",
+                           targetIl, selfIl);
+                    UiAppendLog(yz::kLogWarn,
+                                L"目标高于本程序完整性：请用 YZSysRun.exe -- YZTrainer.exe 以 SYSTEM 重新启动");
+                }
+            }
+        }
+
+        /* 连续失败到阈值：运行期改用消息钩子（不改 ini）。09-29 实测：受保护的客户端
+           远程线程注入永远失败，而消息钩子在同级/更高完整性下能真正落进目标进程。 */
+        if (!g_app.autoHookFallback && g_app.injectFailStreak >= 3)
+        {
+            g_app.autoHookFallback = true;
+            YZLOGW(L"远程线程注入连续失败 %u 次，本次运行改为消息钩子注入（ini 值未改动）",
+                   static_cast<unsigned>(g_app.injectFailStreak));
+            UiAppendLog(yz::kLogWarn, L"注入连续失败，已自动切换为消息钩子注入");
+        }
     }
 }
 

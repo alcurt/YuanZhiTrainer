@@ -134,7 +134,20 @@ bool IsCandidateWindow(HWND hwnd, RECT* outMonitor)
     return true;
 }
 
-void ApplyWindowize(HWND hwnd, const RECT& mon)
+/* 窗口化的目标几何：算一次、比一次、只在真的不一样时才写。
+   09-29 实测：客户端会每秒二十次地重设广播窗口，如果每次都跟着 SetWindowPos，
+   既闪屏（用户看到"全屏-窗口"横跳）又把日志刷爆。 */
+struct WindowizeTarget
+{
+    LONG style;
+    LONG ex;
+    int  x;
+    int  y;
+    int  w;
+    int  h;
+};
+
+bool ComputeWindowizeTarget(HWND hwnd, const RECT& mon, WindowizeTarget* out)
 {
     int percent = static_cast<int>(yzhook::g_windowPercent);
     if (percent < 20)
@@ -145,34 +158,105 @@ void ApplyWindowize(HWND hwnd, const RECT& mon)
     const int monW = mon.right - mon.left;
     const int monH = mon.bottom - mon.top;
     if (monW <= 0 || monH <= 0)
-        return;
+        return false;
 
     int w = monW * percent / 100;
     int h = static_cast<int>(static_cast<long long>(w) * monH / monW);
     if (h > monH)
         h = monH;
-    int x = mon.left + (monW - w) / 2;
-    int y = mon.top + (monH - h) / 2;
 
-    /* 本函数经常是在别的 hook（Hook_SetWindowPos / Hook_ShowWindow / Hook_MoveWindow）
-       内部被调用的，那时 TryEnterHook 会返回 false。必须严格成对：只有真进来过才 Leave，
-       否则会把外层的重入计数提前清零，后面再次调用被 hook 的 API 就会真的递归进来。 */
+    out->x = mon.left + (monW - w) / 2;
+    out->y = mon.top + (monH - h) / 2;
+    out->w = w;
+    out->h = h;
+
+    const LONG style = GetWindowLongW(hwnd, GWL_STYLE);
+    const LONG ex    = GetWindowLongW(hwnd, GWL_EXSTYLE);
+    out->style = (style & ~(WS_POPUP | WS_MAXIMIZE | WS_DISABLED)) | WS_OVERLAPPEDWINDOW | WS_VISIBLE;
+    out->ex    = ex & ~(WS_EX_TOOLWINDOW | WS_EX_TOPMOST);
+    if (g_topmost)
+        out->ex |= WS_EX_TOPMOST;
+    return true;
+}
+
+/* 已经在目标状态（带标题栏、不置顶、几何对得上）就什么都不用做 */
+bool WindowizeSettled(HWND hwnd, const WindowizeTarget& t)
+{
+    const LONG style = GetWindowLongW(hwnd, GWL_STYLE);
+    const LONG ex    = GetWindowLongW(hwnd, GWL_EXSTYLE);
+    if ((style & WS_POPUP) != 0 || (style & WS_DISABLED) != 0)
+        return false;
+    if ((style & WS_CAPTION) != WS_CAPTION)
+        return false;
+    if (((ex & WS_EX_TOPMOST) != 0) != g_topmost)
+        return false;
+
+    RECT rc;
+    if (!GetWindowRect(hwnd, &rc))
+        return false;
+    const int tol = 4;
+    return abs(rc.left - t.x) <= tol && abs(rc.top - t.y) <= tol &&
+           abs((rc.right - rc.left) - t.w) <= tol && abs((rc.bottom - rc.top) - t.h) <= tol;
+}
+
+/* "广播窗口已窗口化"这类日志同样按 3 秒节流：客户端高频重设时它一秒能出二十条 */
+void LogWindowEvent(HWND hwnd, const wchar_t* action, const WindowizeTarget& t)
+{
+    static DWORD s_lastTick = 0;
+    static DWORD s_suppressed = 0;
+    const DWORD  now = GetTickCount();
+    if (s_lastTick != 0 && (now - s_lastTick) < 3000)
+    {
+        s_suppressed++;
+        return;
+    }
+
+    yzhook::SendLogToHost(YZ_LOG_INFO,
+        yz::Format(L"%s: 0x%p -> %d,%d %dx%d (置顶=%d)%s",
+                   action, hwnd, t.x, t.y, t.w, t.h, g_topmost ? 1 : 0,
+                   s_suppressed != 0 ? yz::Format(L"（此前 3 秒内抑制 %u 条同类日志）", s_suppressed).c_str() : L"")
+            .c_str());
+    s_lastTick  = now;
+    s_suppressed = 0;
+}
+
+void ApplyWindowize(HWND hwnd, const RECT& mon)
+{
+    WindowizeTarget t = {0};
+    if (!ComputeWindowizeTarget(hwnd, mon, &t))
+        return;
+
+    if (WindowizeSettled(hwnd, t))
+    {
+        /* 已达标：不写窗口、不记日志，**也不刷新追踪时间戳**——那个时间戳要留给
+           "真正动过窗口"的时刻，否则 500ms 轮询那条兜底路径会被自己的刷新饿死。 */
+        return;
+    }
+
+    /* 节流：同一窗口 200ms 内只真正改一次。客户端重设 → 我们拦下 → 客户端再重设，
+       没有节流就是每秒二十次的互相拉扯。 */
+    const DWORD now = GetTickCount();
+    DWORD       last = 0;
+    Lock();
+    {
+        std::map<HWND, DWORD>::iterator it = g_tracked.find(hwnd);
+        if (it != g_tracked.end())
+            last = it->second;
+    }
+    Unlock();
+    if (last != 0 && (now - last) < 200)
+        return;
+
     const bool entered = yzhook::TryEnterHook();
 
-    LONG style = GetWindowLongW(hwnd, GWL_STYLE);
-    LONG ex    = GetWindowLongW(hwnd, GWL_EXSTYLE);
+    const LONG style = GetWindowLongW(hwnd, GWL_STYLE);
+    const LONG ex    = GetWindowLongW(hwnd, GWL_EXSTYLE);
+    if (t.style != style)
+        SetWindowLongW(hwnd, GWL_STYLE, t.style);
+    if (t.ex != ex)
+        SetWindowLongW(hwnd, GWL_EXSTYLE, t.ex);
 
-    LONG newStyle = (style & ~(WS_POPUP | WS_MAXIMIZE | WS_DISABLED)) | WS_OVERLAPPEDWINDOW | WS_VISIBLE;
-    LONG newEx    = ex & ~(WS_EX_TOOLWINDOW | WS_EX_TOPMOST);
-    if (g_topmost)
-        newEx |= WS_EX_TOPMOST;
-
-    if (newStyle != style)
-        SetWindowLongW(hwnd, GWL_STYLE, newStyle);
-    if (newEx != ex)
-        SetWindowLongW(hwnd, GWL_EXSTYLE, newEx);
-
-    SetWindowPos(hwnd, g_topmost ? HWND_TOPMOST : HWND_NOTOPMOST, x, y, w, h,
+    SetWindowPos(hwnd, g_topmost ? HWND_TOPMOST : HWND_NOTOPMOST, t.x, t.y, t.w, t.h,
                  SWP_NOACTIVATE | SWP_FRAMECHANGED | SWP_SHOWWINDOW);
 
     if (entered)
@@ -181,10 +265,7 @@ void ApplyWindowize(HWND hwnd, const RECT& mon)
     MarkTracked(hwnd);
     g_windowizeCount++;
     InterlockedIncrement(&yzhook::g_windowizeCount);
-
-    yzhook::SendLogToHost(YZ_LOG_INFO,
-        yz::Format(L"广播窗口已窗口化: 0x%p -> %d,%d %dx%d (置顶=%d)",
-                       hwnd, x, y, w, h, g_topmost ? 1 : 0).c_str());
+    LogWindowEvent(hwnd, L"广播窗口已窗口化", t);
 }
 
 /* 假全屏：保持"无边框铺满整块显示器"的外观，只把窗口从最上层拿下来。
