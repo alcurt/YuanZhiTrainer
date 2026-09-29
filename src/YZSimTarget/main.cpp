@@ -260,6 +260,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             KillTimer(hwnd, 6);
             LoadLateDllOnce();
         }
+        else if (wParam == 7)
+        {
+            /* --fight：200ms 一次把无边框全屏抢回来，复现"客户端响应我们的改动、
+               外部纠正怎么改都马上被顶回去"的横跳场景（验证反横跳闸门）。 */
+            MakeFullscreen();
+        }
         return 0;
 
     case WM_PAINT:
@@ -340,6 +346,10 @@ int WINAPI wWinMain(HINSTANCE hinst, HINSTANCE, LPWSTR cmdLine, int)
     /* 一次性：4 秒后加载 --load 指定的 DLL（模拟"钩子模块晚于注入出现"） */
     if (cmdLine != nullptr)
     {
+        /* --fight：200ms 抢一次全屏（横跳场景） */
+        if (wcsstr(cmdLine, L"--fight") != nullptr)
+            SetTimer(g_main, 7, 200, nullptr);
+
         const wchar_t* loadArg = wcsstr(cmdLine, L"--load ");
         if (loadArg != nullptr)
         {

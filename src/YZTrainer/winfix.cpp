@@ -15,10 +15,29 @@ namespace
 const DWORD kScanIntervalMs = 900;
 /* 同一个窗口的重新纠正间隔：远志抢回全屏是周期性的，太快纠正会来回打架 */
 const DWORD kRecorrectMs    = 1000;
+/* 反"打架"闸门（2026-09-29 现场问题）：
+   跨进程纠正改完窗口后，有的客户端会在同一帧/下一帧就把无边框全屏抢回去——从外部
+   没法抑制它那个动作（只有进程内 Hook 能压住），于是形成"我们缩窗口 → 它变全屏"的
+   高频循环。用户看到的就是 Win11 下放大缩小来回横跳、屏幕闪瞎眼。
+   判据必须看**间隔**而不是次数：远志自己每 3 秒抢一次全屏，那种"慢抢"是我们本来就要
+   对着干的（每秒纠正一次，设计如此）；只有"我们刚改完、它还不到 kFightIntervalMs 就
+   又变回全屏"才说明它在**响应我们的改动**，那才是真打架。
+   连续 kFightThreshold 次短间隔纠正就对该窗口停手（宁可回到"没窗口化"，也不要一个
+   不可用的跳屏桌面）；停手记录 kGiveUpHoldMs 后丢弃，等下一场广播（通常换新句柄）再试。 */
+const DWORD kFightIntervalMs = 1500;
+const DWORD kFightThreshold  = 3;
+const DWORD kGiveUpHoldMs    = 300000;
+
+struct FixRecord
+{
+    DWORD lastTick;    /* 上次真正纠正的时刻 */
+    DWORD count;       /* 连续"短间隔抢回"的次数 */
+    DWORD giveUpTick;  /* 非 0 = 已对这个窗口停手 */
+};
 
 CRITICAL_SECTION      g_cs;
 bool                  g_csInit = false;
-std::map<HWND, DWORD> g_lastFix;
+std::map<HWND, FixRecord> g_lastFix;
 
 volatile LONG g_skipPid     = 0;
 volatile LONG g_corrections = 0;
@@ -329,18 +348,54 @@ BOOL CALLBACK EnumProc(HWND hwnd, LPARAM lParam)
     if (FakeFullscreenMode() && FakeFullscreenDone(hwnd))
         return TRUE;
 
+    FixRecord rec = {0, 0, 0};
     Lock();
-    std::map<HWND, DWORD>::iterator it = g_lastFix.find(hwnd);
-    const DWORD last = (it != g_lastFix.end()) ? it->second : 0;
+    {
+        std::map<HWND, FixRecord>::iterator it = g_lastFix.find(hwnd);
+        if (it != g_lastFix.end())
+            rec = it->second;
+    }
     Unlock();
 
-    if (last != 0 && (ctx->now - last) < kRecorrectMs)
+    /* 已经对这个窗口停手：一点都不碰，避免重新点燃横跳 */
+    if (rec.giveUpTick != 0)
         return TRUE;
+
+    if (rec.lastTick != 0 && (ctx->now - rec.lastTick) < kRecorrectMs)
+        return TRUE;
+
+    /* 距上次纠正是否"过快"：正常 3 秒周期不算，客户端响应我们的改动才算 */
+    const bool rapid = (rec.lastTick != 0) && ((ctx->now - rec.lastTick) < kFightIntervalMs);
+    const DWORD nextCount = rapid ? (rec.count + 1) : 0;
+
+    /* 连续第 kFightThreshold 次短间隔抢回 —— 停手，别继续横跳 */
+    if (nextCount + 1 >= kFightThreshold)
+    {
+        rec.giveUpTick = ctx->now;
+        rec.lastTick   = ctx->now;
+        rec.count      = nextCount;
+
+        YZLOGW(L"外部窗口纠正: 0x%p 连续 %u 次在 %u 毫秒内就被抢回全屏（客户端在响应我们的改动），"
+               L"已对该窗口停手 —— 继续改只会得到全屏↔窗口来回横跳。"
+               L"要真正压住它得用进程内 Hook：YZSysRun.exe -- YZTrainer.exe（SYSTEM）+ InjectMethod=1。",
+               hwnd, nextCount + 1, kFightIntervalMs);
+        UiAppendLog(yz::kLogWarn,
+                    L"目标持续抢回全屏：已停止对该窗口的外部纠正（否则会来回横跳），"
+                    L"请用 SYSTEM + InjectMethod=1 重试");
+
+        Lock();
+        g_lastFix[hwnd] = rec;
+        Unlock();
+        return TRUE;
+    }
 
     ApplyMode(hwnd, mon);
 
+    rec.count    = nextCount;
+    rec.lastTick = ctx->now;
+
     Lock();
-    g_lastFix[hwnd] = ctx->now;
+    g_lastFix[hwnd] = rec;
     Unlock();
     return TRUE;
 }
@@ -379,9 +434,13 @@ void WinFixTick()
 
     /* 窗口销毁后句柄可能被复用，定期清掉太久没见到的记录 */
     Lock();
-    for (std::map<HWND, DWORD>::iterator it = g_lastFix.begin(); it != g_lastFix.end(); )
+    for (std::map<HWND, FixRecord>::iterator it = g_lastFix.begin(); it != g_lastFix.end(); )
     {
-        if (!IsWindow(it->first) || (now - it->second) > 60000)
+        const FixRecord& rec = it->second;
+        const bool stale     = (now - rec.lastTick) > 60000;
+        /* 停手记录保留久一点再丢：下一场广播一般会换新窗口句柄，这句柄复用时才有意义 */
+        const bool giveUpExpired = (rec.giveUpTick != 0) && ((now - rec.giveUpTick) > kGiveUpHoldMs);
+        if (!IsWindow(it->first) || stale || giveUpExpired)
             it = g_lastFix.erase(it);
         else
             ++it;

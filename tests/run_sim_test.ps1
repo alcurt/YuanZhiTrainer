@@ -27,6 +27,11 @@
      12. 钩子模块在注入之后才被加载时，主程序会重试主动拔钩
          （日志出现"NativeUnhook: 目标模块 ExdHooks.dll 已加载，开始尝试"）
 
+    阶段六（反横跳闸门，v0.6.6）断言 1 条：
+     13. 客户端每 200ms 就把无边框全屏抢回来（YZSimTarget --fight）时，
+         外部纠正必须**认输停手**，而不是陪着一起高频横跳
+         （日志出现"已对该窗口停手"）
+
     运行前请关闭其它 YZTrainer 实例（含改名副本）：主程序用全局互斥体防重入，
     别的实例在跑时本脚本启动的那份会静默退出，测试结果会变成假失败。
 
@@ -369,6 +374,54 @@ finally {
     if ($sim5Proc -and -not $sim5Proc.HasExited) { Stop-Process -Id $sim5Proc.Id -Force -ErrorAction SilentlyContinue }
     Start-Sleep -Milliseconds 500
     if ($app5Proc -and -not $app5Proc.HasExited) { Stop-Process -Id $app5Proc.Id -Force -ErrorAction SilentlyContinue }
+}
+
+# ---------------------------------------------------------------------------
+# 阶段六：反横跳闸门（v0.6.6）
+# 模拟"客户端立刻响应我们的改动"：YZSimTarget --fight 每 200ms 把无边框全屏抢回来。
+# 期望：外部纠正连续几次短间隔抢回后**认输停手**，日志出现"已对该窗口停手"，
+#       而不是跟着客户端每秒十几次地互相拉扯（那在 Win11 下就是放大缩小横跳）。
+# 用 AutoInject=0 保证走的是跨进程纠正这条路径（注入路径会被进程内 Hook 接管）。
+# ---------------------------------------------------------------------------
+Write-Host ''
+Write-Host '==== 阶段六：反横跳闸门 ===='
+
+foreach ($f in @($stateFile, $capFile)) {
+    if (Test-Path $f) { Move-Item -LiteralPath $f -Destination "$f.bak6-$stamp" -Force }
+}
+
+$phase6Ini = @(
+    '[General]',
+    'Flags=5',
+    'WindowPercent=60',
+    'LogLevel=3',
+    'AutoInject=0',
+    'InjectMethod=0',
+    'EnableExamGuard=1',
+    'ExternalWindowFix=1',
+    'ProcessNames=Yistart.exe;TEACHCMD.exe;PlayerGUI.exe;ExdPaintHelper.exe;YZSimTarget.exe'
+)
+Set-Content -LiteralPath $iniFile -Value $phase6Ini -Encoding utf8
+
+$sim6Proc = $null
+$app6Proc = $null
+
+try {
+    $sim6Proc = Start-Process -FilePath $sim -ArgumentList '--fight' -PassThru
+    Start-Sleep -Seconds 2
+    $app6Proc = Start-Process -FilePath $trainer -PassThru
+    Start-Sleep -Seconds 12
+
+    $gaveUp = (Test-Path $appLog) -and
+              (Select-String -LiteralPath $appLog -Pattern '已对该窗口停手' -Quiet)
+    Write-Host ("认输停手日志命中: " + $gaveUp)
+    if ($gaveUp) { $result.Add('PASS  客户端高频抢回全屏时，外部纠正会认输停手（不再横跳）') }
+    else { $result.Add('FAIL  高频抢回场景下外部纠正没有停手（仍会来回横跳）') }
+}
+finally {
+    if ($sim6Proc -and -not $sim6Proc.HasExited) { Stop-Process -Id $sim6Proc.Id -Force -ErrorAction SilentlyContinue }
+    Start-Sleep -Milliseconds 500
+    if ($app6Proc -and -not $app6Proc.HasExited) { Stop-Process -Id $app6Proc.Id -Force -ErrorAction SilentlyContinue }
 }
 
 Write-Host ''
