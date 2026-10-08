@@ -66,6 +66,9 @@
     <ClCompile Include="main.cpp" />
     <ClCompile Include="probe.cpp" />
     <ClCompile Include="..\common\yz_util.cpp" />
+    <ResourceCompile Include="..\common\yz_version.rc">
+      <PreprocessorDefinitions>YZ_TOOL_PROBE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ResourceCompile>
   </ItemGroup>
   <ItemGroup>
 

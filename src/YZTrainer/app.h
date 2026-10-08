@@ -7,7 +7,7 @@
 #include <vector>
 
 #include "yz_protocol.h"
-/* 产品版本号统一定义在 yz_protocol.h 的 YZ_VERSION_STR */
+/* 产品版本号唯一来源是 common\yz_version.h；yz_protocol.h 把它派生为 YZ_VERSION_STR */
 
 #define WM_YZ_STATUS (WM_APP + 1)
 #define WM_YZ_LOG    (WM_APP + 2)

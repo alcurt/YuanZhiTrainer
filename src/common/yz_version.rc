@@ -1,0 +1,59 @@
+//
+// Shared file-version resource for the console tools (probe / unhook-test / sysrun).
+//
+// ASCII only: rc.exe decodes .rc files with the ANSI code page unless a BOM or an
+// explicit code page switch is present, and non-ASCII bytes can break parsing on
+// some locales.
+//
+// Version numbers come from yz_version.h (single source of truth); the tool identity
+// is selected per project by a ResourceCompile preprocessor define.
+// YZTrainer.exe keeps its own resource file because it also embeds the hook DLL.
+//
+#include "yz_version.h"
+
+#if defined(YZ_TOOL_PROBE)
+  #define YZ_TOOL_DESC    "YZTrainer probe - read-only reconnaissance (processes/modules/windows/services/net)"
+  #define YZ_TOOL_INTERNAL "YZProbe"
+  #define YZ_TOOL_FILE    "YZProbe.exe"
+#elif defined(YZ_TOOL_UNHOOK)
+  #define YZ_TOOL_DESC    "YZTrainer unhook test - no-injection unhook verifier (calls vendor exports in-process)"
+  #define YZ_TOOL_INTERNAL "YZUnhookTest"
+  #define YZ_TOOL_FILE    "YZUnhookTest.exe"
+#elif defined(YZ_TOOL_SYSRUN)
+  #define YZ_TOOL_DESC    "YZTrainer sysrun - run a program with a duplicated SYSTEM token (same session/desktop)"
+  #define YZ_TOOL_INTERNAL "YZSysRun"
+  #define YZ_TOOL_FILE    "YZSysRun.exe"
+#else
+  #error Define one of YZ_TOOL_PROBE / YZ_TOOL_UNHOOK / YZ_TOOL_SYSRUN for this project.
+#endif
+
+#define VS_VERSION_INFO 1
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION YZ_VERSION_MAJOR,YZ_VERSION_MINOR,YZ_VERSION_PATCH,YZ_VERSION_BUILD
+ PRODUCTVERSION YZ_VERSION_MAJOR,YZ_VERSION_MINOR,YZ_VERSION_PATCH,YZ_VERSION_BUILD
+ FILEFLAGSMASK 0x3fL
+ FILEFLAGS 0x0L
+ FILEOS 0x40004L
+ FILETYPE 0x1L
+ FILESUBTYPE 0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904b0"
+        BEGIN
+            VALUE "CompanyName",      "alcurt"
+            VALUE "FileDescription",  YZ_TOOL_DESC
+            VALUE "FileVersion",      YZ_VERSION_STR_NARROW ".0"
+            VALUE "InternalName",     YZ_TOOL_INTERNAL
+            VALUE "LegalCopyright",   "MIT License"
+            VALUE "OriginalFilename", YZ_TOOL_FILE
+            VALUE "ProductName",      "YZTrainer"
+            VALUE "ProductVersion",   YZ_VERSION_STR_NARROW
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

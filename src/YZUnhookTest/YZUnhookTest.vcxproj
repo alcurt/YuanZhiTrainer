@@ -67,6 +67,9 @@
     <ClCompile Include="..\common\yz_util.cpp" />
     <ClCompile Include="..\YZHook\signature_check.cpp" />
     <ClCompile Include="..\..\third_party\minhook\src\hde\hde32.c" />
+    <ResourceCompile Include="..\common\yz_version.rc">
+      <PreprocessorDefinitions>YZ_TOOL_UNHOOK;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ResourceCompile>
   </ItemGroup>
   <ItemGroup>
 

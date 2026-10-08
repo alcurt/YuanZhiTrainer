@@ -8,6 +8,8 @@
 // YZTrainer.vcxproj, which guarantees the DLL is linked before this file is
 // compiled). YZHOOK_X64 is defined per-platform in the vcxproj.
 #include "resource.h"
+/* 版本号唯一来源（数值宏 + 等价的窄字符串），与三个命令行工具共用同一个头 */
+#include "..\\common\\yz_version.h"
 
 #ifdef YZHOOK_X64
 IDR_HOOK_DLL RCDATA "..\\..\\dist\\x64\\YZHook.dll"
@@ -23,8 +25,8 @@ IDR_HOOK_DLL RCDATA "..\\..\\dist\\Win32\\YZHook.dll"
 #define VS_VERSION_INFO 1
 
 VS_VERSION_INFO VERSIONINFO
- FILEVERSION 0,6,9,0
- PRODUCTVERSION 0,6,9,0
+ FILEVERSION YZ_VERSION_MAJOR,YZ_VERSION_MINOR,YZ_VERSION_PATCH,YZ_VERSION_BUILD
+ PRODUCTVERSION YZ_VERSION_MAJOR,YZ_VERSION_MINOR,YZ_VERSION_PATCH,YZ_VERSION_BUILD
  FILEFLAGSMASK 0x3fL
  FILEFLAGS 0x0L
  FILEOS 0x40004L
@@ -37,12 +39,12 @@ BEGIN
         BEGIN
             VALUE "CompanyName",      "alcurt"
             VALUE "FileDescription",  "YZTrainer - Yuanzhi classroom client unlock tool"
-            VALUE "FileVersion",      "0.6.9.0"
+            VALUE "FileVersion",      YZ_VERSION_STR_NARROW ".0"
             VALUE "InternalName",     "YZTrainer"
             VALUE "LegalCopyright",   "MIT License"
             VALUE "OriginalFilename", "YZTrainer.exe"
             VALUE "ProductName",      "YZTrainer"
-            VALUE "ProductVersion",   "0.6.9"
+            VALUE "ProductVersion",   YZ_VERSION_STR_NARROW
         END
     END
     BLOCK "VarFileInfo"

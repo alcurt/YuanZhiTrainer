@@ -7,10 +7,40 @@
 #include <windows.h>
 #include <vector>
 
+#include "yz_version.h"
+
 #define YZ_PROTOCOL_VERSION 1u
-/* 产品版本（语义化版本）：主程序、探针、免注入验证工具与文件版本资源共用这一处。
+/* 产品版本（语义化版本）唯一来源是 yz_version.h：数值宏给 .rc 用，这里派生宽字符串给
+   日志/报告用。下面这条 static_assert 是"防脱节闸门"——只改数值或只改字符串都会编译失败
+   （历史上出过连续 6 个版本只改字符串、数值字段停在旧值的事故）。
    注意与上面的 YZ_PROTOCOL_VERSION（管道/结构体协议版本）区分开。 */
-#define YZ_VERSION_STR L"0.6.9"
+#define YZ_STRINGIZE2(x) #x
+#define YZ_STRINGIZE(x)  YZ_STRINGIZE2(x)
+#define YZ_VERSION_STR_DERIVED_NARROW \
+    YZ_STRINGIZE(YZ_VERSION_MAJOR) "." YZ_STRINGIZE(YZ_VERSION_MINOR) "." YZ_STRINGIZE(YZ_VERSION_PATCH)
+
+namespace yz_version_guard
+{
+inline constexpr bool SameString(const char* a, const char* b)
+{
+    while (*a != '\0' && *a == *b)
+    {
+        ++a;
+        ++b;
+    }
+    return *a == *b;
+}
+static_assert(SameString(YZ_VERSION_STR_DERIVED_NARROW, YZ_VERSION_STR_NARROW),
+              "yz_version.h: 字符串版本与数值宏不一致（改版本时两处必须一起改）");
+} /* namespace yz_version_guard */
+
+/* 注意顺序：数字没有"宽字面量"，L##0 只会拼成标识符 L0。必须先把数字 stringize 成
+   窄字符串，再把 L 拼到字符串字面量前面。 */
+#define YZ_WIDEN2(s) L##s
+#define YZ_WIDEN(s)  YZ_WIDEN2(s)
+#define YZ_VERSION_STR                                                       \
+    YZ_WIDEN(YZ_STRINGIZE(YZ_VERSION_MAJOR)) L"." YZ_WIDEN(YZ_STRINGIZE(YZ_VERSION_MINOR)) \
+    L"." YZ_WIDEN(YZ_STRINGIZE(YZ_VERSION_PATCH))
 #define YZ_PIPE_NAME        L"\\\\.\\pipe\\YZTrainer"
 #define YZ_FRAME_MAGIC      0x31545A59u  /* 'YZT1' */
 #define YZ_MAX_LOG_TEXT     400
