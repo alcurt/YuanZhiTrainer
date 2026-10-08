@@ -76,6 +76,13 @@ void HandleEvent(DWORD opcode, const std::vector<BYTE>& payload)
             const YZ_LOG_EVENT* ev = reinterpret_cast<const YZ_LOG_EVENT*>(payload.data());
             std::wstring text(ev->text);
             YZLOGI(L"[Hook pid=%u] %s", ev->pid, text.c_str());
+
+            /* 客户端 Hook 上报"广播窗口已窗口化/已假全屏"= 广播确实开始了：
+               立刻静默导出一份诊断包（每进程一次）。广播常常没预告、一节课只有一次，
+               靠人守着导出必然漏（2026-10-08 实测）。 */
+            if (text.find(L"广播窗口已") != std::wstring::npos)
+                AutoExportOnBroadcastOnce(L"首次识别到广播窗口（客户端 Hook 上报）");
+
             if (g_app.hwndMain != nullptr)
             {
                 std::wstring* copy = new std::wstring(text);

@@ -68,6 +68,8 @@ foreach ($p in $platforms) {
         'InjectMethod=0',
         'EnableExamGuard=1',
         'ExternalWindowFix=1',
+        'AutoExportOnBroadcast=1',
+        'AutoExportOnExit=1',
         'TargetDir=',
         'HookDllPath=',
         'ProcessNames=Yistart.exe;TEACHCMD.exe;PlayerGUI.exe;ExdPaintHelper.exe'

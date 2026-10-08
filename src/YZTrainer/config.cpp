@@ -16,6 +16,19 @@ void WriteInt(const std::wstring& ini, const wchar_t* key, DWORD value)
 {
     WritePrivateProfileStringW(kSection, key, yz::Format(L"%u", value).c_str(), ini.c_str());
 }
+
+/* 考试守护位必须与 cfg.enableExamGuard 始终一致——**两条路径都要走这里**。
+   2026-10-08 修掉的 bug：ConfigApplyDefaults 只设了 enableExamGuard=true，而守卫位是在
+   下面 ConfigLoad 里补的；当 ini 文件不存在（首次运行、只带了 exe 那种情形）时
+   ConfigLoad 会在补位之前 early-return，于是钩子收到 flags=5、考试守护实际是关的
+   —— 违反"考试/测验强信号必须熔断"这条硬边界。 */
+void SyncExamGuardBit(AppConfig& cfg)
+{
+    if (cfg.enableExamGuard)
+        cfg.flags |= YZ_CFG_EXAM_GUARD;
+    else
+        cfg.flags &= ~YZ_CFG_EXAM_GUARD;
+}
 } /* namespace */
 
 std::wstring ConfigPath()
@@ -32,6 +45,9 @@ void ConfigApplyDefaults(AppConfig& cfg)
     cfg.injectMethod  = 0;
     cfg.enableExamGuard = true;
     cfg.externalWindowFix = true;
+    cfg.autoExportOnBroadcast = true;
+    cfg.autoExportOnExit = true;
+    SyncExamGuardBit(cfg);
     cfg.processNames.clear();
     /* 客户端进程名单。网管版多一个守卫进程 Nmdeputy.exe，但它由注入器显式排除
        （IsGuardProcess），这里不放进来；需要时可在 INI 里自行添加。 */
@@ -59,10 +75,9 @@ void ConfigLoad(AppConfig& cfg, const std::wstring& iniPath)
     cfg.externalWindowFix = ReadInt(iniPath, L"ExternalWindowFix", cfg.externalWindowFix ? 1 : 0) != 0;
 
     /* 考试守护开关以控制位形式随配置下发；其余功能位保持 ini 中的值 */
-    if (cfg.enableExamGuard)
-        cfg.flags |= YZ_CFG_EXAM_GUARD;
-    else
-        cfg.flags &= ~YZ_CFG_EXAM_GUARD;
+    SyncExamGuardBit(cfg);
+    cfg.autoExportOnBroadcast = ReadInt(iniPath, L"AutoExportOnBroadcast", cfg.autoExportOnBroadcast ? 1 : 0) != 0;
+    cfg.autoExportOnExit = ReadInt(iniPath, L"AutoExportOnExit", cfg.autoExportOnExit ? 1 : 0) != 0;
 
     wchar_t buf[1024] = {0};
     GetPrivateProfileStringW(kSection, L"TargetDir", L"", buf, 1024, iniPath.c_str());
@@ -94,6 +109,8 @@ void ConfigSave(const AppConfig& cfg, const std::wstring& iniPath)
     WriteInt(iniPath, L"InjectMethod", static_cast<DWORD>(cfg.injectMethod));
     WriteInt(iniPath, L"EnableExamGuard", cfg.enableExamGuard ? 1 : 0);
     WriteInt(iniPath, L"ExternalWindowFix", cfg.externalWindowFix ? 1 : 0);
+    WriteInt(iniPath, L"AutoExportOnBroadcast", cfg.autoExportOnBroadcast ? 1 : 0);
+    WriteInt(iniPath, L"AutoExportOnExit", cfg.autoExportOnExit ? 1 : 0);
     WritePrivateProfileStringW(kSection, L"TargetDir", cfg.targetDir.c_str(), iniPath.c_str());
     WritePrivateProfileStringW(kSection, L"HookDllPath", cfg.hookDllPath.c_str(), iniPath.c_str());
 

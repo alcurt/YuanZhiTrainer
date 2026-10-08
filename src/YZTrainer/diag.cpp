@@ -170,14 +170,12 @@ void CopyIfExists(const std::wstring& src, const std::wstring& dstDir)
 }
 } /* namespace */
 
-void ExportDiagnostics(HWND owner)
+/* 真正干活的：建目录 + 收日志/探针报告 + 生成快照。不做 UI（不弹窗、不开资源管理器），
+   这样"自动导出"这条路径可以完全静默地从看门狗线程/退出路径上调用。 */
+static bool BuildDiagnostics(const std::wstring& dir, const wchar_t* reason)
 {
-    std::wstring dir = yz::JoinPath(g_app.exeDir, L"diag-" + yz::NowStamp());
     if (!yz::EnsureDirectory(dir))
-    {
-        MessageBoxW(owner, L"无法创建诊断目录。", L"YZTrainer", MB_OK | MB_ICONERROR);
-        return;
-    }
+        return false;
 
     /* 日志 */
     CopyIfExists(yz::LogFilePath(), dir);
@@ -201,7 +199,8 @@ void ExportDiagnostics(HWND owner)
 
     /* 快照 */
     std::wstring snapshot;
-    snapshot += L"YZTrainer 诊断快照\r\n生成时间: " + yz::NowStampEx() + L"\r\n\r\n";
+    snapshot += L"YZTrainer 诊断快照\r\n生成时间: " + yz::NowStampEx() + L"\r\n";
+    snapshot += yz::Format(L"导出方式: %s\r\n\r\n", (reason != nullptr) ? reason : L"未知");
     snapshot += yz::Format(L"== 配置 ==\r\nFlags=0x%08X WindowPercent=%u AutoInject=%d EnableExamGuard=%d "
                            L"InjectMethod=%d ExternalWindowFix=%d\r\n"
                            L"假全屏=%d（优先于窗口化）\r\n"
@@ -242,7 +241,39 @@ void ExportDiagnostics(HWND owner)
     snapshot += ServiceDump();
 
     WriteTextFile(yz::JoinPath(dir, L"snapshot.txt"), snapshot);
+    return true;
+}
 
+void ExportDiagnostics(HWND owner)
+{
+    const std::wstring dir = yz::JoinPath(g_app.exeDir, L"diag-" + yz::NowStamp());
+    if (!BuildDiagnostics(dir, L"手动导出（托盘菜单）"))
+    {
+        MessageBoxW(owner, L"无法创建诊断目录。", L"YZTrainer", MB_OK | MB_ICONERROR);
+        return;
+    }
     UiAppendLog(yz::kLogInfo, L"诊断包已导出: " + dir);
     ShellExecuteW(nullptr, L"open", dir.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+}
+
+void AutoExportDiagnostics(const wchar_t* reason)
+{
+    /* 名字带 -auto 便于一眼区分；NowStampEx 带毫秒，避免同一秒内两次导出撞名 */
+    const std::wstring dir = yz::JoinPath(g_app.exeDir, L"diag-" + yz::NowStampEx() + L"-auto");
+    if (!BuildDiagnostics(dir, reason))
+    {
+        YZLOGW(L"自动导出诊断包失败（%s）：目录不可写？", (reason != nullptr) ? reason : L"未知");
+        return;
+    }
+    YZLOGI(L"自动导出诊断包（%s）: %s", (reason != nullptr) ? reason : L"未知", dir.c_str());
+    UiAppendLog(yz::kLogInfo,
+                yz::Format(L"自动导出诊断包（%s）: %s", (reason != nullptr) ? reason : L"未知", dir.c_str()));
+}
+
+void AutoExportOnBroadcastOnce(const wchar_t* evidence)
+{
+    if (!g_app.cfg.autoExportOnBroadcast || g_app.autoExportedBroadcast)
+        return;
+    g_app.autoExportedBroadcast = true;      /* 先置位：导出本身失败也不要反复重试 */
+    AutoExportDiagnostics((evidence != nullptr) ? evidence : L"首次识别到广播窗口");
 }

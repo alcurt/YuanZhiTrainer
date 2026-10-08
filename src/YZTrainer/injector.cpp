@@ -566,6 +566,14 @@ void WatchdogTick()
         winfix::WinFixSetSkipPid(hookActive ? clientPid : 0);
         winfix::WinFixSetTopmost((g_app.cfg.flags & YZ_FLAG_TOPMOST) != 0);
         winfix::WinFixTick();
+
+        /* 宿主侧触发：winfix 的候选计数（"覆盖整屏的无边框远志窗口"）与谁去处理无关，
+           Hook 生效时它跳过该进程但仍计数，所以这里同样能第一时间发现广播开始。 */
+        DWORD fixCount = 0, fixCandidates = 0;
+        bool  fixFailed = false;
+        winfix::WinFixStats(&fixCount, &fixCandidates, &fixFailed);
+        if (fixCandidates > 0)
+            AutoExportOnBroadcastOnce(L"首次识别到广播窗口（宿主侧扫描）");
     }
 
     if (pid == 0 || !g_app.cfg.autoInject)
@@ -660,4 +668,5 @@ void WatchdogTick()
         }
     }
 }
+
 

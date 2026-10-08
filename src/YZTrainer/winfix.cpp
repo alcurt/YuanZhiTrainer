@@ -331,18 +331,20 @@ BOOL CALLBACK EnumProc(HWND hwnd, LPARAM lParam)
     if (pid == 0 || pid == GetCurrentProcessId())
         return TRUE;
 
-    /* 进程内 Hook 正在管这个进程，别去抢同一个窗口 */
-    const DWORD skipPid = static_cast<DWORD>(InterlockedCompareExchange(&g_skipPid, 0, 0));
-    if (skipPid != 0 && pid == skipPid)
-        return TRUE;
-
     RECT mon;
     if (!IsCandidateWindow(hwnd, &mon))
         return TRUE;
     if (!ProcessIsYuanzhi(pid))
         return TRUE;
 
+    /* 先计数、再判"要不要动手"：这个计数同时用来判断"广播开始了没有"，
+       进程内 Hook 生效导致我们不去碰这个窗口时，也必须照样计数。 */
     ctx->candidates++;
+
+    /* 进程内 Hook 正在管这个进程，别去抢同一个窗口 */
+    const DWORD skipPid = static_cast<DWORD>(InterlockedCompareExchange(&g_skipPid, 0, 0));
+    if (skipPid != 0 && pid == skipPid)
+        return TRUE;
 
     /* 假全屏的稳态窗口仍然是"无边框全屏"，别每秒重复改一遍 */
     if (FakeFullscreenMode() && FakeFullscreenDone(hwnd))

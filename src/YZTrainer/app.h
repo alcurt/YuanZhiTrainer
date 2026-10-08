@@ -29,6 +29,10 @@ struct AppConfig
     int          injectMethod;     /* 0=远程线程（默认） 1=消息钩子（SetWindowsHookEx） */
     bool         enableExamGuard;  /* 是否启用考试模式强信号熔断（EnableExamGuard） */
     bool         externalWindowFix;/* 是否启用免注入的外部窗口纠正（ExternalWindowFix） */
+    /* 自动导出诊断包：广播常常没有预告、只有一次（2026-10-08 实测就漏了），所以
+       ①首次识别到广播窗口时静默导出一份 ②退出时再导出一份。默认都开。 */
+    bool         autoExportOnBroadcast;
+    bool         autoExportOnExit;
     std::wstring targetDir;        /* 远志安装目录，空=按进程路径自动判定 */
     std::wstring hookDllPath;      /* 空=用内嵌资源；填路径则强制使用该文件 */
     std::vector<std::wstring> processNames;
@@ -64,6 +68,7 @@ struct AppRuntime
     DWORD            injectFailStreak;
     DWORD            injectFailPid;
     bool             autoHookFallback;
+    bool             autoExportedBroadcast;   /* "首次识别到广播窗口"那份是否已导过 */
 };
 
 extern AppRuntime g_app;
@@ -112,5 +117,9 @@ void ServicePanelShow(HWND owner);
 
 /* ---- diag.cpp ---- */
 void ExportDiagnostics(HWND owner);
+/* 静默自动导出（不开资源管理器、不弹窗）：广播首次出现 / 退出时各调一次 */
+void AutoExportDiagnostics(const wchar_t* reason);
+/* "广播首次出现"那份：带一次性守卫（每进程只导一次），evidence 只用于日志与快照 */
+void AutoExportOnBroadcastOnce(const wchar_t* evidence);
 
 

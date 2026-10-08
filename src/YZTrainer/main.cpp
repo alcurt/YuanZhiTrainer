@@ -135,6 +135,12 @@ int WINAPI wWinMain(HINSTANCE hinst, HINSTANCE, LPWSTR, int)
         UnhookWindowsHookEx(g_app.injectHook);
         g_app.injectHook = nullptr;
     }
+
+    /* 退出自动导出（默认开）：绝不让人"忘了点导出"这件事毁掉一次实测。
+       放在 UiShutdown() 之前，这样"自动导出诊断包（退出）: <路径>"还能进界面日志。 */
+    if (g_app.cfg.autoExportOnExit)
+        AutoExportDiagnostics(L"退出");
+
     UiShutdown();
     ConfigSave(g_app.cfg, g_app.iniPath);
     yz::LogShutdown();
