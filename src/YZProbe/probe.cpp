@@ -868,43 +868,62 @@ std::wstring PortToString(DWORD port)
     return yz::Format(L"%u", ((port & 0xFF) << 8) | ((port >> 8) & 0xFF));
 }
 
+/* IP Helper 的两张表都是"先问大小、再取内容"，两次调用之间连接数会变，
+   第二次返回 ERROR_MORE_DATA 是家常便饭。旧代码只试一次，撞上就**静默丢掉整张表**
+   （和服务表当年那个坑同源）。这里带重试 + 余量。
+   GetExtendedUdpTable / GetExtendedTcpTable 的 C 级签名只差一个枚举（都是 int），
+   所以用同一个函数指针类型接。 */
+typedef DWORD (WINAPI *PFN_GetExtendedTable)(PVOID, PDWORD, BOOL, ULONG, int, ULONG);
+
+bool FetchExtendedTable(PFN_GetExtendedTable fn, int tableClass, std::vector<BYTE>& buf)
+{
+    for (int attempt = 0; attempt < 4; attempt++)
+    {
+        DWORD size = 0;
+        if (fn(nullptr, &size, FALSE, AF_INET, tableClass, 0) != ERROR_INSUFFICIENT_BUFFER || size == 0)
+            return false;
+
+        buf.assign(static_cast<size_t>(size) + 4096, 0);   /* 留余量，减少重复失败 */
+        DWORD used = static_cast<DWORD>(buf.size());
+        if (fn(buf.data(), &used, FALSE, AF_INET, tableClass, 0) == NO_ERROR)
+            return true;
+        if (GetLastError() != ERROR_MORE_DATA)
+            return false;
+    }
+    return false;
+}
+
 void CollectNet(ProbeData& data)
 {
-    DWORD size = 0;
-    if (GetExtendedUdpTable(nullptr, &size, FALSE, AF_INET, UDP_TABLE_OWNER_PID, 0) == ERROR_INSUFFICIENT_BUFFER)
+    std::vector<BYTE> buf;
+    if (FetchExtendedTable(reinterpret_cast<PFN_GetExtendedTable>(&GetExtendedUdpTable),
+                           UDP_TABLE_OWNER_PID, buf))
     {
-        std::vector<BYTE> buf(size);
-        if (GetExtendedUdpTable(buf.data(), &size, FALSE, AF_INET, UDP_TABLE_OWNER_PID, 0) == NO_ERROR)
+        MIB_UDPTABLE_OWNER_PID* table = reinterpret_cast<MIB_UDPTABLE_OWNER_PID*>(buf.data());
+        for (DWORD i = 0; i < table->dwNumEntries; i++)
         {
-            MIB_UDPTABLE_OWNER_PID* table = reinterpret_cast<MIB_UDPTABLE_OWNER_PID*>(buf.data());
-            for (DWORD i = 0; i < table->dwNumEntries; i++)
-            {
-                ProbeNet n;
-                n.pid      = table->table[i].dwOwningPid;
-                n.protocol = L"UDP";
-                n.local    = IpToString(table->table[i].dwLocalAddr) + L":" + PortToString(table->table[i].dwLocalPort);
-                n.remote   = L"*";
-                data.net.push_back(n);
-            }
+            ProbeNet n;
+            n.pid      = table->table[i].dwOwningPid;
+            n.protocol = L"UDP";
+            n.local    = IpToString(table->table[i].dwLocalAddr) + L":" + PortToString(table->table[i].dwLocalPort);
+            n.remote   = L"*";
+            data.net.push_back(n);
         }
     }
 
-    size = 0;
-    if (GetExtendedTcpTable(nullptr, &size, FALSE, AF_INET, TCP_TABLE_OWNER_PID_ALL, 0) == ERROR_INSUFFICIENT_BUFFER)
+    buf.clear();
+    if (FetchExtendedTable(reinterpret_cast<PFN_GetExtendedTable>(&GetExtendedTcpTable),
+                           TCP_TABLE_OWNER_PID_ALL, buf))
     {
-        std::vector<BYTE> buf(size);
-        if (GetExtendedTcpTable(buf.data(), &size, FALSE, AF_INET, TCP_TABLE_OWNER_PID_ALL, 0) == NO_ERROR)
+        MIB_TCPTABLE_OWNER_PID* table = reinterpret_cast<MIB_TCPTABLE_OWNER_PID*>(buf.data());
+        for (DWORD i = 0; i < table->dwNumEntries; i++)
         {
-            MIB_TCPTABLE_OWNER_PID* table = reinterpret_cast<MIB_TCPTABLE_OWNER_PID*>(buf.data());
-            for (DWORD i = 0; i < table->dwNumEntries; i++)
-            {
-                ProbeNet n;
-                n.pid      = table->table[i].dwOwningPid;
-                n.protocol = (table->table[i].dwState == MIB_TCP_STATE_LISTEN) ? L"TCP-LISTEN" : L"TCP";
-                n.local    = IpToString(table->table[i].dwLocalAddr) + L":" + PortToString(table->table[i].dwLocalPort);
-                n.remote   = IpToString(table->table[i].dwRemoteAddr) + L":" + PortToString(table->table[i].dwRemotePort);
-                data.net.push_back(n);
-            }
+            ProbeNet n;
+            n.pid      = table->table[i].dwOwningPid;
+            n.protocol = (table->table[i].dwState == MIB_TCP_STATE_LISTEN) ? L"TCP-LISTEN" : L"TCP";
+            n.local    = IpToString(table->table[i].dwLocalAddr) + L":" + PortToString(table->table[i].dwLocalPort);
+            n.remote   = IpToString(table->table[i].dwRemoteAddr) + L":" + PortToString(table->table[i].dwRemotePort);
+            data.net.push_back(n);
         }
     }
 }
@@ -1086,12 +1105,27 @@ bool ProbeReadExports(const std::wstring& filePath, std::vector<std::wstring>& o
     std::vector<BYTE> data;
     if (!ReadWholeFile(filePath, data))
         return false;
+    if (data.size() < sizeof(IMAGE_DOS_HEADER))
+        return false;
 
     const IMAGE_DOS_HEADER* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(data.data());
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE || dos->e_lfanew <= 0)
+        return false;
+
     size_t ntOff = static_cast<size_t>(dos->e_lfanew);
+    /* 旧代码直接拿 e_lfanew 去解引用 NT 头：畸形/被截断的文件会让探针当场崩掉，
+       而探针崩掉的代价是"这一趟机房白跑"。先把边界补齐。 */
+    if (ntOff + sizeof(IMAGE_NT_HEADERS32) > data.size())
+        return false;
+
     const IMAGE_NT_HEADERS32* nt32 = reinterpret_cast<const IMAGE_NT_HEADERS32*>(data.data() + ntOff);
+    if (nt32->Signature != IMAGE_NT_SIGNATURE)
+        return false;
+
     bool is64 = nt32->FileHeader.Machine == IMAGE_FILE_MACHINE_AMD64 ||
                 nt32->FileHeader.Machine == IMAGE_FILE_MACHINE_ARM64;
+    if (is64 && ntOff + sizeof(IMAGE_NT_HEADERS64) > data.size())
+        return false;
 
     DWORD exportRva = 0;
     if (is64)
@@ -1117,6 +1151,10 @@ bool ProbeReadExports(const std::wstring& filePath, std::vector<std::wstring>& o
 
     DWORD namesOff = RvaToOffset(data, exp->AddressOfNames);
     if (namesOff == 0)
+        return false;
+    /* 名字指针"数组"也必须整段落在文件内：RvaToOffset 只保证起点有效，
+       下面 names[i] 会按 NumberOfNames 读到数组末尾。 */
+    if (namesOff + static_cast<size_t>(exp->NumberOfNames) * sizeof(DWORD) > data.size())
         return false;
 
     const DWORD* names = reinterpret_cast<const DWORD*>(data.data() + namesOff);

@@ -161,12 +161,26 @@ std::wstring ServiceDump()
     return out;
 }
 
-void CopyIfExists(const std::wstring& src, const std::wstring& dstDir)
+/* 复制失败必须**说出来**：v0.6.8 起自动导出成了主证据通道，如果某个文件没拷进去
+   却只写一句"诊断包已导出"，那是最坏的一种失败——包看着有、证据少一半。
+   failures 收进快照，同时记一条 WARN 到日志。 */
+void CopyIfExists(const std::wstring& src, const std::wstring& dstDir, std::wstring* failures)
 {
     if (!yz::FileExists(src))
         return;
-    std::wstring dst = yz::JoinPath(dstDir, yz::FileNameOf(src));
-    CopyFileW(src.c_str(), dst.c_str(), FALSE);
+    const std::wstring dst = yz::JoinPath(dstDir, yz::FileNameOf(src));
+    if (!CopyFileW(src.c_str(), dst.c_str(), FALSE))
+    {
+        const std::wstring msg =
+            yz::Format(L"%s (err=%u)", yz::FileNameOf(src).c_str(), GetLastError());
+        YZLOGW(L"诊断包复制失败: %s", msg.c_str());
+        if (failures != nullptr)
+        {
+            if (!failures->empty())
+                *failures += L"; ";
+            *failures += msg;
+        }
+    }
 }
 } /* namespace */
 
@@ -178,12 +192,13 @@ static bool BuildDiagnostics(const std::wstring& dir, const wchar_t* reason)
         return false;
 
     /* 日志 */
-    CopyIfExists(yz::LogFilePath(), dir);
-    CopyIfExists(yz::JoinPath(yz::LogDir(), L"yzt-1.log"), dir);
-    CopyIfExists(yz::JoinPath(yz::LogDir(), L"yzt-2.log"), dir);
+    std::wstring copyFailures;
+    CopyIfExists(yz::LogFilePath(), dir, &copyFailures);
+    CopyIfExists(yz::JoinPath(yz::LogDir(), L"yzt-1.log"), dir, &copyFailures);
+    CopyIfExists(yz::JoinPath(yz::LogDir(), L"yzt-2.log"), dir, &copyFailures);
     /* 远程执行审计（每份都带，避免回来看不到教师端下发的动作） */
-    CopyIfExists(yz::JoinPath(yz::LogDir(), L"remote-exec.log"), dir);
-    CopyIfExists(yz::JoinPath(yz::LogDir(), L"remote-exec-1.log"), dir);
+    CopyIfExists(yz::JoinPath(yz::LogDir(), L"remote-exec.log"), dir, &copyFailures);
+    CopyIfExists(yz::JoinPath(yz::LogDir(), L"remote-exec-1.log"), dir, &copyFailures);
 
     /* 上次探针报告 */
     WIN32_FIND_DATAW fd;
@@ -192,7 +207,7 @@ static bool BuildDiagnostics(const std::wstring& dir, const wchar_t* reason)
     {
         do
         {
-            CopyIfExists(yz::JoinPath(g_app.exeDir, fd.cFileName), dir);
+            CopyIfExists(yz::JoinPath(g_app.exeDir, fd.cFileName), dir, &copyFailures);
         } while (FindNextFileW(find, &fd));
         FindClose(find);
     }
@@ -201,6 +216,8 @@ static bool BuildDiagnostics(const std::wstring& dir, const wchar_t* reason)
     std::wstring snapshot;
     snapshot += L"YZTrainer 诊断快照\r\n生成时间: " + yz::NowStampEx() + L"\r\n";
     snapshot += yz::Format(L"导出方式: %s\r\n\r\n", (reason != nullptr) ? reason : L"未知");
+    if (!copyFailures.empty())
+        snapshot += L"**复制失败（这份诊断包不完整）**: " + copyFailures + L"\r\n\r\n";
     snapshot += yz::Format(L"== 配置 ==\r\nFlags=0x%08X WindowPercent=%u AutoInject=%d EnableExamGuard=%d "
                            L"InjectMethod=%d ExternalWindowFix=%d\r\n"
                            L"假全屏=%d（优先于窗口化）\r\n"
