@@ -68,14 +68,16 @@ bool CallbackInTargetModule(LPCVOID lpfn)
 }
 
 /* 拦截日志按次节流：远志失败后会周期性重试，原样每来一条记一行会把日志刷爆 */
-void LogHookDecision(const wchar_t* action, int idHook, DWORD threadId, DWORD moduleBase)
+void LogHookDecision(const wchar_t* action, int idHook, DWORD threadId, DWORD moduleBase,
+                     HHOOK result)
 {
     const LONG n = InterlockedIncrement(&g_blockedHookLogged);
     if (n > 8 && (n % 50) != 0)
         return;
     yzhook::SendLogToHost(YZ_LOG_INFO,
-        yz::Format(L"%s: idHook=%d thread=%u hmod=0x%08X（累计 %d 次）",
-                   action, idHook, threadId, moduleBase, n).c_str());
+        yz::Format(L"%s: idHook=%d thread=%u hmod=0x%08X -> hhook=0x%p（累计 %d 次）",
+                   action, idHook, threadId, moduleBase,
+                   reinterpret_cast<const void*>(result), n).c_str());
 }
 
 /* 是否需要拦截该 SetWindowsHookEx 调用。
@@ -146,6 +148,58 @@ bool IsBlockedSpi(UINT action)
            action == SPI_SETSCREENSAVERRUNNING ||
            action == SPI_SETFASTTASKSWITCH;
 }
+
+/* ---- v0.6.11：把远志的钩子"换成"我们自己的空过程 ---------------------------
+   2026-10-09 机房实测（archive/YZ-26.10.9）：原来返回 NULL + ERROR_ACCESS_DENIED，
+   客户端拿到失败后 8 毫秒内退出，守卫 4 秒后拉起新实例，新实例 6.5 秒后又来装钩子——
+   16 次实例轮回，电子点名窗口（学生注册）整段时间立不住。
+
+   现在改成"替换"：用本 DLL 里的空过程顶替它的钩子过程，返回一个合法 HHOOK。
+   客户端后续的 UnhookWindowsHookEx 与自检都不会失败，但它的过滤逻辑永远不执行。
+   只有拿不到本模块句柄时才退回旧的"直接失败"行为（日志会写明退化）。 */
+LRESULT CALLBACK PassthroughHookProc(int code, WPARAM wParam, LPARAM lParam)
+{
+    return CallNextHookEx(nullptr, code, wParam, lParam);
+}
+
+HMODULE SelfModuleForHookProc()
+{
+    static HMODULE s_mod = nullptr;
+    if (s_mod == nullptr)
+    {
+        HMODULE mod = nullptr;
+        if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                   GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               reinterpret_cast<LPCWSTR>(&PassthroughHookProc), &mod))
+            s_mod = mod;
+    }
+    return s_mod;
+}
+
+HHOOK ReplaceWithPassthrough(int idHook, DWORD threadId, bool ansi)
+{
+    HMODULE self = SelfModuleForHookProc();
+    if (self == nullptr)
+        return nullptr;
+    SetLastError(ERROR_SUCCESS);
+    return ansi ? g_realSetWindowsHookExA(idHook, PassthroughHookProc, self, threadId)
+                : g_realSetWindowsHookExW(idHook, PassthroughHookProc, self, threadId);
+}
+
+/* 日志用文案：现场日志要能一眼区分"替换成功"与"退化回拦截" */
+const wchar_t* HookDecisionText(int idHook, HHOOK result, bool ansi)
+{
+    const bool msgLayer = (idHook == WH_GETMESSAGE || idHook == WH_CALLWNDPROC);
+    if (result != nullptr)
+    {
+        if (msgLayer)
+            return ansi ? L"已用空过程替换远志消息层钩子(A)" : L"已用空过程替换远志消息层钩子(W)";
+        return ansi ? L"已用空过程替换远志键盘/鼠标钩子(A)" : L"已用空过程替换远志键盘/鼠标钩子(W)";
+    }
+    if (msgLayer)
+        return ansi ? L"替换远志消息层钩子失败，退化为拦截(A)" : L"替换远志消息层钩子失败，退化为拦截(W)";
+    return ansi ? L"替换远志键盘/鼠标钩子失败，退化为拦截(A)" : L"替换远志键盘/鼠标钩子失败，退化为拦截(W)";
+}
 } /* namespace */
 
 HHOOK WINAPI Hook_SetWindowsHookExW(int idHook, HOOKPROC lpfn, HINSTANCE hMod, DWORD threadId)
@@ -157,13 +211,11 @@ HHOOK WINAPI Hook_SetWindowsHookExW(int idHook, HOOKPROC lpfn, HINSTANCE hMod, D
     if (ShouldBlockHook(idHook, lpfn, hMod))
     {
         InterlockedIncrement(&g_blockedHookCount);
-        LogHookDecision((idHook == WH_GETMESSAGE || idHook == WH_CALLWNDPROC)
-                            ? L"已拦截远志消息层钩子安装"
-                            : L"已拦截远志键盘/鼠标钩子安装",
-                        idHook, threadId,
-                        static_cast<DWORD>(reinterpret_cast<ULONG_PTR>(hMod)));
-        SetLastError(ERROR_ACCESS_DENIED);
-        result = nullptr;
+        result = ReplaceWithPassthrough(idHook, threadId, /*ansi=*/false);
+        LogHookDecision(HookDecisionText(idHook, result, false), idHook, threadId,
+                        static_cast<DWORD>(reinterpret_cast<ULONG_PTR>(hMod)), result);
+        if (result == nullptr)
+            SetLastError(ERROR_ACCESS_DENIED);
     }
     else
     {
@@ -183,10 +235,11 @@ HHOOK WINAPI Hook_SetWindowsHookExA(int idHook, HOOKPROC lpfn, HINSTANCE hMod, D
     if (ShouldBlockHook(idHook, lpfn, hMod))
     {
         InterlockedIncrement(&g_blockedHookCount);
-        LogHookDecision(L"已拦截远志键盘/鼠标钩子安装(A)", idHook, threadId,
-                        static_cast<DWORD>(reinterpret_cast<ULONG_PTR>(hMod)));
-        SetLastError(ERROR_ACCESS_DENIED);
-        result = nullptr;
+        result = ReplaceWithPassthrough(idHook, threadId, /*ansi=*/true);
+        LogHookDecision(HookDecisionText(idHook, result, true), idHook, threadId,
+                        static_cast<DWORD>(reinterpret_cast<ULONG_PTR>(hMod)), result);
+        if (result == nullptr)
+            SetLastError(ERROR_ACCESS_DENIED);
     }
     else
     {

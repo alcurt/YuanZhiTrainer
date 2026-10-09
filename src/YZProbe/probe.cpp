@@ -615,6 +615,58 @@ void CollectDiskExports(const std::wstring& exePath, ProbeProcess& p)
     }
 }
 
+/* 远志的采集层走 DXGI 桌面复制还是 GDI 抓屏？——它决定"冻结画面"要钩哪条路径。
+   2026-10-09 静态取证（远志课堂学生端副本，dumpbin 实测）：
+     KsFiles\ExdDtDup.dll 依赖 d3d11.dll、导入 D3D11CreateDevice，
+     导出 InitDD / DestroyDD / DtEnableSnatch / DtDisableSnatch / DtDoCopy /
+     DtGetBuffer / DtReleaseBuffer / RunCapture（DD = Desktop Duplication）；
+     它**不导入**任何 GDI 抓屏 API（BitBlt / StretchBlt / PrintWindow / GetDC 全无）。
+     → 采集层是 DXGI 桌面复制，冻结画面只钩 GDI 不够，必须准备 DXGI 路径。
+   这里把"本次运行到底有没有把它加载起来"记进报告：上机一次即可确认。 */
+std::wstring GraphicsStackDesc(const ProbeProcess& p)
+{
+    const wchar_t* kProbe[] = { L"ExdDtDup.dll", L"d3d11.dll", L"dxgi.dll",
+                                L"dwmapi.dll", L"gdi32.dll" };
+    bool hit[5] = { false, false, false, false, false };
+    for (size_t i = 0; i < 5; i++)
+    {
+        for (size_t k = 0; k < p.modules.size(); k++)
+        {
+            if (_wcsicmp(p.modules[k].name.c_str(), kProbe[i]) == 0)
+            {
+                hit[i] = true;
+                break;
+            }
+        }
+    }
+
+    /* 安装目录里的 KsFiles\ExdDtDup.dll 是静态事实，与"本进程是否已加载"互补 */
+    std::wstring dir = p.path;
+    const size_t cut = dir.find_last_of(L"\\/");
+    dir = (cut == std::wstring::npos) ? std::wstring() : dir.substr(0, cut);
+    const bool diskDD = !dir.empty() && yz::FileExists(dir + L"\\KsFiles\\ExdDtDup.dll");
+
+    const wchar_t* verdict;
+    if (hit[0])
+        verdict = L"采集层=DXGI 桌面复制（ExdDtDup 已加载）";
+    else if (diskDD)
+        verdict = L"采集层=DXGI 桌面复制（磁盘有 ExdDtDup，本进程未加载，可能在别的远志进程里）";
+    else if (hit[1] || hit[2])
+        verdict = L"疑似 DXGI（d3d11/dxgi 已加载但未见 ExdDtDup）";
+    else
+        verdict = L"未见 DXGI 采集模块（GDI 抓屏嫌疑，只钩 GDI 或许够）";
+
+    return yz::Format(L"图形采集栈 PID=%u %s：内存 %s=%s %s=%s %s=%s %s=%s %s=%s；"
+                      L"磁盘 KsFiles\\ExdDtDup.dll=%s；%s",
+                      p.pid, p.name.c_str(),
+                      kProbe[0], hit[0] ? L"是" : L"否",
+                      kProbe[1], hit[1] ? L"是" : L"否",
+                      kProbe[2], hit[2] ? L"是" : L"否",
+                      kProbe[3], hit[3] ? L"是" : L"否",
+                      kProbe[4], hit[4] ? L"是" : L"否",
+                      diskDD ? L"在" : L"无", verdict);
+}
+
 void CollectProcesses(ProbeData& data, bool includeAllModules)
 {
     HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
@@ -687,6 +739,8 @@ void CollectProcesses(ProbeData& data, bool includeAllModules)
 
             if (p.isYuanzhi)
             {
+                /* 采集层是 DXGI 还是 GDI，直接写进报告（冻结画面要按它选钩子路径） */
+                data.notes.push_back(GraphicsStackDesc(p));
                 if (p.modules.empty())
                 {
                     data.notes.push_back(yz::Format(
