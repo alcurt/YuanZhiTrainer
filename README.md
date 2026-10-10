@@ -1,6 +1,6 @@
 # YZTrainer
 
-> **v0.6.13** · 一款**远志多媒体教学管理软件 V9.0 网管版学生端**的解控软件 · 仅供**教育研究**与**技术学习**，禁止任何非法用途 · 与厂商无关联，使用者自行承担全部后果。
+> **v0.6.14** · 一款**远志多媒体教学管理软件 V9.0 网管版学生端**的解控软件 · 仅供**教育研究**与**技术学习**，禁止任何非法用途 · 与厂商无关联，使用者自行承担全部后果。
 
 > **部署硬要求（2026-09-29 机房实测）**：学生端以 SYSTEM 运行，而本程序默认是管理员（高完整性）。
 > 两者差一级完整性，`VirtualAllocEx` 注入、`SetWindowsHookEx` 消息钩子、跨进程改窗口**三样都会被 UIPI 挡住**
@@ -43,8 +43,9 @@ YZTrainer/
   src/YZUnhookTest/         免注入拔钩验证工具（本进程加载远志 DLL 调其导出，不注入）
   src/YZSysRun/             以 SYSTEM 身份运行指定程序的启动器（复制当前会话 winlogon 令牌，不装服务）
   third_party/minhook/      MinHook（BSD-2-Clause，已内置源码）
-  tests/run_sim_test.ps1    本地自动回归脚本（八阶段 17 项断言，需要管理员权限），
-                            阶段八是 P0"空过程替换"的回归闸门（v0.6.13），含负向 A/B 验证
+  tests/run_sim_test.ps1    本地自动回归脚本（九阶段 21 项断言，需要管理员权限），
+                            阶段八是 P0"空过程替换"的回归闸门（v0.6.13，含负向 A/B 验证），
+                            阶段九看消息层钩子开关（v0.6.14）
   dist/                     构建产物输出目录（含 `build.ps1` 写出的出厂 `YZTrainer.ini`）
   archive/                  机房实测档案（含机位名/账户/IP，**只留本地、绝不入库**）
   工作顺序.txt              每次上机的操作清单（本地文件，不入库）
@@ -86,13 +87,13 @@ pwsh -File build.ps1 -Both
 | `YZProbe.exe` | 机房侦察工具，只读，建议先跑它。报告 `notes` 里会给出每个远志进程的**图形采集栈**行（`ExdDtDup.dll` / `d3d11` / `dxgi` / `gdi32` 是否已加载 + 磁盘 `KsFiles\ExdDtDup.dll` 是否存在 + 判定"DXGI 桌面复制 / GDI 抓屏 helper"），"冻结画面"要按它选钩子路径（v0.6.11 起）。v0.6.12 起：**对全部进程**轻量扫 `ExdDtDup/ExdElite/ExdPaint`（这三者可能挂在一个"看起来不像远志"的进程里），并区分"模块枚举失败"与"确实没加载"；另新增**触发式常驻模式** `YZProbe.exe --watch [--duration 秒] [--interval 秒]`——出现新远志进程、任何进程加载采集组件、或出现 `Brw:`/覆盖整屏的无边框远志窗口时立刻落一份完整报告，每分钟一条心跳 |
 | `YZSysRun.exe` | **以 SYSTEM 身份运行指定程序**的轻量启动器（令牌复制，不装服务、不写注册表）：用来复测"换个身份是否就不被剥句柄权限"。用法 `YZSysRun.exe -- YZProbe.exe -o <目录> --no-pause`。它从**当前会话**的 `winlogon.exe` 复制主令牌并以 `winsta0\default` 启动子进程，因此子进程仍在交互桌面上；启动后会打印令牌来源、子进程会话与完整性级别（应为 系统(16384) 且会话号与当前一致）。**控制台的全部输出同时写成同目录 `YZSysRun-<时间戳>.txt`（可用 `--log <文件>` 指定路径，exe 目录不可写时依次退当前目录、`%TEMP%\YZTrainer\`）**，免得现场来不及另存 |
 | `YZUnhookTest.exe` | 免注入拔钩验证工具：默认只体检（读文件导出表 + 调用约定自检）并把过程写入同目录 `YZUnhookTest-<时间戳>.txt`；`--apply` 才真正调用远志的拔钩导出，`--arm` 待机等你回车再执行，`--delay N` 待机 N 秒后自动执行（被锁键鼠时唯一可行的触发方式），`--no-pause` 供脚本调用。调用前后会打印对照节的**基址、大小、前 32 字节原始值**和三个 HHOOK/标志字（v0.6.2 起按**节名+节内偏移**定位；此前写死的 RVA 差了两个数量级，所以在现场报告里从来没出现过对照行） |
-| `YZSimTarget.exe` | 模拟学生端，仅本地测试用。`--exam` 造考试窗口、`--exec` 4 秒后拉起子进程（验证审计）、**`--load <dll>` 4 秒后加载指定 DLL**（验证"钩子模块晚于注入出现"时主动拔钩的重试，见阶段五）、**`--hook` / `--hook-thread` 像厂商那样自己装键盘钩子并把 `NULL` 当生死判据**（v0.6.13，P0"空过程替换"的回归替身，见阶段八；配合把 exe 放进路径含 `GZYZ` 的目录使用） |
+| `YZSimTarget.exe` | 模拟学生端，仅本地测试用。`--exam` 造考试窗口、`--exec` 4 秒后拉起子进程（验证审计）、**`--load <dll>` 4 秒后加载指定 DLL**（验证"钩子模块晚于注入出现"时主动拔钩的重试，见阶段五）、**`--hook` / `--hook-thread` 像厂商那样自己装键盘钩子并把 `NULL` 当生死判据**（v0.6.13，P0"空过程替换"的回归替身，见阶段八）、**`--hook-message` 额外再装一个 `WH_GETMESSAGE`**（v0.6.14，验证消息层开关，见阶段九）；`--hook*` 都配合把 exe 放进路径含 `GZYZ` 的目录使用，且都是启动 8 秒后才装 |
 
 上表里会离开本机的四个工具（`YZTrainer.exe` / `YZProbe.exe` / `YZSysRun.exe` / `YZUnhookTest.exe`）自 v0.6.10 起带版本资源，`FILEVERSION`/`PRODUCTVERSION` 与字符串字段统统由 `src\common\yz_version.h` 单点提供——现场比对"U 盘上这份是不是最新"可以直接看文件属性，不必再靠字节数猜。`yz_protocol.h` 里派生的字符串与那份数值宏由一条 `static_assert` 互相咬合，只改一处会直接编译失败。`YZHook.dll` 故意不加版本资源：它是注入载荷，写 `CompanyName`/`ProductName` 等于给教师端软件留下可识别特征，它的身份已经由 `YZHook_x86_<hash>.dll` 这个文件名唯一确定。
 
 ## 建议的使用流程
 
-1. **本地先跑通**：管理员 PowerShell 执行 `pwsh -File tests\run_sim_test.ps1`，确认八个阶段共 **17 项断言**全通过——阶段一（注入路径）4 项：全屏置顶 / 窗口化 / 带 WS_CAPTION / 冻结画面；阶段二（免注入路径）2 项 + 1 条 WARN；阶段三（假全屏）2 项；阶段四（远程执行审计）2 项；阶段五（主动拔钩的晚加载重试，v0.6.3）1 项：`YZSimTarget --load` 在注入之后才加载一个名叫 `ExdHooks.dll` 的替身 DLL，日志里必须出现"NativeUnhook: 目标模块 ExdHooks.dll 已加载，开始尝试"；阶段六（反横跳闸门，v0.6.6）1 项：`YZSimTarget --fight` 每 200ms 抢回无边框全屏（复现机房"全屏↔窗口横跳"），外部纠正必须在几次短间隔抢回后**认输停手**（日志出现"已对该窗口停手"）；阶段七（采集栈监控，v0.6.12）2 项：某进程加载 `ExdDtDup.dll` 时日志必须出现"采集栈监控: PID=… 出现采集组件 ExdDtDup.dll"，且自动导出的诊断包 `snapshot.txt` 里含"== 采集栈快照 =="与该命中；阶段八（P0 空过程替换，v0.6.13）2 项：把模拟目标复制到**路径含 `GZYZ`** 的目录里（命中 `IsYuanzhiInstallPath` 的子串判据，不需要在生产代码里开后门）并用 `--hook` 让它像厂商那样"自己装钩子、拿 `NULL` 就自杀"，此时日志必须出现 `已用空过程替换远志键盘/鼠标钩子… hhook=0x非零`，且该进程**仍然存活**。
+1. **本地先跑通**：管理员 PowerShell 执行 `pwsh -File tests\run_sim_test.ps1`，确认九个阶段共 **21 项断言**全通过——阶段一（注入路径）6 项：全屏置顶 / 窗口化 / 带 WS_CAPTION / 冻结画面 / 不受保护的目标仍走远程线程注入（v0.6.14）/ 注入预检没有误判（v0.6.14）；阶段二（免注入路径）3 项；阶段三（假全屏）2 项；阶段四（远程执行审计）2 项；阶段五（主动拔钩的晚加载重试，v0.6.3）1 项：`YZSimTarget --load` 在注入之后才加载一个名叫 `ExdHooks.dll` 的替身 DLL，日志里必须出现"NativeUnhook: 目标模块 ExdHooks.dll 已加载，开始尝试"；阶段六（反横跳闸门，v0.6.6）1 项：`YZSimTarget --fight` 每 200ms 抢回无边框全屏（复现机房"全屏↔窗口横跳"），外部纠正必须在几次短间隔抢回后**认输停手**（日志出现"已对该窗口停手"）；阶段七（采集栈监控，v0.6.12）2 项：某进程加载 `ExdDtDup.dll` 时日志必须出现"采集栈监控: PID=… 出现采集组件 ExdDtDup.dll"，且自动导出的诊断包 `snapshot.txt` 里含"== 采集栈快照 =="与该命中；阶段八（P0 空过程替换，v0.6.13）2 项：把模拟目标复制到**路径含 `GZYZ`** 的目录里（命中 `IsYuanzhiInstallPath` 的子串判据，不需要在生产代码里开后门）并用 `--hook` 让它像厂商那样"自己装钩子、拿 `NULL` 就自杀"，此时日志必须出现 `已用空过程替换远志键盘/鼠标钩子… hhook=0x非零`，且该进程**仍然存活**；阶段九（消息层钩子开关，v0.6.14）2 项：`BlockMessageHooks=1` 时键盘与消息层两类钩子都被换成空过程，`=0` 时只放行消息层、键盘钩子照旧被换掉。
 2. **机房侦察（先跑探针）**：把 `YZProbe.exe`（x64 版本信息最全）拷到机房机器，右键以管理员运行，生成 `YZProbe-report-*.json/.md`。重点看：
    * “远志相关进程”里哪个进程加载了 `Rmdesk.ads` / `PlayerGUI.dll` / `ExdHooks.dll`；
    * 远志模块导出表里 `KillHook` / `UnSetExdHooks` / `UnSetExdHooks2` 是否存在（与本地版本比对，决定主动拔钩可用性）；
@@ -204,7 +205,7 @@ ProcessNames=Yistart.exe;TEACHCMD.exe;PlayerGUI.exe;ExdPaintHelper.exe
     * `RegOpenCurrentUser` + `NtQueryKey` 自报的 HKCU 是 `\REGISTRY\USER\.DEFAULT`，**不是** `S-1-5-18`；
     * 但我们 `PolicyEnforce` 写下的值**同时**出现在 `HKU\.DEFAULT` 与 `HKU\S-1-5-18` 下，两处 `Environment` 内容逐字相同 → 这台机器上这两个名字是**同一个 hive**。
     所以：外部只看 `S-1-5-18` 会得出"根本没写过策略"的错误结论。**v0.6.4 起注入侧自己会报一行 `PolicyHive: 本进程 HKCU → …`**（只读、不改状态），现场以它为准；确认前不引入 `WTSQueryUserToken`/跨 hive 穿透逻辑（注入本身还没稳，不想再加一层不确定性）。**v0.6.13 起这段代码只做只读自报，不再写任何策略值**（见第 15 条）。
-13. **消息层钩子的处理是“可二分的风险点”（v0.6.13 起不必再重编）**：`ShouldBlockHook` 也会把 `WH_GETMESSAGE` / `WH_CALLWNDPROC` 换成空过程（远志的 `KeyboardHook.dll` 导出了 `SetMessageCallback`/`SetWndProcCallback`，这两类钩子可能是锁键鼠的载体，但也可能是广播消息链的一环）。现场若出现“广播画面不动/窗口消息异常”，把 ini 里的 `BlockMessageHooks` 改成 `0` 重启程序即可做对照——v0.6.13 把这个开关从编译期宏改成了配置位（`YZ_CFG_BLOCK_MESSAGE_HOOKS`），不必再改代码重编、重发产物。这两类在日志里单独记成 `已用空过程替换远志消息层钩子(W/A)`，便于定位。
+13. **消息层钩子的处理是“可二分的风险点”（v0.6.13 起不必再重编，v0.6.14 修好并加了回归）**：`ShouldBlockHook` 也会把 `WH_GETMESSAGE` / `WH_CALLWNDPROC` 换成空过程（远志的 `KeyboardHook.dll` 导出了 `SetMessageCallback`/`SetWndProcCallback`，这两类钩子可能是锁键鼠的载体，但也可能是广播消息链的一环）。现场若出现“广播画面不动/窗口消息异常”，把 ini 里的 `BlockMessageHooks` 改成 `0` 重启程序即可做对照——v0.6.13 把这个开关从编译期宏改成了配置位（`YZ_CFG_BLOCK_MESSAGE_HOOKS`）。**注意 v0.6.13 那版这个开关其实是失效的**（控制位被 `YZ_FLAG_FUNCTION_MASK` 剔除，钩子侧读 `g_flags` 永远读到 0，等于悄悄丢了原来的默认行为；另外 `ConfigLoad` 里"读 ini 值"排在"同步控制位"之后，改成 0 也不生效），v0.6.14 两处都修好并新增回归阶段九把两半都钉住。这两类在日志里单独记成 `已用空过程替换远志消息层钩子(W/A)`，便于定位。
 14. **键鼠封锁：2026-10-09 终结实验，正式结案（用户态无解）**。三条证据：① 整段广播期客户端**一次都没调用** `ClipCursor` / `BlockInput` / SPI 改写 / 抢注热键（这些拦截点命中即打印，计数全为 0）；② 内核 `clip` 矩形全程 `0,0,1920,1080`（整屏），而光标在广播期间约 90% 采样停在 `(0,0)`，广播一结束立刻恢复自由；③ 客户端在 09:01:15.427 尝试安装自己的 `WH_MOUSE_LL`（idHook=14），被我们成功拦下，之后 38 分钟鼠标照锁不误。再加上封锁由 `Yistart.exe` 每 2~3 秒拉起的 `KillMain.exe -d:set` 维持（该 exe 只导入 `DeviceIoControl`/`CreateFileW`/`WriteFile`/`TerminateProcess`，没有任何用户态输入 API）→ **封锁在驱动/设备层，用户态（含进程内 hook）不可能解开**。判读提醒：`ClipCursor 探针` 的 `clip` 读数会被我们自己的钩子影响（`Hook_ClipCursor` 命中时会把钳制清零成全屏），所以看读数前先确认日志里 `已解除鼠标区域锁定(ClipCursor)` 的计数——**计数 >0 时该读数不构成证据**。
 15. **策略项（HKCU）在机房机器上的实测结论 —— 已据此删除写入逻辑（v0.6.13）**：学生 hive（`S-1-5-21-…-500`）里**一条策略值都没有**；有值的只有 `.DEFAULT`/`S-1-5-18`（同一 hive）——而那正是我们自己的 `PolicyEnforce` 写进去的（注入侧自报 `PolicyHive: 本进程 HKCU → \REGISTRY\USER\.DEFAULT`）。也就是说：远志的封锁**不走 HKCU 策略**，我们那套策略读写既没作用在正确位置、也没必要。**"批次 2（改主程序侧跨 hive 修策略）"早已取消**；v0.6.13 又把 `policy.cpp` 里的 `PolicyBackup`/`PolicyEnforce`/`PolicyRestore` 连同那张策略项表**整段删掉**，只保留 `PolicyLogCurrentUserHive()` 这行只读自报。留着的副作用是"把几个 0/1 写进默认用户模板"（`.DEFAULT` 会被之后新建的 profile 继承，而进程被硬杀时"退出还原"根本不会执行），收益为零——所以不再"等下次动代码时再决定"。
 
@@ -338,6 +339,26 @@ ProcessNames=Yistart.exe;TEACHCMD.exe;PlayerGUI.exe;ExdPaintHelper.exe
    **整段删除**，只留只读的 `PolicyHive: 本进程 HKCU → …` 自报。理由见已知限制 12/15：
    机房实测远志的封锁不走 HKCU 策略，而那套写入落在**默认用户模板**（`.DEFAULT`）上，
    进程被硬杀时"退出还原"根本不执行——收益为零、副作用是真的。
+
+### 2026-10-11（第三轮）v0.6.14：把上一轮的行为变更钉进回归，并因此抓出两个真 bug
+
+上一轮（v0.6.13）改了两处**行为**（注入预检、消息层钩子开关），但当时只有"编译通过 + 原有 17 项仍绿"。
+这一轮补上覆盖（阶段一 +2 条、新增阶段九 2 条，共 **21 项**），结果**第一次跑就抓出两个真 bug，
+而且都是 v0.6.13 引入的**：
+
+1. **消息层钩子开关在钩子侧永远读到 0**：`ShouldBlockMessageHooks()` 读的是 `g_flags`，
+   而 `ApplyEffectiveFlags()` 把 `g_flags` 限制成 `g_configFlags & YZ_FLAG_FUNCTION_MASK`——
+   控制位**被有意剔除**（那是给考试守护位设计的正确约束）。后果：从 v0.6.13 起
+   `WH_GETMESSAGE`/`WH_CALLWNDPROC` 再没被换成空过程，等于悄悄丢掉了原来那个宏的默认行为。
+   修法：新增独立变量 `g_blockMessageHooks`（默认 1），配置下发时按控制位赋值。
+2. **ini 改成 0 也不生效**：`ConfigLoad` 里 `SyncBlockMessageHooksBit(cfg)` 排在读
+   `BlockMessageHooks` **之前**，同步时用的还是默认 true。修法：把同步挪到读值之后，
+   并在代码里写明"新增控制位时顺序不能反：读值 → 同步位"。
+
+三次跑的对照本身就是证据：第 1 次 20 PASS/1 FAIL（开关恒 0 → 默认那一半没替换）、
+第 2 次 20 PASS/1 FAIL（位对了但 ini=0 不生效）、第 3 次 **21 PASS/0 FAIL**（`sim-test-v0614.log`）。
+这也是"把行为固化成断言"最直接的收益：这两个 bug 都不会被编译器和代码审查拦下，
+只有让回归去问"开关为 0 时到底发生了什么"才会暴露。
 
 ## 免责声明与使用边界
 

@@ -4,47 +4,56 @@
 
     请以管理员身份运行（YZTrainer.exe 需要提权；自动测试时不希望弹 UAC）。
 
-    阶段一（注入路径，ExternalWindowFix=0，只看进程内 Hook）断言 4 条：
+    阶段一（注入路径，ExternalWindowFix=0，只看进程内 Hook）断言 6 条：
       1. 模拟目标启动后处于全屏置顶状态
       2. YZTrainer 启动后模拟窗口被窗口化（不再是全屏）
       3. 窗口样式已包含 WS_CAPTION（真的变成普通窗口）
       4. 开启防监视后，模拟端连续抓帧哈希保持不变（画面被冻结）
+      5. 不受保护的目标走的仍是远程线程注入（v0.6.14：日志出现"已注入目标进程"）
+      6. 注入预检没有误判（v0.6.14：日志**不**出现"缺 PROCESS_VM_OPERATION"）
+         ——守的是 VmOperationStripped()：它一旦误报，所有机器都会被无谓地降级到消息钩子
 
-    阶段二（免注入兜底，AutoInject=0 + ExternalWindowFix=1）断言 2 条 + 1 条提示：
-      5. 完全不注入的情况下，模拟窗口仍被主程序跨进程改成普通窗口
-      6. 外部纠正后的窗口样式包含 WS_CAPTION
-      7. 日志里能看到“外部窗口纠正”记录（找不到只记 WARN，不影响结论）
+    阶段二（免注入兜底，AutoInject=0 + ExternalWindowFix=1）断言 3 条：
+      7. 完全不注入的情况下，模拟窗口仍被主程序跨进程改成普通窗口
+      8. 外部纠正后的窗口样式包含 WS_CAPTION
+      9. 日志里能看到“外部窗口纠正”记录（找不到只记 WARN，不影响窗口化结论）
 
     阶段三（假全屏，Flags=4|32）断言 2 条：
-      8. 广播窗口仍铺满整屏（fullscreen=1）且没有标题栏
-      9. 广播窗口已不置顶（topmost=0）——这是"能切到自己的窗口"的前提
+     10. 广播窗口仍铺满整屏（fullscreen=1）且没有标题栏
+     11. 广播窗口已不置顶（topmost=0）——这是"能切到自己的窗口"的前提
 
     阶段四（远程执行审计，YZSimTarget --exec）断言 2 条：
-     10. remote-exec.log 里出现 CreateProcessW 记录
-     11. 该记录被标为 origin=remote（不是客户端自己拉起的辅助进程）
+     12. remote-exec.log 里出现 CreateProcessW 记录
+     13. 该记录被标为 origin=remote（不是客户端自己拉起的辅助进程）
 
     阶段五（主动拔钩的晚加载重试，v0.6.3）断言 1 条：
-     12. 钩子模块在注入之后才被加载时，主程序会重试主动拔钩
+     14. 钩子模块在注入之后才被加载时，主程序会重试主动拔钩
          （日志出现"NativeUnhook: 目标模块 ExdHooks.dll 已加载，开始尝试"）
 
     阶段六（反横跳闸门，v0.6.6）断言 1 条：
-     13. 客户端每 200ms 就把无边框全屏抢回来（YZSimTarget --fight）时，
-         外部纠正必须**认输停手**，而不是陪着一起高频横跳
-         （日志出现"已对该窗口停手"）
+     15. 客户端每 200ms 就把无边框全屏抢回来（YZSimTarget --fight）时，
+         外部纠正必须**认输停手**，而不是陪着一起高频横跳（日志出现"已对该窗口停手"）
 
     阶段七（采集栈监控 + 自动导出，v0.6.12）断言 2 条：
-      14. 某个进程加载了 ExdDtDup.dll（用改名的 version.dll 做替身）时，主程序的常驻监控
-          会发现并在日志里写明（"采集栈监控: PID=… 出现采集组件 ExdDtDup.dll"）
-      15. 这次命中会触发一次静默自动导出，且诊断包 snapshot.txt 里含
-          "== 采集栈快照 ==" 与该命中记录
+     16. 某个进程加载了 ExdDtDup.dll（用改名的 version.dll 做替身）时，
+         主程序的常驻监控会发现并在日志里写明
+     17. 这次命中会触发一次静默自动导出，且诊断包 snapshot.txt 里含
+         "== 采集栈快照 ==" 与该命中记录
 
     阶段八（P0 空过程替换的回归闸门，v0.6.13）断言 2 条：
-      16. 远志自己装键盘钩子时被换成"空过程"且返回**合法 HHOOK**
-          （日志"已用空过程替换远志键盘/鼠标钩子… hhook=0x非零"）
-      17. 模拟客户端拿到合法句柄后**继续存活**——旧行为（返回 NULL）下它会像现场那样
-          8 毫秒内退出，本断言会红。做法：把模拟目标复制到路径含 GZYZ 的目录里，用
-          --hook 让它"自己装钩子 + 拿 NULL 就自杀"（不需要在生产代码里开后门）。
-          （动机：教师监视/缩略图只在几秒里出现，"冻结画面"走 DXGI 还是 GDI 就靠这份数据）
+     18. 远志自己装键盘钩子时被换成"空过程"且返回**合法 HHOOK**
+         （日志"已用空过程替换远志键盘/鼠标钩子… hhook=0x非零"）
+     19. 模拟客户端拿到合法句柄后**继续存活**——旧行为（返回 NULL）下它会像现场那样
+         8 毫秒内退出，本断言会红。做法：把模拟目标复制到路径含 GZYZ 的目录里，用
+         --hook 让它"自己装钩子 + 拿 NULL 就自杀"（不需要在生产代码里开后门）；
+         注意 --hook 是**启动 8 秒后**才装钩子：现场那次是"注入之后"才装的。
+         注意模拟目标用 %p 打印句柄（不带 0x 前缀），匹配两种写法才不会被格式坑到。
+
+    阶段九（消息层钩子开关 BlockMessageHooks，v0.6.14）断言 2 条：
+     20. BlockMessageHooks=1（默认）：键盘与消息层两类钩子**都被**换成空过程
+     21. BlockMessageHooks=0：键盘钩子照旧被换掉，消息层那条**放行**
+         ——守的是"case 标签不构成作用域"那类实现错误（开关为 0 时不能把键盘钩子一起
+         门控掉），同时证明这个开关真的能现场二分，而不只是从宏换了个位置。
 
     运行前请关闭其它 YZTrainer 实例（含改名副本）：主程序用全局互斥体防重入，
     别的实例在跑时本脚本启动的那份会静默退出，测试结果会变成假失败。
@@ -141,6 +150,7 @@ try {
     else { $result.Add('FAIL  模拟目标未进入全屏') }
 
     Write-Host '启动 YZTrainer ...'
+    $mark1 = Get-LogLength $appLog
     $appProc = Start-Process -FilePath $trainer -PassThru
     Start-Sleep -Seconds $StartupWaitSeconds
 
@@ -154,6 +164,16 @@ try {
         if (($style -band 0x00C00000) -eq 0x00C00000) { $result.Add('PASS  窗口已带标题栏(WS_CAPTION)') }
         else { $result.Add('FAIL  窗口样式未包含 WS_CAPTION') }
     }
+
+    # v0.6.14：不受保护的目标必须仍走远程线程注入，且注入预检不能误判。这两条守的是
+    # v0.6.13 新增的 VmOperationStripped()：它一旦误报，所有机器都会被无谓地降级到
+    # 消息钩子（消息钩子会把 DLL 映射进本会话所有 GUI 进程）。
+    $seg1 = Read-LogTail $appLog $mark1
+    if ($seg1 -match '已注入目标进程') { $result.Add('PASS  不受保护的目标走的仍是远程线程注入') }
+    else { $result.Add('FAIL  没有看到“已注入目标进程”（可能被注入预检误判后降级了）') }
+
+    if ($seg1 -notmatch '缺 PROCESS_VM_OPERATION') { $result.Add('PASS  注入预检没有误判不受保护的目标') }
+    else { $result.Add('FAIL  注入预检把不受保护的目标判成了“句柄权限被削”') }
 
     if (Test-Path $capFile) {
         $lines  = Get-Content -LiteralPath $capFile | Select-Object -Last 6
@@ -611,6 +631,76 @@ finally {
     if ($app8Proc -and -not $app8Proc.HasExited) { Stop-Process -Id $app8Proc.Id -Force -ErrorAction SilentlyContinue }
 }
 
+# ---------------------------------------------------------------------------
+# 阶段九：消息层钩子开关（BlockMessageHooks，v0.6.14）
+# 目的：把"开关真的能二分"和"开关为 0 时不影响键盘钩子"两条都钉住。
+# 后者尤其重要——case 标签不构成作用域，第一版实现把判断写在了键盘那组的标签后面，
+# 结果 BlockMessageHooks=0 会把键盘/鼠标钩子一起门控掉（代码里已改成各自分支）。
+# 做法：模拟目标（放在路径含 GZYZ 的目录里）延迟 8 秒装两个钩子：键盘 LL + WH_GETMESSAGE。
+# 断言：
+#   20. BlockMessageHooks=1（默认）：两条"已用空过程替换…"都出现
+#   21. BlockMessageHooks=0：键盘那条仍出现，消息层那条**不出现**（客户端照旧存活）
+# ---------------------------------------------------------------------------
+Write-Host ''
+Write-Host '==== 阶段九：消息层钩子开关（BlockMessageHooks）===='
+
+$gzyzDir9 = Join-Path $env:TEMP 'GZYZ-yzsim'
+$gzyzSim9 = Join-Path $gzyzDir9 'YZSimTarget.exe'
+
+function Invoke-MessageHookPhase([int]$Bit) {
+    $ini = @(
+        '[General]',
+        'Flags=5',
+        'WindowPercent=60',
+        'LogLevel=3',
+        'AutoInject=1',
+        'InjectMethod=0',
+        'EnableExamGuard=1',
+        'ExternalWindowFix=0',
+        "BlockMessageHooks=$Bit",
+        'ProcessNames=Yistart.exe;TEACHCMD.exe;PlayerGUI.exe;ExdPaintHelper.exe;YZSimTarget.exe'
+    )
+    Set-Content -LiteralPath $iniFile -Value $ini -Encoding utf8
+
+    $s = $null
+    $a = $null
+    try {
+        $s = Start-Process -FilePath $gzyzSim9 -ArgumentList '--hook', '--hook-message' -PassThru
+        Start-Sleep -Seconds 4
+        $mark = Get-LogLength $appLog
+        $a = Start-Process -FilePath $trainer -PassThru
+        Start-Sleep -Seconds 14
+        return [pscustomobject]@{
+            Seg      = (Read-LogTail $appLog $mark)
+            SimAlive = ($s -and (-not $s.HasExited))
+        }
+    }
+    finally {
+        if ($s -and -not $s.HasExited) { Stop-Process -Id $s.Id -Force -ErrorAction SilentlyContinue }
+        Start-Sleep -Milliseconds 500
+        if ($a -and -not $a.HasExited) { Stop-Process -Id $a.Id -Force -ErrorAction SilentlyContinue }
+    }
+}
+
+New-Item -ItemType Directory -Force -Path $gzyzDir9 | Out-Null
+Copy-Item -LiteralPath $sim -Destination $gzyzSim9 -Force
+
+$on  = Invoke-MessageHookPhase 1
+$onKey = $on.Seg -match '已用空过程替换远志键盘/鼠标钩子'
+$onMsg = $on.Seg -match '已用空过程替换远志消息层钩子'
+Write-Host ("BlockMessageHooks=1: 键盘替换=" + $onKey + " 消息层替换=" + $onMsg + " 客户端存活=" + $on.SimAlive)
+if ($onKey -and $onMsg) { $result.Add('PASS  BlockMessageHooks=1 时键盘与消息层钩子都被换成空过程') }
+else { $result.Add('FAIL  BlockMessageHooks=1 时没有把两类钩子都换掉') }
+
+$off   = Invoke-MessageHookPhase 0
+$offKey = $off.Seg -match '已用空过程替换远志键盘/鼠标钩子'
+$offMsg = $off.Seg -match '已用空过程替换远志消息层钩子'
+Write-Host ("BlockMessageHooks=0: 键盘替换=" + $offKey + " 消息层替换=" + $offMsg + " 客户端存活=" + $off.SimAlive)
+if ($offKey -and (-not $offMsg) -and $off.SimAlive) {
+    $result.Add('PASS  BlockMessageHooks=0 时只放行消息层、键盘钩子照旧被换掉')
+} else {
+    $result.Add('FAIL  BlockMessageHooks=0 的行为不对（要么消息层没放行，要么键盘钩子被一起关掉）')
+}
 Write-Host '==== 测试结果 ===='
 $result | ForEach-Object { Write-Host $_ }
 $failCount = @($result | Where-Object { $_ -like 'FAIL*' }).Count

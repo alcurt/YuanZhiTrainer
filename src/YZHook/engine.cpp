@@ -18,6 +18,7 @@
 namespace yzhook
 {
 volatile LONG g_flags           = 0;
+volatile LONG g_blockMessageHooks = 1;   /* 默认拦消息层钩子，与 v0.6.11 之前一致 */
 volatile LONG g_examMode        = 0;
 DWORD         g_windowPercent   = 60;
 volatile LONG g_windowizeCount  = 0;
@@ -586,6 +587,9 @@ bool EngineIsTargetHost()
 void EngineApplyConfig(const YZ_CONFIG& cfg)
 {
     g_configFlags = cfg.flags;
+    /* 控制位单独存一份：g_flags 只保留功能位，控制位得另找地方放（见 yz_hook_state.h） */
+    InterlockedExchange(&g_blockMessageHooks,
+                       ((cfg.flags & YZ_CFG_BLOCK_MESSAGE_HOOKS) != 0) ? 1 : 0);
 
     bool guard = (cfg.flags & YZ_CFG_EXAM_GUARD) != 0;
     if (!guard && g_examGuard)

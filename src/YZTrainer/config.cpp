@@ -88,13 +88,17 @@ void ConfigLoad(AppConfig& cfg, const std::wstring& iniPath)
     cfg.enableExamGuard = ReadInt(iniPath, L"EnableExamGuard", cfg.enableExamGuard ? 1 : 0) != 0;
     cfg.externalWindowFix = ReadInt(iniPath, L"ExternalWindowFix", cfg.externalWindowFix ? 1 : 0) != 0;
 
-    /* 考试守护开关以控制位形式随配置下发；其余功能位保持 ini 中的值 */
+    /* 考试守护开关以控制位形式随配置下发；其余功能位保持 ini 中的值。
+       注意顺序：控制位必须**在读到对应的 ini 值之后**才同步——v0.6.13 第一版把
+       SyncBlockMessageHooksBit 放在读 BlockMessageHooks 之前，结果 ini 改成 0 也没用
+       （同步时用的还是默认 true），回归阶段九第二轮抓出来的。
+       新增控制位时请一并检查这里：读值 → 同步位，两步顺序不能反。 */
     SyncExamGuardBit(cfg);
-    SyncBlockMessageHooksBit(cfg);
     cfg.autoExportOnBroadcast = ReadInt(iniPath, L"AutoExportOnBroadcast", cfg.autoExportOnBroadcast ? 1 : 0) != 0;
     cfg.autoExportOnExit = ReadInt(iniPath, L"AutoExportOnExit", cfg.autoExportOnExit ? 1 : 0) != 0;
     cfg.autoExportOnCapture = ReadInt(iniPath, L"AutoExportOnCapture", cfg.autoExportOnCapture ? 1 : 0) != 0;
     cfg.blockMessageHooks = ReadInt(iniPath, L"BlockMessageHooks", cfg.blockMessageHooks ? 1 : 0) != 0;
+    SyncBlockMessageHooksBit(cfg);
 
     wchar_t buf[1024] = {0};
     GetPrivateProfileStringW(kSection, L"TargetDir", L"", buf, 1024, iniPath.c_str());

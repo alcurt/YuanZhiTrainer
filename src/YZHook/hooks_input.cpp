@@ -50,10 +50,13 @@ bool g_hooksReady = false;
    且这两类是"锁键鼠"的常见载体）。
    v0.6.13 起这个开关从**编译期宏改成配置位**（YZ_CFG_BLOCK_MESSAGE_HOOKS，ini 项
    BlockMessageHooks，默认 1）：现场出现"广播画面不动/窗口消息异常"时只要把 ini 改成 0
-   重启程序即可做对照，不必再改代码重编、重发一份产物。 */
+   重启程序即可做对照，不必再改代码重编、重发一份产物。
+   读的是 yzhook::g_blockMessageHooks 这个独立变量，**不是 g_flags**：控制位会被
+   YZ_FLAG_FUNCTION_MASK 剔除，放在 g_flags 里判断永远为 0（v0.6.13 第一版的真实事故，
+   回归阶段九抓出来的）。 */
 bool ShouldBlockMessageHooks()
 {
-    return (yzhook::g_flags & YZ_CFG_BLOCK_MESSAGE_HOOKS) != 0;
+    return InterlockedCompareExchange(&yzhook::g_blockMessageHooks, 0, 0) != 0;
 }
 
 /* 回调地址落在哪个模块里？跨模块判断"这个钩子是不是远志自己装的"靠它。

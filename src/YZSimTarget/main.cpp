@@ -31,10 +31,12 @@ bool  g_execRequested = false;
    主动拔钩的重试（NativeUnhookTick）会不会真的再试一次。模块名必须与被查的名字
    一致（例如把 ExdHooks.dll 复制出来单独放）。 */
 std::wstring g_lateLoadDll;
-/* --hook / --hook-thread：像厂商那样"自己装键盘钩子 + 把 NULL 当生死判据"（阶段八回归替身） */
-bool g_hookMode       = false;
-bool g_hookThreadMode = false;
-int  g_exitCode       = 0;     /* 非 0 = 模拟客户端"自杀"退出，回归据此判 FAIL */
+/* --hook / --hook-thread / --hook-message：像厂商那样"自己装钩子 + 把 NULL 当生死判据"（回归替身） */
+bool g_hookMode        = false;
+bool g_hookThreadMode  = false;
+bool g_hookMessageMode = false;   /* 额外装一个 WH_GETMESSAGE，验证 BlockMessageHooks 开关 */
+HHOOK g_msgHook        = nullptr;
+int  g_exitCode        = 0;     /* 非 0 = 模拟客户端"自杀"退出，回归据此判 FAIL */
 HBITMAP g_captureBmp = nullptr;
 void*   g_captureBits = nullptr;
 int     g_captureW = 0;
@@ -204,37 +206,71 @@ void LoadLateDllOnce()
                           reinterpret_cast<void*>(mod), mod ? 0u : GetLastError()));
 }
 
-/* --hook / --hook-thread 的实体：像厂商那样自己装键盘钩子，并且**把返回 NULL 当生死判据**。
-   现场证据（2026-10-09）：v0.6.10 把远志的 SetWindowsHookEx 拦成 NULL 时 Yistart.exe 8 毫秒内
-   退出，守卫 4 秒后拉起 → 十秒级重启循环（电子点名窗口立不住）。v0.6.11 改成"用本 DLL 的空过程
-   顶替、返回合法 HHOOK"后客户端不再重启。这里复现那条致命反应，让回归阶段八**真的能变红**：
-   拿到 NULL 就退出码 3。
-     --hook        hMod = 本 exe 模块（与现场"厂商 DLL 传自己模块"同构，命中模块路径判据）
-     --hook-thread hMod = NULL + 本线程 tid（命中"回调地址反查模块"那条判据）
-   两者都要求模拟目标被放在**路径含 GZYZ** 的目录里，否则 ShouldBlockHook 会正确地放行
+/* WH_GETMESSAGE / WH_CALLWNDPROC 这类"消息层"钩子用的空过程。
+   注意不能拿 KeyHookProc 顶替：消息钩子的 lParam 是 MSG*，KeyHookProc 会把它当
+   KBDLLHOOKSTRUCT 读，然后几乎每条消息都 return 1（消息被丢掉），模拟目标自己就废了。 */
+LRESULT CALLBACK MessageHookProc(int code, WPARAM wParam, LPARAM lParam)
+{
+    return CallNextHookEx(nullptr, code, wParam, lParam);
+}
+
+/* --hook / --hook-thread / --hook-message 的实体：像厂商那样自己装钩子，并且**把返回 NULL
+   当生死判据**。现场证据（2026-10-09）：v0.6.10 把远志的 SetWindowsHookEx 拦成 NULL 时
+   Yistart.exe 8 毫秒内退出，守卫 4 秒后拉起 → 十秒级重启循环（电子点名窗口立不住）。
+   v0.6.11 改成"用本 DLL 的空过程顶替、返回合法 HHOOK"后客户端不再重启。这里复现那条
+   致命反应，让回归阶段八**真的能变红**：拿到 NULL 就退出码 3。
+     --hook        键盘 LL，hMod = 本 exe 模块（与现场"厂商 DLL 传自己模块"同构）
+     --hook-thread 键盘 WH_KEYBOARD，hMod = NULL + 本线程 tid（命中"回调反查模块"判据）
+     --hook-message 额外再装一个 WH_GETMESSAGE（hMod = 本 exe 模块、限本线程），
+                   用来验证 ini 项 BlockMessageHooks 的开关行为（阶段九）：
+                   开关为 1 时它也该被换成空过程，为 0 时应原样放行。
+   三者都要求模拟目标被放在**路径含 GZYZ** 的目录里，否则 ShouldBlockHook 会正确地放行
    （回归脚本就是这么摆的：先复制到 %TEMP%\GZYZ-yzsim\ 再跑，再等 8 秒装钩子——
    那时 YZHook 已经注进来了；启动时立刻装会走系统原生路径，第一版实测两边都不命中）。 */
 void InstallSelfHookOrDie()
 {
-    if (!g_hookMode && !g_hookThreadMode)
+    if (!g_hookMode && !g_hookThreadMode && !g_hookMessageMode)
         return;
 
-    HHOOK h = g_hookThreadMode
-        ? SetWindowsHookExW(WH_KEYBOARD, KeyHookProc, nullptr, GetCurrentThreadId())
-        : SetWindowsHookExA(WH_KEYBOARD_LL, KeyHookProc, GetModuleHandleW(nullptr), 0);
-    AppendFile(yz::JoinPath(g_exeDir, L"sim_log.txt"),
-               yz::Format(L"hook-install mode=%s hhook=%p err=%u tick=%u",
-                          g_hookThreadMode ? L"thread" : L"ll-with-hmod",
-                          reinterpret_cast<void*>(h), GetLastError(), GetTickCount()));
-    if (h == nullptr)
+    if (g_hookMode || g_hookThreadMode)
     {
+        HHOOK h = g_hookThreadMode
+            ? SetWindowsHookExW(WH_KEYBOARD, KeyHookProc, nullptr, GetCurrentThreadId())
+            : SetWindowsHookExA(WH_KEYBOARD_LL, KeyHookProc, GetModuleHandleW(nullptr), 0);
         AppendFile(yz::JoinPath(g_exeDir, L"sim_log.txt"),
-                   L"hook-install FAILED -> 模拟客户端据此自杀（现场：8 毫秒内进程消失）");
-        g_exitCode = 3;
-        PostQuitMessage(3);
-        return;
+                   yz::Format(L"hook-install mode=%s hhook=%p err=%u tick=%u",
+                              g_hookThreadMode ? L"thread" : L"ll-with-hmod",
+                              reinterpret_cast<void*>(h), GetLastError(), GetTickCount()));
+        if (h == nullptr)
+        {
+            AppendFile(yz::JoinPath(g_exeDir, L"sim_log.txt"),
+                       L"hook-install FAILED -> 模拟客户端据此自杀（现场：8 毫秒内进程消失）");
+            g_exitCode = 3;
+            PostQuitMessage(3);
+            return;
+        }
+        g_keyHook = h;
     }
-    g_keyHook = h;
+
+    if (g_hookMessageMode)
+    {
+        /* 消息层钩子：hMod 给本 exe 模块、线程限自己这条线程（跨进程的全局消息钩子必须由 DLL 装，
+           exe 装不了；限本线程时合法，且同样会经过我们的 SetWindowsHookEx 钩子）。 */
+        HHOOK hm = SetWindowsHookExW(WH_GETMESSAGE, MessageHookProc, GetModuleHandleW(nullptr),
+                                     GetCurrentThreadId());
+        AppendFile(yz::JoinPath(g_exeDir, L"sim_log.txt"),
+                   yz::Format(L"hook-install mode=message-gettmsg hhook=%p err=%u tick=%u",
+                              reinterpret_cast<void*>(hm), GetLastError(), GetTickCount()));
+        if (hm == nullptr)
+        {
+            AppendFile(yz::JoinPath(g_exeDir, L"sim_log.txt"),
+                       L"hook-install(消息层) FAILED -> 模拟客户端据此自杀");
+            g_exitCode = 3;
+            PostQuitMessage(3);
+            return;
+        }
+        g_msgHook = hm;
+    }
 }
 
 void SpawnChildOnce()
@@ -440,8 +476,9 @@ int WINAPI wWinMain(HINSTANCE hinst, HINSTANCE, LPWSTR cmdLine, int)
     {
         if ((wcsstr(cmdLine, L"--hook") != nullptr))
         {
-            g_hookMode       = (wcsstr(cmdLine, L"--hook-thread") == nullptr);
-            g_hookThreadMode = (wcsstr(cmdLine, L"--hook-thread") != nullptr);
+            g_hookThreadMode  = (wcsstr(cmdLine, L"--hook-thread") != nullptr);
+            g_hookMode        = !g_hookThreadMode;
+            g_hookMessageMode = (wcsstr(cmdLine, L"--hook-message") != nullptr);
             SetTimer(g_main, 8, 8000, nullptr);
         }
     }
@@ -478,6 +515,8 @@ int WINAPI wWinMain(HINSTANCE hinst, HINSTANCE, LPWSTR cmdLine, int)
 
     if (g_keyHook != nullptr)
         UnhookWindowsHookEx(g_keyHook);
+    if (g_msgHook != nullptr)
+        UnhookWindowsHookEx(g_msgHook);
     ClipCursor(nullptr);
     return g_exitCode;
 }
