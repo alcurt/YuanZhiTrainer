@@ -15,7 +15,7 @@
 * **广播窗口化**：教师端进行全屏广播时，把全屏、置顶、无边框的广播窗口改成可自由拖动缩放的普通窗口，画面与声音继续，你可以边看老师演示边操作自己的电脑。**注入进不去也能用**：进程内 Hook 拿不到目标进程时，改由主程序跨进程改窗口样式（`ExternalWindowFix`，默认开）。
 * **假全屏（默认关闭）**：广播窗口继续铺满整屏、外观不变，只把它从最上层拿下来——教师端看到的仍是"全屏广播"，而你依次按 Alt+Tab 切过去的窗口能盖在广播上面，配合键鼠解锁就能操作自己的电脑。它与窗口化互斥且**优先于窗口化**。注意它只改窗口层级，**不隐藏内容**：教师端若在抓屏，看到的还是你的真实屏幕，要遮内容得靠防监视（冻结帧）。
 * **教师端远程执行审计（始终开启）**：记录学生端进程里出现的 `CreateProcessA/W`、`WinExec`、`ShellExecuteExW`、`ExitWindowsEx` 调用（教师端的"远程执行命令/关机/重启/注销"最终都落在这里），**只写日志、不拦截、不改行为**。审计文件为日志目录下的 `remote-exec.log`（超过 2MB 顺延 `remote-exec-1.log`，不删除旧文件），并把"疑似教师端下发"的条目同时写进界面日志。考试模式下连审计也停。
-* **解除键鼠锁定**：拦截学生端安装的 `WH_KEYBOARD_LL` / `WH_MOUSE_LL` / `WH_KEYBOARD` / `WH_GETMESSAGE` 等钩子，阻止其屏蔽 Alt+Tab、Win 键、任务管理器，并解除 `ClipCursor` 鼠标锁定、`BlockInput` 输入封锁与相关 HKCU 策略改写。只拦**确实是远志自己装的**钩子与**逃生类组合键**，不动同进程里其它组件的合法钩子/热键。
+* **解除键鼠锁定（2026-10-09 实测结案：用户态解不开）**：把学生端安装的 `WH_KEYBOARD_LL` / `WH_MOUSE_LL` / `WH_KEYBOARD` / `WH_GETMESSAGE` 等钩子**替换成空过程**（v0.6.11 起，见“实现要点 · 输入层”），并拦下 `ClipCursor` / `BlockInput` / 逃生类热键 / SPI 改写；只处理**确实是远志自己装的**钩子与逃生组合键，不动同进程里其它组件的合法钩子/热键。**但机房实测证明它解不开封锁**：客户端进程内一次都没调过这些 API、内核 clip 矩形在整段广播期都是整屏，鼠标却仍被反复拽回左上角（设备层封锁，见“已知限制”第 14 条）。这条开关现在的实际价值是“中和钩子 + 留下证据”。
 * **防监视（默认关闭）**：开启后教师端“监视/远程桌面”看到的是开启瞬间的静止画面（冻结帧），关闭立即恢复实时。
 * **拦截教师端遥控输入（默认关闭）**：开启后丢弃学生端进程内的 `SendInput` / `mouse_event` / `keybd_event` / `SetCursorPos`，教师端无法接管你的鼠标键盘。
 * **服务/驱动面板**：列出与远志相关的服务与内核驱动，只做临时停止/启动，不删除任何服务或文件。
@@ -162,16 +162,16 @@ ProcessNames=Yistart.exe;TEACHCMD.exe;PlayerGUI.exe;ExdPaintHelper.exe
 * **窗口层（两种模式）**：hook `SetWindowPos` / `MoveWindow` / `ShowWindow` / `SetWindowLongA/W`，命中“本进程 + 无标题栏 + 覆盖整块显示器 + 置顶或 POPUP”的窗口后按模式处理——**窗口化**改写 `WS_OVERLAPPEDWINDOW`（默认屏宽 60% 居中、不抢焦点），**假全屏**保留 `WS_POPUP` 全屏外观、只把 `WS_EX_TOPMOST` 去掉并强制 `HWND_NOTOPMOST`；两者都在客户端每 3 秒抢回全屏时按 500ms 节流重新纠正，假全屏另有"已达稳态就不再改"的判据，避免每秒白改一次。
 * **外部窗口纠正（免注入兜底）**：窗口样式是会话级对象，改别人的窗口不需要目标进程配合。主程序每秒按**同一套结构判据**枚举顶层窗口，命中"属于远志进程 + 无属主 + 无标题栏 + 非子窗口 + 非桌面壳类 + 覆盖整块显示器 + POPUP 或置顶"后用跨进程 `SetWindowLongPtrW` + `SetWindowPos(..., SWP_ASYNCWINDOWPOS)` 改成普通窗口（`ExternalWindowFix`），节流 1 秒；`Flags` 里给的是假全屏时同样支持跨进程做假全屏。这是"客户端被剥夺句柄权限、`VirtualAllocEx` 返回 0x5"时唯一还能生效的窗口手段；进程内 Hook 已生效的宿主进程会被跳过（避免两边抢同一个窗口），其余远志进程仍由它兜底。写入被拒（UIPI / win32k 权限检查）会记 WARN 并在状态栏显示"有写入失败"，不静默失败。
 * **远程执行审计层**：hook `kernel32!CreateProcessA/W`、`WinExec`、`user32!ExitWindowsEx`，以及（仅当目标进程已加载 `shell32` 时）`shell32!ShellExecuteExW`。一律**先调用原函数拿到真实结果，再写审计**，不做任何拦截。审计行同时落 `yzt.log` 侧的 INFO 与 `remote-exec.log`，按 exe 是否在远志安装目录里标注 `origin=self|remote`，界面日志只播报 `remote` 的条目。不为了审计去加载 shell32。
-* **输入层**：拦截学生端安装键盘钩子的调用——**线程内钩子（`hMod == NULL`）按回调地址反查所属模块**，只有落在远志目录里才拦，归属不明的放行并记账（避免误伤输入法/公共控件）；`RegisterHotKey` 只拦 Win / Alt+Tab / Alt+Esc / Alt+F4 / Alt+Space / Ctrl+Esc / Ctrl+Shift+Esc 这些"逃生键"；`SystemParametersInfoW` **和 `SystemParametersInfoA`**（屏保/快速任务切换；v0.6.3 补上 A 版——`KeyboardHook.dll` 导入的正是 A 版，只挂 W 会漏）、`ClipCursor`、`BlockInput` 按开关放行或拦截；每秒强制 `ClipCursor(NULL)` 一次；被改写的 HKCU 策略值（任务管理器/锁屏/Win 键/GameDVR）在后台持续恢复，退出时还原原值（**hive 归属存疑，见"已知限制"第 12 条**）。拦截遥控输入时 `SendInput` 返回"全部投递成功"而不是 0，减少被学生端察觉后重试的概率。
-* **采集层**：跟踪进程内取得的屏幕 DC（`GetDC(NULL)`/`GetWindowDC`/`CreateDCW("DISPLAY")`），冻结时把 `BitBlt`/`StretchBlt`/`PrintWindow` 的源改为开启瞬间抓取的 DIB，从而只影响学生端自己抓屏，不影响你本地显示。
+* **输入层**：把学生端安装的键盘/鼠标钩子**替换成我们 DLL 里的空过程**（v0.6.11 起；命中判据不变——**线程内钩子（`hMod == NULL`）按回调地址反查所属模块**，只有落在远志目录里才处理，归属不明的放行并记账，避免误伤输入法/公共控件）。**为什么不再返回失败（P0）**：2026-10-09 实测，把 `SetWindowsHookEx` 拦成 `NULL` 会让客户端在 8 毫秒内自杀、守卫每 4 秒把它拉起来，形成 10 秒级重启循环（电子点名窗口因此立不住）；改成“返回合法 HHOOK + 空过程”后客户端不再重启，而它的过滤逻辑照样不执行，日志文案为 `已用空过程替换远志键盘/鼠标钩子(W/A)`。`RegisterHotKey` 只拦 Win / Alt+Tab / Alt+Esc / Alt+F4 / Alt+Space / Ctrl+Esc / Ctrl+Shift+Esc 这些“逃生键”；`SystemParametersInfoW` **和 `SystemParametersInfoA`**（屏保/快速任务切换；v0.6.3 补上 A 版——`KeyboardHook.dll` 导入的正是 A 版，只挂 W 会漏）、`ClipCursor`、`BlockInput` 按开关放行或替换；`InputEnforceTick` 每秒强制 `ClipCursor(NULL)` / `BlockInput(FALSE)` 一次；被改写的 HKCU 策略值（任务管理器/锁屏/Win 键/GameDVR）在后台持续恢复，退出时还原原值（**hive 归属存疑，见“已知限制”第 12 条**）。拦截遥控输入时 `SendInput` 返回“全部投递成功”而不是 0，减少被学生端察觉后重试的概率。
+* **采集层**：跟踪进程内取得的屏幕 DC（`GetDC(NULL)`/`GetWindowDC`/`CreateDCW("DISPLAY")`），冻结时把 `BitBlt`/`StretchBlt`/`PrintWindow` 的源改为开启瞬间抓取的 DIB，从而只影响学生端自己抓屏，不影响你本地显示。**注意这条只覆盖 GDI 抓屏路径**；厂商的采集层是 DXGI 桌面复制（见“已知限制”第 1 条），所以防监视默认关闭。
 * **通信**：命名管道 `\\.\pipe\YZTrainer`，帧格式 `[magic 'YZT1'][opcode][len][payload]`；Hook DLL 主动连接并上报状态与日志。
 * **考试模式判定（强/弱信号分级）**：弱信号（`Exam.ads` / `ClassQuiz.ads` 已加载）只按节流记 INFO；强信号（独立 `ExamDlg.exe` 进程、进程内加载考试对话框组件、或**可见**且标题命中 `考试|测验|答题|试卷|快问快答|Exam|Quiz` 的远志窗口）任一命中才熔断并恢复策略、清零功能位。判据走严格目录前缀比较（避免 `...V9.0 StudentX` 这类前缀误判），窗口用 `IsWindowVisible` 过滤隐藏窗口；熔断时输出诊断（命中原因 / 考试进程路径 / 强信号模块 / 进程模块清单）到日志与 `%TEMP%\YZTrainer\exam-debug.txt`，同内容 30 秒节流 + FNV-1a 去重。开关 `EnableExamGuard`（默认 1）以控制位 `YZ_CFG_EXAM_GUARD` 随配置下发，用 `YZ_FLAG_FUNCTION_MASK` 剔除，保证功能位上报不被污染。
 * **还原**：收到卸载指令或客户端进程退出时，全量 `MH_DisableHook` + `MH_RemoveHook` + `MH_Uninitialize`，恢复策略值，释放冻结位图；不调用 `FreeLibrary`（避免崩溃），DLL 留在进程内但完全停用。
 
 ## 已知限制
 
-1. 防监视目前只覆盖 GDI 抓屏路径。对 V9.0 Student 安装目录做静态扫描已确认存在 `KsFiles\ExdDtDup.dll`（DXGI Desktop Duplication），广播/监视的抓屏很可能走 DXGI 路径，GDI 冻结未必拦得住——所以**防监视保持默认关闭**，要用之前先在机房实测。要覆盖该路径需在 `hooks_capture.cpp` 追加 `IDXGIOutputDuplication::AcquireNextFrame` 的 COM vtable hook（尚未实现）。
-2. 若键鼠封锁来自内核驱动或 `WinIo.dll` 端口 I/O（即解除钩子后仍被锁），需要改用“指令层拦截”：在 `CmdProc.ads`/`NetControl.ads` 的分发点丢弃锁定类命令，命令标识需先用侦察报告与抓包确认。
+1. **防监视只覆盖 GDI 路径，而厂商的采集层是 DXGI 桌面复制**：本机 dumpbin 实测（学生端与教师端副本一致）`KsFiles\ExdDtDup.dll` 依赖 `d3d11.dll`、导入 `D3D11CreateDevice`，导出 `InitDD`/`DestroyDD`/`DtEnableSnatch`/`DtDisableSnatch`/`DtDoCopy`/`DtGetBuffer`/`DtReleaseBuffer`/`RunCapture`（DD = Desktop Duplication），且**不导入任何 GDI 抓屏 API**（`BitBlt`/`StretchBlt`/`PrintWindow`/`GetDC` 全无）。因此 GDI 冻结在 DXGI 路径上必然失效——**防监视保持默认关闭**；要覆盖它需在 `hooks_capture.cpp` 追加 `IDXGIOutputDuplication::AcquireNextFrame`/`ReleaseFrame` 的 COM vtable hook（尚未实现）。运行时还差一环：2026-10-10 探针在广播接收期间**没有**观察到 `ExdDtDup.dll` 被加载（当时只有 `Nmdeputy.exe` + `Yistart.exe` 在跑），所以“教师监视/抓屏时由哪个进程加载它”要另采一次；YZProbe v0.6.11 起在报告 `notes` 里输出“图形采集栈”行，专门用来收这条。
+2. ~~若键鼠封锁来自内核驱动或 `WinIo.dll` 端口 I/O，需要改用“指令层拦截”~~ **已作废（2026-10-09/10）**：键鼠封锁已实测结案为设备层，且按硬边界不再投入；“在 `CmdProc.ads`/`NetControl.ads` 分发点丢命令”等于篡改厂商协议，不做。保留此条只为记录曾经的判断。
 3. 注入需要管理员权限与足够完整性级别；若学生端以 SYSTEM 运行而你在受限账户下，会失败（机房默认管理员登录则不受影响）。
 4. 载荷已内嵌（RCDATA）：运行时释放到 `%ProgramData%\YZTrainer\cache\YZHook_<arch>_<hash>.dll`，复用前整文件比对；目录不可写时退 `%TEMP%\YZTrainer-cache\`，再失败才回退 exe 同目录的 `YZHook.dll`。释放出来的文件保留不删，便于排障。
 5. 防监视从设计上只影响学生端自己抓屏的路径，不会改动系统显示驱动。
@@ -191,8 +191,8 @@ ProcessNames=Yistart.exe;TEACHCMD.exe;PlayerGUI.exe;ExdPaintHelper.exe
     * `RegOpenCurrentUser` + `NtQueryKey` 自报的 HKCU 是 `\REGISTRY\USER\.DEFAULT`，**不是** `S-1-5-18`；
     * 但我们 `PolicyEnforce` 写下的值**同时**出现在 `HKU\.DEFAULT` 与 `HKU\S-1-5-18` 下，两处 `Environment` 内容逐字相同 → 这台机器上这两个名字是**同一个 hive**。
     所以：外部只看 `S-1-5-18` 会得出"根本没写过策略"的错误结论。**v0.6.4 起注入侧自己会报一行 `PolicyHive: 本进程 HKCU → …`**（只读、不改状态），现场以它为准；确认前不引入 `WTSQueryUserToken`/跨 hive 穿透逻辑（注入本身还没稳，不想再加一层不确定性）。
-13. **消息层钩子的拦截是"可二分的风险点"**：`ShouldBlockHook` 也会拦 `WH_GETMESSAGE` / `WH_CALLWNDPROC`（远志的 `KeyboardHook.dll` 导出了 `SetMessageCallback`/`SetWndProcCallback`，这两类钩子可能是锁键鼠的载体，但也可能是广播消息链的一环）。现场若出现"广播画面不动/窗口消息异常"，第一件事就是把 `hooks_input.cpp` 顶部的 `YZ_BLOCK_MESSAGE_HOOKS` 改成 0 重新编译做对照；拦截日志里这两类会单独记成"已拦截远志消息层钩子安装"，便于定位。
-14. **键鼠封锁（2026-09-29 实测）**：客户端进程内没有任何 `ClipCursor`/`BlockInput` 调用（输入 hook 拦不到东西），封锁由 `Yistart.exe` 每 2~3 秒拉起的 `KillMain.exe -d:set` 维持；`KillMain.exe` 只导入 `DeviceIoControl`/`CreateFileW`/`WriteFile`，没有任何用户态输入 API。即使消息钩子已把 29 个 hook 装进客户端、并成功拦掉它的 `WH_MOUSE_LL` 安装（日志可见 2 次拦截），鼠标仍被钳在左上角、键盘仍被禁。**倾向结论是"封锁在设备层，用户态无解"**；v0.6.7 为此加了**只读探针**（`ClipCursor 探针: clip=… cursor=…（连续 N 次采样未变）`，每秒采样、变化即记、每 5 秒心跳）用于终结这一判断：`clip` 被压成 1x1 → 还有人在用 ClipCursor（尚有讨论余地）；`clip` 是整屏而光标仍被拉回 → 输入在 win32k 之下就被过滤，**永久结案**。在结论落地前，v1 的键鼠解锁标记为**未解决**，不再投入。
+13. **消息层钩子的处理是“可二分的风险点”**：`ShouldBlockHook` 也会把 `WH_GETMESSAGE` / `WH_CALLWNDPROC` 换成空过程（远志的 `KeyboardHook.dll` 导出了 `SetMessageCallback`/`SetWndProcCallback`，这两类钩子可能是锁键鼠的载体，但也可能是广播消息链的一环）。现场若出现“广播画面不动/窗口消息异常”，第一件事就是把 `hooks_input.cpp` 顶部的 `YZ_BLOCK_MESSAGE_HOOKS` 改成 0 重新编译做对照；这两类在日志里单独记成 `已用空过程替换远志消息层钩子(W/A)`，便于定位。
+14. **键鼠封锁：2026-10-09 终结实验，正式结案（用户态无解）**。三条证据：① 整段广播期客户端**一次都没调用** `ClipCursor` / `BlockInput` / SPI 改写 / 抢注热键（这些拦截点命中即打印，计数全为 0）；② 内核 `clip` 矩形全程 `0,0,1920,1080`（整屏），而光标在广播期间约 90% 采样停在 `(0,0)`，广播一结束立刻恢复自由；③ 客户端在 09:01:15.427 尝试安装自己的 `WH_MOUSE_LL`（idHook=14），被我们成功拦下，之后 38 分钟鼠标照锁不误。再加上封锁由 `Yistart.exe` 每 2~3 秒拉起的 `KillMain.exe -d:set` 维持（该 exe 只导入 `DeviceIoControl`/`CreateFileW`/`WriteFile`/`TerminateProcess`，没有任何用户态输入 API）→ **封锁在驱动/设备层，用户态（含进程内 hook）不可能解开**。判读提醒：`ClipCursor 探针` 的 `clip` 读数会被我们自己的钩子影响（`Hook_ClipCursor` 命中时会把钳制清零成全屏），所以看读数前先确认日志里 `已解除鼠标区域锁定(ClipCursor)` 的计数——**计数 >0 时该读数不构成证据**。
 15. **策略项（HKCU）在机房机器上的实测结论**：学生 hive（`S-1-5-21-…-500`）里**一条策略值都没有**；有值的只有 `.DEFAULT`/`S-1-5-18`（同一 hive）——而那正是我们自己的 `PolicyEnforce` 写进去的（注入侧自报 `PolicyHive: 本进程 HKCU → \REGISTRY\USER\.DEFAULT`）。也就是说：远志的封锁**不走 HKCU 策略**，我们那套策略读写既没作用在正确位置、也没必要。**据此"批次 2（改主程序侧跨 hive 修策略）"已取消**：留着只会多一个与真实机制无关、还得长期维护的模块。`policy.cpp` 暂时保留原样（它现在的副作用只是把几个 0/1 写进默认 hive，无害），等下次动代码时再决定是删掉还是显式降级为"默认关闭"。
 
 ## 网管版（GZYZ）适配
@@ -257,11 +257,16 @@ ProcessNames=Yistart.exe;TEACHCMD.exe;PlayerGUI.exe;ExdPaintHelper.exe
 **结论**：受保护客户端上，"窗口化/假全屏 + 消息钩子注入"这条组合路线**是可行的**，前提是用 SYSTEM 启动主程序
 （v0.6.5 起程序会自动提示并运行期兜底改用消息钩子）。
 
-**仍然无解的是键鼠解锁**，而且现在有了机制级的解释：客户端进程内**没有任何** `ClipCursor`/`BlockInput` 调用
-（我们的输入 hook 什么都拦不到），而封锁由 `Yistart.exe` 每 2~3 秒拉起的 **`KillMain.exe -d:set`** 维持——
-该 exe 只导入 `DeviceIoControl`/`CreateFileW`/`WriteFile`，**没有任何用户态输入 API**，即封锁发生在驱动/设备层。
-用户态 hook（哪怕已经成功装进客户端 29 个）对它无效。要动它就得碰驱动或拦截/干掉厂商进程，两者都在项目硬边界之外，
-因此 v1 的键鼠解锁标记为**未解决**，不再投入。
+**键鼠解锁同样结案（2026-10-09 终结实验）**：客户端进程内没有任何 `ClipCursor`/`BlockInput` 调用，内核 clip 矩形整段广播期都是整屏而光标仍被拽回左上角，且我们拦下它的 `WH_MOUSE_LL` 安装后鼠标照锁不误——封锁由 `Yistart.exe` 每 2~3 秒拉起的 `KillMain.exe -d:set` 维持，发生在驱动/设备层；用户态 hook（哪怕已经装进客户端 29 个）对它无效。要动它就得碰驱动或干掉厂商进程，两者都在项目硬边界之外，因此 v1 的键鼠解锁标记为**未解决**，不再投入。
+
+### 2026-10-10 机房验证：客户端重启循环消失、键鼠结案、采集层定性
+
+四件事在这一轮同时收口（档案 `archive/YZ-26.10.9/`、`archive/YZ-26.10.10/`）：
+
+1. **窗口化在真机首次完整成立**（10-09）：`广播窗口已窗口化: 0x002A0D58 -> 384,216 1152x648`，此后 39 分钟稳定在 60%，全程没有横跳、没有“认输停手”；外部探针独立复核到同一个 `Brw:` 窗口（style `0x14CF0000`、置顶=否、覆盖整屏=否）。
+2. **v0.6.11 的“空过程替换”在真机验证通过**（10-10）：`已用空过程替换远志键盘/鼠标钩子(A): idHook=13 … -> hhook=0x000C06F7`、`idHook=14 … -> hhook=0x000304E8`，拿到的是**合法 HHOOK**；替换后客户端进程一直活着（没有 `Hook DLL 连接结束`、没有十秒级重启），窗口照常窗口化。对照 v0.6.10 的现场日志：16 次 `已拦截…安装`，每次都紧跟着 5~8 毫秒后进程消失。
+3. **键鼠解锁正式结案（用户态无解）**：见“已知限制”第 14 条的三条证据；判读 `ClipCursor 探针` 前要先确认 `已解除鼠标区域锁定(ClipCursor)` 计数为 0，否则那个读数是我们自己造成的。
+4. **采集层定性（静态）**：`KsFiles\ExdDtDup.dll` 是 DXGI 桌面复制实现（见“已知限制”第 1 条）；运行时“谁在抓屏时加载它”仍待另采一次，YZProbe 的“图形采集栈”行就是为这件事准备的。
 
 ## 免责声明与使用边界
 
