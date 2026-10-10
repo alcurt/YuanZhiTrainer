@@ -33,18 +33,21 @@
 
 ```
 YZTrainer/
-YZTrainer.sln             VS 解决方案（6 个工程）
-  build.ps1                 命令行构建脚本（调用 MSBuild）
-  src/common/               公共协议、日志、工具函数
+  YZTrainer.sln             VS 解决方案（6 个工程：Trainer / Hook / Probe / SimTarget / UnhookTest / SysRun）
+  build.ps1                 命令行构建脚本（MSBuild；`-Both` 同时出 Win32 与 x64）
+  src/common/               公共协议、日志、工具函数；**版本号唯一来源 `yz_version.h`**（三个工具共用 `yz_version.rc`）
   src/YZTrainer/            主程序：托盘 UI、热键、注入器、命名管道服务、服务面板、诊断导出
-  src/YZHook/               注入到远志学生端的 Hook DLL（MinHook + 窗口/输入/采集三层）
-  src/YZProbe/              机房侦察工具（进程/模块/窗口/服务/网络快照，输出 JSON + Markdown）
-  src/YZSimTarget/          模拟远志学生端（本地回归测试用）
-src/YZUnhookTest/         免注入拔钩验证工具（本进程加载远志 DLL 调其导出，不注入）
-src/YZSysRun/             以 SYSTEM 身份运行指定程序的启动器（复制当前会话 winlogon 令牌，不装服务）
+  src/YZHook/               注入到远志学生端的 Hook DLL（MinHook + 窗口/输入/采集/远程执行审计）
+  src/YZProbe/              机房侦察工具（进程/模块/窗口/服务/网络快照 + 图形采集栈判定，输出 JSON + Markdown）
+  src/YZSimTarget/          模拟远志学生端（本地回归测试用，故意不带版本资源）
+  src/YZUnhookTest/         免注入拔钩验证工具（本进程加载远志 DLL 调其导出，不注入）
+  src/YZSysRun/             以 SYSTEM 身份运行指定程序的启动器（复制当前会话 winlogon 令牌，不装服务）
   third_party/minhook/      MinHook（BSD-2-Clause，已内置源码）
-  tests/run_sim_test.ps1    本地自动回归脚本
-  dist/                     构建产物输出目录
+  tests/run_sim_test.ps1    本地自动回归脚本（13 项断言，需要管理员权限）
+  dist/                     构建产物输出目录（含 `build.ps1` 写出的出厂 `YZTrainer.ini`）
+  archive/                  机房实测档案（含机位名/账户/IP，**只留本地、绝不入库**）
+  工作顺序.txt              每次上机的操作清单（本地文件，不入库）
+  交接记录.md / 开发记录.md   会话记录：前者是别的 session 交给主线的输入、后者是主线自己的工作记录（均只留本地）
 ```
 
 ## 工具链准备（只需一次）
