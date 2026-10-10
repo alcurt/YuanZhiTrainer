@@ -1,6 +1,6 @@
 # YZTrainer
 
-> **v0.6.11** · 一款**远志多媒体教学管理软件 V9.0 网管版学生端**的解控软件 · 仅供**教育研究**与**技术学习**，禁止任何非法用途 · 与厂商无关联，使用者自行承担全部后果。
+> **v0.6.12** · 一款**远志多媒体教学管理软件 V9.0 网管版学生端**的解控软件 · 仅供**教育研究**与**技术学习**，禁止任何非法用途 · 与厂商无关联，使用者自行承担全部后果。
 
 > **部署硬要求（2026-09-29 机房实测）**：学生端以 SYSTEM 运行，而本程序默认是管理员（高完整性）。
 > 两者差一级完整性，`VirtualAllocEx` 注入、`SetWindowsHookEx` 消息钩子、跨进程改窗口**三样都会被 UIPI 挡住**
@@ -16,7 +16,7 @@
 * **假全屏（默认关闭）**：广播窗口继续铺满整屏、外观不变，只把它从最上层拿下来——教师端看到的仍是"全屏广播"，而你依次按 Alt+Tab 切过去的窗口能盖在广播上面，配合键鼠解锁就能操作自己的电脑。它与窗口化互斥且**优先于窗口化**。注意它只改窗口层级，**不隐藏内容**：教师端若在抓屏，看到的还是你的真实屏幕，要遮内容得靠防监视（冻结帧）。
 * **教师端远程执行审计（始终开启）**：记录学生端进程里出现的 `CreateProcessA/W`、`WinExec`、`ShellExecuteExW`、`ExitWindowsEx` 调用（教师端的"远程执行命令/关机/重启/注销"最终都落在这里），**只写日志、不拦截、不改行为**。审计文件为日志目录下的 `remote-exec.log`（超过 2MB 顺延 `remote-exec-1.log`，不删除旧文件），并把"疑似教师端下发"的条目同时写进界面日志。考试模式下连审计也停。
 * **解除键鼠锁定（2026-10-09 实测结案：用户态解不开）**：把学生端安装的 `WH_KEYBOARD_LL` / `WH_MOUSE_LL` / `WH_KEYBOARD` / `WH_GETMESSAGE` 等钩子**替换成空过程**（v0.6.11 起，见“实现要点 · 输入层”），并拦下 `ClipCursor` / `BlockInput` / 逃生类热键 / SPI 改写；只处理**确实是远志自己装的**钩子与逃生组合键，不动同进程里其它组件的合法钩子/热键。**但机房实测证明它解不开封锁**：客户端进程内一次都没调过这些 API、内核 clip 矩形在整段广播期都是整屏，鼠标却仍被反复拽回左上角（设备层封锁，见“已知限制”第 14 条）。这条开关现在的实际价值是“中和钩子 + 留下证据”。
-* **防监视（默认关闭）**：开启后教师端“监视/远程桌面”看到的是开启瞬间的静止画面（冻结帧），关闭立即恢复实时。
+* **防监视（默认关闭）**：开启后教师端“监视/远程桌面”看到的是开启瞬间的静止画面（冻结帧），关闭立即恢复实时。**但它目前只覆盖"学生端进程自己用 GDI 抓屏"这一条路径**：厂商的采集层还有 DXGI（`ExdDtDup.dll`）与独立进程的 GDI helper（`ScreenRecoder.exe`），那两条路上这个开关无效——原因与后续计划见“已知限制”第 1 条。
 * **拦截教师端遥控输入（默认关闭）**：开启后丢弃学生端进程内的 `SendInput` / `mouse_event` / `keybd_event` / `SetCursorPos`，教师端无法接管你的鼠标键盘。
 * **服务/驱动面板**：列出与远志相关的服务与内核驱动，只做临时停止/启动，不删除任何服务或文件。
 
@@ -43,7 +43,7 @@ YZTrainer/
   src/YZUnhookTest/         免注入拔钩验证工具（本进程加载远志 DLL 调其导出，不注入）
   src/YZSysRun/             以 SYSTEM 身份运行指定程序的启动器（复制当前会话 winlogon 令牌，不装服务）
   third_party/minhook/      MinHook（BSD-2-Clause，已内置源码）
-  tests/run_sim_test.ps1    本地自动回归脚本（13 项断言，需要管理员权限）
+  tests/run_sim_test.ps1    本地自动回归脚本（七阶段 15 项断言，需要管理员权限）
   dist/                     构建产物输出目录（含 `build.ps1` 写出的出厂 `YZTrainer.ini`）
   archive/                  机房实测档案（含机位名/账户/IP，**只留本地、绝不入库**）
   工作顺序.txt              每次上机的操作清单（本地文件，不入库）
@@ -82,7 +82,7 @@ pwsh -File build.ps1 -Both
 |---|---|
 | `YZTrainer.exe` | 主程序（清单要求管理员权限），已内嵌 YZHook.dll，单文件即可运行 |
 | `YZHook.dll` | 注入模块，运行时从 exe 资源释放；dist 下这份是回退/调试用，分发时不需要拷贝 |
-| `YZProbe.exe` | 机房侦察工具，只读，建议先跑它。报告 `notes` 里会给出每个远志进程的**图形采集栈**行（`ExdDtDup.dll` / `d3d11` / `dxgi` / `gdi32` 是否已加载 + 磁盘 `KsFiles\ExdDtDup.dll` 是否存在 + 判定"DXGI 桌面复制 / GDI 抓屏"），"冻结画面"要按它选钩子路径（v0.6.11 起） |
+| `YZProbe.exe` | 机房侦察工具，只读，建议先跑它。报告 `notes` 里会给出每个远志进程的**图形采集栈**行（`ExdDtDup.dll` / `d3d11` / `dxgi` / `gdi32` 是否已加载 + 磁盘 `KsFiles\ExdDtDup.dll` 是否存在 + 判定"DXGI 桌面复制 / GDI 抓屏 helper"），"冻结画面"要按它选钩子路径（v0.6.11 起）。v0.6.12 起：**对全部进程**轻量扫 `ExdDtDup/ExdElite/ExdPaint`（这三者可能挂在一个"看起来不像远志"的进程里），并区分"模块枚举失败"与"确实没加载"；另新增**触发式常驻模式** `YZProbe.exe --watch [--duration 秒] [--interval 秒]`——出现新远志进程、任何进程加载采集组件、或出现 `Brw:`/覆盖整屏的无边框远志窗口时立刻落一份完整报告，每分钟一条心跳 |
 | `YZSysRun.exe` | **以 SYSTEM 身份运行指定程序**的轻量启动器（令牌复制，不装服务、不写注册表）：用来复测"换个身份是否就不被剥句柄权限"。用法 `YZSysRun.exe -- YZProbe.exe -o <目录> --no-pause`。它从**当前会话**的 `winlogon.exe` 复制主令牌并以 `winsta0\default` 启动子进程，因此子进程仍在交互桌面上；启动后会打印令牌来源、子进程会话与完整性级别（应为 系统(16384) 且会话号与当前一致）。**控制台的全部输出同时写成同目录 `YZSysRun-<时间戳>.txt`（可用 `--log <文件>` 指定路径，exe 目录不可写时依次退当前目录、`%TEMP%\YZTrainer\`）**，免得现场来不及另存 |
 | `YZUnhookTest.exe` | 免注入拔钩验证工具：默认只体检（读文件导出表 + 调用约定自检）并把过程写入同目录 `YZUnhookTest-<时间戳>.txt`；`--apply` 才真正调用远志的拔钩导出，`--arm` 待机等你回车再执行，`--delay N` 待机 N 秒后自动执行（被锁键鼠时唯一可行的触发方式），`--no-pause` 供脚本调用。调用前后会打印对照节的**基址、大小、前 32 字节原始值**和三个 HHOOK/标志字（v0.6.2 起按**节名+节内偏移**定位；此前写死的 RVA 差了两个数量级，所以在现场报告里从来没出现过对照行） |
 | `YZSimTarget.exe` | 模拟学生端，仅本地测试用。`--exam` 造考试窗口、`--exec` 4 秒后拉起子进程（验证审计）、**`--load <dll>` 4 秒后加载指定 DLL**（验证"钩子模块晚于注入出现"时主动拔钩的重试，见阶段五） |
@@ -91,13 +91,13 @@ pwsh -File build.ps1 -Both
 
 ## 建议的使用流程
 
-1. **本地先跑通**：管理员 PowerShell 执行 `pwsh -File tests\run_sim_test.ps1`，确认六个阶段共 **13 项断言**全通过——阶段一（注入路径）4 项：全屏置顶 / 窗口化 / 带 WS_CAPTION / 冻结画面；阶段二（免注入路径）2 项 + 1 条 WARN；阶段三（假全屏）2 项；阶段四（远程执行审计）2 项；阶段五（主动拔钩的晚加载重试，v0.6.3）1 项：`YZSimTarget --load` 在注入之后才加载一个名叫 `ExdHooks.dll` 的替身 DLL，日志里必须出现"NativeUnhook: 目标模块 ExdHooks.dll 已加载，开始尝试"；阶段六（反横跳闸门，v0.6.6）1 项：`YZSimTarget --fight` 每 200ms 抢回无边框全屏（复现机房"全屏↔窗口横跳"），外部纠正必须在几次短间隔抢回后**认输停手**（日志出现"已对该窗口停手"）。
+1. **本地先跑通**：管理员 PowerShell 执行 `pwsh -File tests\run_sim_test.ps1`，确认七个阶段共 **15 项断言**全通过——阶段一（注入路径）4 项：全屏置顶 / 窗口化 / 带 WS_CAPTION / 冻结画面；阶段二（免注入路径）2 项 + 1 条 WARN；阶段三（假全屏）2 项；阶段四（远程执行审计）2 项；阶段五（主动拔钩的晚加载重试，v0.6.3）1 项：`YZSimTarget --load` 在注入之后才加载一个名叫 `ExdHooks.dll` 的替身 DLL，日志里必须出现"NativeUnhook: 目标模块 ExdHooks.dll 已加载，开始尝试"；阶段六（反横跳闸门，v0.6.6）1 项：`YZSimTarget --fight` 每 200ms 抢回无边框全屏（复现机房"全屏↔窗口横跳"），外部纠正必须在几次短间隔抢回后**认输停手**（日志出现"已对该窗口停手"）；阶段七（采集栈监控，v0.6.12）2 项：某进程加载 `ExdDtDup.dll` 时日志必须出现"采集栈监控: PID=… 出现采集组件 ExdDtDup.dll"，且自动导出的诊断包 `snapshot.txt` 里含"== 采集栈快照 =="与该命中。
 2. **机房侦察（先跑探针）**：把 `YZProbe.exe`（x64 版本信息最全）拷到机房机器，右键以管理员运行，生成 `YZProbe-report-*.json/.md`。重点看：
    * “远志相关进程”里哪个进程加载了 `Rmdesk.ads` / `PlayerGUI.dll` / `ExdHooks.dll`；
    * 远志模块导出表里 `KillHook` / `UnSetExdHooks` / `UnSetExdHooks2` 是否存在（与本地版本比对，决定主动拔钩可用性）；
    * “疑似全屏/置顶窗口”里广播窗口的类名、样式与所属 PID（确认是否由 `ExdPaintHelper.exe` 承载）；
    * “远志相关服务/驱动”的 ImagePath，确认文件过滤/网卡过滤驱动的真实名字；
-   * 进程模块里是否出现 `ExdDtDup.dll`（决定防监视能不能用）；`self` 段的完整性级别/提权/SeDebug。
+   * 进程模块里是否出现 `ExdDtDup.dll`（决定防监视能不能用，以及**该钩哪条路**）；v0.6.12 起这一项由两处**自动**采：探针 `--watch` 常驻，以及主程序常驻监控（见"已知限制"第 1 条）；`self` 段的完整性级别/提权/SeDebug。
    * **“注入能力实测”表的 `句柄实得权限` 一列，以及每个进程下面的“逐权限位实测”子表**：判定为 **被削**（`OpenProcess` 成功、但句柄实得权限里没有请求的那一位）是内核驱动用 `ObRegisterCallbacks` 一类回调剥权限的铁证；`打不开（无权限）` 才是真的权限不够。这两处过去一直显示“未取到”（`NtQueryObject` 缓冲区长度 bug，v0.5.1 修复），所以历史报告里这一列为空**不等于**没有被削。
    * **尽量在教师正在广播时再采一份**：只有广播进行中才会出现广播窗口，"疑似全屏/置顶窗口"表里的那行（类名/样式/所属 PID）是判断窗口化判据够不够用的唯一硬证据。2026-09-18 的两份报告都是无人广播时采集的，这一点至今仍是空白。
 3. **报告留在 `YZTrainer.exe` 同目录**：诊断包会自动把它一起打包，省得漏带。
@@ -116,7 +116,8 @@ pwsh -File build.ps1 -Both
    随后让教师开始广播，看广播窗口是否变成可操作窗口、键鼠是否可用；`Ctrl+Alt+F8/F9/F10/F11/F12` 是对应开关，注意**假全屏与防监视默认关，只在明确要演示时按**。
    如果日志里只有 `注入失败: VirtualAllocEx 失败 …（拒绝访问 …）`，请把 `InjectMethod` 改成 `1` 再试消息钩子；两条路都不通时，窗口化仍由外部纠正负责，日志里会出现 `外部窗口纠正: 0x… -> x,y wxh`，状态栏“窗口化次数”的第二项就是它的计数。
 6. **导出诊断包**：它是**即时快照**，在“你希望被记录的那个状态”下导出。建议导两份——一份正常基线、一份出问题的那一刻；只能带一份回来时优先带异常那份。输出在 exe 同目录 `diag-<时间戳>\`，含日志（含滚动档）、`snapshot.txt`（配置/运行状态/进程/目标窗口/服务）与同目录的 `YZProbe-report-*`。退出程序后确认 hook 已卸载、被改写的策略值已还原。
-   **v0.6.8 起不必依赖"手点"**：程序会**自动静默导出**两份——① 首次识别到广播窗口时（`diag-<时间戳>-auto`，快照首行写着"导出方式: 首次识别到广播窗口（宿主侧扫描 / 客户端 Hook 上报）"）② 退出时（"导出方式: 退出"）。动机：2026-10-08 那次广播没有预告、一节课只有一次，等反应过来工具还没启动，广播态的证据整段丢失。现在只要**开课前把程序挂上、整节课别关**，广播一出现就自动留下一份包。两个开关分别由 `AutoExportOnBroadcast` / `AutoExportOnExit` 控制。
+   **v0.6.8 起不必依赖"手点"**：程序会**自动静默导出**——① 首次识别到广播窗口时（`diag-<时间戳>-auto`，快照首行写着"导出方式: 首次识别到广播窗口（宿主侧扫描 / 客户端 Hook 上报）"）② 退出时（"导出方式: 退出"）③ **v0.6.12 起加一份：首次发现采集组件（`ExdDtDup`/`ScreenRecoder` 等）时**（"导出方式: 首次发现采集组件（ExdDtDup/ScreenRecoder 等）"）。动机：2026-10-08 那次广播没有预告、一节课只有一次，等反应过来工具还没启动，广播态的证据整段丢失；而"教师监视时谁在抓屏"同样只在几秒里出现，它决定冻结画面走 DXGI 还是 GDI。现在只要**开课前把程序挂上、整节课别关**，这三件事件各自动留下一份包。开关分别是 `AutoExportOnBroadcast` / `AutoExportOnExit` / `AutoExportOnCapture`。
+   **v0.6.12 起每份诊断包的 `snapshot.txt` 都带 `== 采集栈快照 ==` 一块**：本次运行期间观察到的采集组件命中（PID/进程/模块/路径 + "该走哪条冻结路径"的判词），以及当前远志相关进程的逐进程图形采集栈判定与关键模块。主程序每 30 秒扫一轮（新出现的进程在 30 秒观察窗内每轮都重扫，另有 5 分钟一次的全进程兜底扫）。
 
 ## 界面与热键
 
@@ -147,6 +148,7 @@ EnableExamGuard=1  ; 考试模式守护：1=仅强信号熔断（默认）；0=�
 ExternalWindowFix=1; 免注入的外部窗口纠正：1=开（默认）0=关，只在窗口化开关打开时生效
 AutoExportOnBroadcast=1; 首次识别到广播窗口时静默导出一份诊断包（默认开，每进程一次）
 AutoExportOnExit=1 ; 退出时静默导出一份诊断包（默认开）
+AutoExportOnCapture=1; 首次发现采集组件（ExdDtDup/ScreenRecoder 等）时静默导出一份（默认开，每进程一次）
 ProcessNames=Yistart.exe;TEACHCMD.exe;PlayerGUI.exe;ExdPaintHelper.exe
 ```
 
@@ -166,14 +168,16 @@ ProcessNames=Yistart.exe;TEACHCMD.exe;PlayerGUI.exe;ExdPaintHelper.exe
 * **外部窗口纠正（免注入兜底）**：窗口样式是会话级对象，改别人的窗口不需要目标进程配合。主程序每秒按**同一套结构判据**枚举顶层窗口，命中"属于远志进程 + 无属主 + 无标题栏 + 非子窗口 + 非桌面壳类 + 覆盖整块显示器 + POPUP 或置顶"后用跨进程 `SetWindowLongPtrW` + `SetWindowPos(..., SWP_ASYNCWINDOWPOS)` 改成普通窗口（`ExternalWindowFix`），节流 1 秒；`Flags` 里给的是假全屏时同样支持跨进程做假全屏。这是"客户端被剥夺句柄权限、`VirtualAllocEx` 返回 0x5"时唯一还能生效的窗口手段；进程内 Hook 已生效的宿主进程会被跳过（避免两边抢同一个窗口），其余远志进程仍由它兜底。写入被拒（UIPI / win32k 权限检查）会记 WARN 并在状态栏显示"有写入失败"，不静默失败。
 * **远程执行审计层**：hook `kernel32!CreateProcessA/W`、`WinExec`、`user32!ExitWindowsEx`，以及（仅当目标进程已加载 `shell32` 时）`shell32!ShellExecuteExW`。一律**先调用原函数拿到真实结果，再写审计**，不做任何拦截。审计行同时落 `yzt.log` 侧的 INFO 与 `remote-exec.log`，按 exe 是否在远志安装目录里标注 `origin=self|remote`，界面日志只播报 `remote` 的条目。不为了审计去加载 shell32。
 * **输入层**：把学生端安装的键盘/鼠标钩子**替换成我们 DLL 里的空过程**（v0.6.11 起；命中判据不变——**线程内钩子（`hMod == NULL`）按回调地址反查所属模块**，只有落在远志目录里才处理，归属不明的放行并记账，避免误伤输入法/公共控件）。**为什么不再返回失败（P0）**：2026-10-09 实测，把 `SetWindowsHookEx` 拦成 `NULL` 会让客户端在 8 毫秒内自杀、守卫每 4 秒把它拉起来，形成 10 秒级重启循环（电子点名窗口因此立不住）；改成“返回合法 HHOOK + 空过程”后客户端不再重启，而它的过滤逻辑照样不执行，日志文案为 `已用空过程替换远志键盘/鼠标钩子(W/A)`。`RegisterHotKey` 只拦 Win / Alt+Tab / Alt+Esc / Alt+F4 / Alt+Space / Ctrl+Esc / Ctrl+Shift+Esc 这些“逃生键”；`SystemParametersInfoW` **和 `SystemParametersInfoA`**（屏保/快速任务切换；v0.6.3 补上 A 版——`KeyboardHook.dll` 导入的正是 A 版，只挂 W 会漏）、`ClipCursor`、`BlockInput` 按开关放行或替换；`InputEnforceTick` 每秒强制 `ClipCursor(NULL)` / `BlockInput(FALSE)` 一次；被改写的 HKCU 策略值（任务管理器/锁屏/Win 键/GameDVR）在后台持续恢复，退出时还原原值（**hive 归属存疑，见“已知限制”第 12 条**）。拦截遥控输入时 `SendInput` 返回“全部投递成功”而不是 0，减少被学生端察觉后重试的概率。
-* **采集层**：跟踪进程内取得的屏幕 DC（`GetDC(NULL)`/`GetWindowDC`/`CreateDCW("DISPLAY")`），冻结时把 `BitBlt`/`StretchBlt`/`PrintWindow` 的源改为开启瞬间抓取的 DIB，从而只影响学生端自己抓屏，不影响你本地显示。**注意这条只覆盖 GDI 抓屏路径**；厂商的采集层是 DXGI 桌面复制（见“已知限制”第 1 条），所以防监视默认关闭。
+* **采集层**：跟踪进程内取得的屏幕 DC（`GetDC(NULL)`/`GetWindowDC`/`CreateDCW("DISPLAY")`），冻结时把 `BitBlt`/`StretchBlt`/`PrintWindow` 的源改为开启瞬间抓取的 DIB，从而只影响学生端自己抓屏，不影响你本地显示。**注意这条只覆盖 GDI 抓屏路径**；厂商的采集层有 DXGI（`ExdDtDup.dll`）与 GDI（`ScreenRecoder.exe` 独立进程）两条实现，所以防监视默认关闭；v0.6.12 起主程序会**常驻监控**这两条路径何时出现，并把结果写进每份诊断包的 `== 采集栈快照 ==`。
 * **通信**：命名管道 `\\.\pipe\YZTrainer`，帧格式 `[magic 'YZT1'][opcode][len][payload]`；Hook DLL 主动连接并上报状态与日志。
 * **考试模式判定（强/弱信号分级）**：弱信号（`Exam.ads` / `ClassQuiz.ads` 已加载）只按节流记 INFO；强信号（独立 `ExamDlg.exe` 进程、进程内加载考试对话框组件、或**可见**且标题命中 `考试|测验|答题|试卷|快问快答|Exam|Quiz` 的远志窗口）任一命中才熔断并恢复策略、清零功能位。判据走严格目录前缀比较（避免 `...V9.0 StudentX` 这类前缀误判），窗口用 `IsWindowVisible` 过滤隐藏窗口；熔断时输出诊断（命中原因 / 考试进程路径 / 强信号模块 / 进程模块清单）到日志与 `%TEMP%\YZTrainer\exam-debug.txt`，同内容 30 秒节流 + FNV-1a 去重。开关 `EnableExamGuard`（默认 1）以控制位 `YZ_CFG_EXAM_GUARD` 随配置下发，用 `YZ_FLAG_FUNCTION_MASK` 剔除，保证功能位上报不被污染。
 * **还原**：收到卸载指令或客户端进程退出时，全量 `MH_DisableHook` + `MH_RemoveHook` + `MH_Uninitialize`，恢复策略值，释放冻结位图；不调用 `FreeLibrary`（避免崩溃），DLL 留在进程内但完全停用。
 
 ## 已知限制
 
-1. **防监视只覆盖 GDI 路径，而厂商的采集层是 DXGI 桌面复制**：本机 dumpbin 实测（学生端与教师端副本一致）`KsFiles\ExdDtDup.dll` 依赖 `d3d11.dll`、导入 `D3D11CreateDevice`，导出 `InitDD`/`DestroyDD`/`DtEnableSnatch`/`DtDisableSnatch`/`DtDoCopy`/`DtGetBuffer`/`DtReleaseBuffer`/`RunCapture`（DD = Desktop Duplication），且**不导入任何 GDI 抓屏 API**（`BitBlt`/`StretchBlt`/`PrintWindow`/`GetDC` 全无）。因此 GDI 冻结在 DXGI 路径上必然失效——**防监视保持默认关闭**；要覆盖它需在 `hooks_capture.cpp` 追加 `IDXGIOutputDuplication::AcquireNextFrame`/`ReleaseFrame` 的 COM vtable hook（尚未实现）。运行时还差一环：2026-10-10 探针在广播接收期间**没有**观察到 `ExdDtDup.dll` 被加载（当时只有 `Nmdeputy.exe` + `Yistart.exe` 在跑），所以“教师监视/抓屏时由哪个进程加载它”要另采一次；YZProbe v0.6.11 起在报告 `notes` 里输出“图形采集栈”行，专门用来收这条。
+1. **防监视只覆盖 GDI 路径，厂商的采集层有两条实现（2026-10-11 本机反汇编新增）**：本机 dumpbin 实测（学生端与教师端副本一致）`KsFiles\ExdDtDup.dll` 依赖 `d3d11.dll`、导入 `D3D11CreateDevice`，导出 `InitDD`/`DestroyDD`/`DtEnableSnatch`/`DtDisableSnatch`/`DtDoCopy`/`DtGetBuffer`/`DtReleaseBuffer`/`RunCapture`（DD = Desktop Duplication），且**不导入任何 GDI 抓屏 API**（`BitBlt`/`StretchBlt`/`PrintWindow`/`GetDC` 全无）。反汇编进一步定位了它的调用点：`IDXGIOutput1::DuplicateOutput` 在 vtable 槽 22（偏移 `0x58`）、`IDXGIOutputDuplication::AcquireNextFrame` 在槽 8（偏移 `0x20`）、**光标由它自己用 `GetCursorInfo`/`GetIconInfo` 合成**、帧经共享节（`CreateFileMappingW`/`MapViewOfFile`）交给消费端、每块显示器一个采集线程一个 Duplication 对象；`DtEnableSnatch`/`DtDisableSnatch` 在这个版本里是空桩。另一条实现是 **GDI**：`ScreenRecoder.exe`（MFC42 时代，导入 `BitBlt`/`StretchBlt`/`GetDIBits`/`GetWindowDC`）由 `Rmdesk.ads`（远程桌面/监视）、`CmdProc.ads`、`ProxyM.exe` 引用——它是**独立进程**，不在我们的注入目标里。所以"教师监视时到底走哪条"必须看现场进程与模块。
+   因此 GDI 冻结在 DXGI 路径上必然失效、在 `ScreenRecoder.exe` 那条路上也失效（钩子不在那个进程里）——**防监视保持默认关闭**。2026-10-10 的探针在广播接收期间**没有**观察到 `ExdDtDup.dll` 被加载（当时只有 `Nmdeputy.exe` + `Yistart.exe` 在跑，属"接收广播"而非"教师抓本机屏"），所以"教师监视/抓屏时由哪个进程加载它"仍待机房采一次。
+   **v0.6.12 起这条取证链已常驻化**（不再靠人守）：探针 `--watch` 出现新远志进程/采集组件加载/疑似广播窗口就立刻落报告；主程序每 30 秒扫一轮，首次发现采集组件就记日志并静默导出一份诊断包（快照含 `== 采集栈快照 ==`）。**冻结画面本身仍未实现**：要覆盖 DXGI 路径需在 `hooks_capture.cpp` 追加 `IDXGIOutput1::DuplicateOutput`(0x58) + `IDXGIOutputDuplication::AcquireNextFrame`(0x20) 的 vtable 钩子（设计见 `开发记录.md` §17.1：冻结期间让 `AcquireNextFrame` 返回 `DXGI_ERROR_WAIT_TIMEOUT`，厂商会把它当"无新帧"而跳过光标合成与发布，画面与光标一起定格；若该路径会触发厂商重建，则退回"覆盖帧像素并钉住光标"）。
 2. ~~若键鼠封锁来自内核驱动或 `WinIo.dll` 端口 I/O，需要改用“指令层拦截”~~ **已作废（2026-10-09/10）**：键鼠封锁已实测结案为设备层，且按硬边界不再投入；“在 `CmdProc.ads`/`NetControl.ads` 分发点丢命令”等于篡改厂商协议，不做。保留此条只为记录曾经的判断。
 3. 注入需要管理员权限与足够完整性级别；若学生端以 SYSTEM 运行而你在受限账户下，会失败（机房默认管理员登录则不受影响）。
 4. 载荷已内嵌（RCDATA）：运行时释放到 `%ProgramData%\YZTrainer\cache\YZHook_<arch>_<hash>.dll`，复用前整文件比对；目录不可写时退 `%TEMP%\YZTrainer-cache\`，再失败才回退 exe 同目录的 `YZHook.dll`。释放出来的文件保留不删，便于排障。
@@ -270,6 +274,32 @@ ProcessNames=Yistart.exe;TEACHCMD.exe;PlayerGUI.exe;ExdPaintHelper.exe
 2. **v0.6.11 的“空过程替换”在真机验证通过**（10-10）：`已用空过程替换远志键盘/鼠标钩子(A): idHook=13 … -> hhook=0x000C06F7`、`idHook=14 … -> hhook=0x000304E8`，拿到的是**合法 HHOOK**；替换后客户端进程一直活着（没有 `Hook DLL 连接结束`、没有十秒级重启），窗口照常窗口化。对照 v0.6.10 的现场日志：16 次 `已拦截…安装`，每次都紧跟着 5~8 毫秒后进程消失。
 3. **键鼠解锁正式结案（用户态无解）**：见“已知限制”第 14 条的三条证据；判读 `ClipCursor 探针` 前要先确认 `已解除鼠标区域锁定(ClipCursor)` 计数为 0，否则那个读数是我们自己造成的。
 4. **采集层定性（静态）**：`KsFiles\ExdDtDup.dll` 是 DXGI 桌面复制实现（见“已知限制”第 1 条）；运行时“谁在抓屏时加载它”仍待另采一次，YZProbe 的“图形采集栈”行就是为这件事准备的。
+
+### 2026-10-11 本地静态侦察 + 采集栈取证链（v0.6.12）
+
+这一轮没有上机，做的是**下一趟机房的前置**：冻结画面（防监视）要钩哪条路，取决于"教师监视时谁在抓屏"，
+而这件事静态只能定一半、运行时只能靠现场那几秒——所以先把两件事做好：把静态那半搞清楚、把运行时那半变成自动采集。
+
+1. **反汇编 `ExdDtDup.dll`（本机只读副本）**：确认它走 `IDXGIOutput1::DuplicateOutput`（槽 22 / 偏移 `0x58`）
+   → `IDXGIOutputDuplication::AcquireNextFrame`（槽 8 / 偏移 `0x20`）；**光标是它自己合成的**
+   （`GetCursorInfo`/`GetIconInfo`/`GetObjectW`，与取帧同一个循环）；帧经共享节交给消费端；
+   每块显示器一个采集线程 + 一个 Duplication 对象；`DuplicateOutput` 失败时会区分
+   `DXGI_ERROR_NOT_CURRENTLY_AVAILABLE`（别人已在抓屏）。这些决定了冻结画面的两条实现路线（见已知限制 1）。
+2. **发现采集层其实是两条实现**：除 DXGI 这条，还有 GDI 的 `ScreenRecoder.exe`（独立进程，被
+   `Rmdesk.ads`/`CmdProc.ads`/`ProxyM.exe` 引用）。也就是说"教师监视"未必走 DXGI——如果走 GDI，
+   真正的缺口是"冻结钩子不在那个 helper 进程里"，比写 DXGI vtable 钩子便宜得多。
+3. **探针三处口径修正**：对**全部进程**轻量扫 `ExdDtDup/ExdElite/ExdPaint`（避免漏掉"看起来不像远志"的宿主）；
+   区分"模块枚举失败"与"确实没加载"；磁盘有 `ExdDtDup.dll` 的判词从"采集层=DXGI"降级为
+   "本机装着这个实现，但本次没观察到它被加载"。
+4. **新增两条常驻自动采集**（都不需要人在现场守着那一刻）：
+   * 探针 `YZProbe.exe --watch`：触发式落盘（新远志进程 / 采集组件加载 / 疑似广播窗口），每分钟一条心跳；
+   * 主程序每 30 秒扫一轮，首次发现采集组件即记日志 + 静默导出诊断包，且每份诊断包的 `snapshot.txt`
+     都带 `== 采集栈快照 ==`。
+5. **本地回归 13 → 15 项**：新增阶段七，用改名的 `version.dll` 冒充 `ExdDtDup.dll` 载入模拟目标，
+   断言"常驻监控发现 + 诊断包快照含命中"。实测 **15 项全 PASS、失败项 0**
+   （`build\logs\sim-test-v0612.log`、`sim-test-v0612-final.log`）。
+   如实标注：真实 `ExdDtDup.dll` 在本机普通进程里**载不进去**（x64 报 193 位数不符、x86 报 127 缺导出），
+   所以本地用的是改名替身；检测逻辑只看模块名，这条验证有效，但"真机上由谁加载"仍只能机房实测。
 
 ## 免责声明与使用边界
 

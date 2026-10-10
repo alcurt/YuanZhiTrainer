@@ -47,6 +47,7 @@ void ConfigApplyDefaults(AppConfig& cfg)
     cfg.externalWindowFix = true;
     cfg.autoExportOnBroadcast = true;
     cfg.autoExportOnExit = true;
+    cfg.autoExportOnCapture = true;
     SyncExamGuardBit(cfg);
     cfg.processNames.clear();
     /* 客户端进程名单。网管版多一个守卫进程 Nmdeputy.exe，但它由注入器显式排除
@@ -78,6 +79,7 @@ void ConfigLoad(AppConfig& cfg, const std::wstring& iniPath)
     SyncExamGuardBit(cfg);
     cfg.autoExportOnBroadcast = ReadInt(iniPath, L"AutoExportOnBroadcast", cfg.autoExportOnBroadcast ? 1 : 0) != 0;
     cfg.autoExportOnExit = ReadInt(iniPath, L"AutoExportOnExit", cfg.autoExportOnExit ? 1 : 0) != 0;
+    cfg.autoExportOnCapture = ReadInt(iniPath, L"AutoExportOnCapture", cfg.autoExportOnCapture ? 1 : 0) != 0;
 
     wchar_t buf[1024] = {0};
     GetPrivateProfileStringW(kSection, L"TargetDir", L"", buf, 1024, iniPath.c_str());
@@ -111,6 +113,7 @@ void ConfigSave(const AppConfig& cfg, const std::wstring& iniPath)
     WriteInt(iniPath, L"ExternalWindowFix", cfg.externalWindowFix ? 1 : 0);
     WriteInt(iniPath, L"AutoExportOnBroadcast", cfg.autoExportOnBroadcast ? 1 : 0);
     WriteInt(iniPath, L"AutoExportOnExit", cfg.autoExportOnExit ? 1 : 0);
+    WriteInt(iniPath, L"AutoExportOnCapture", cfg.autoExportOnCapture ? 1 : 0);
     WritePrivateProfileStringW(kSection, L"TargetDir", cfg.targetDir.c_str(), iniPath.c_str());
     WritePrivateProfileStringW(kSection, L"HookDllPath", cfg.hookDllPath.c_str(), iniPath.c_str());
 

@@ -8,11 +8,14 @@
 //
 #include "probe.h"
 
+#include "../common/yz_capture.h"
 #include "../common/yz_util.h"
 #include "yz_protocol.h"
 
 #include <stdio.h>
 #include <locale.h>
+#include <map>
+#include <set>
 
 namespace
 {
@@ -135,6 +138,10 @@ std::wstring ProbeToJson(const ProbeData& data)
         j += yz::Format(L"      \"elevated\": %s,\n", p.elevated ? L"true" : L"false");
         j += yz::Format(L"      \"isYuanzhi\": %s,\n", p.isYuanzhi ? L"true" : L"false");
         j += yz::Format(L"      \"protectionLevel\": \"0x%08X\",\n", p.protectionLevel);
+        j += yz::Format(L"      \"modulesReadable\": %s,\n", p.modulesReadable ? L"true" : L"false");
+        j += yz::Format(L"      \"hasCaptureModule\": %s,\n", p.hasCaptureModule ? L"true" : L"false");
+        j += L"      \"captureModule\": \"" + JsonEscape(p.captureModuleName) + L"\",\n";
+        j += L"      \"captureModulePath\": \"" + JsonEscape(p.captureModulePath) + L"\",\n";
         j += L"      \"modules\": [";
         for (size_t k = 0; k < p.modules.size(); k++)
         {
@@ -530,6 +537,338 @@ std::wstring ProbeToMarkdown(const ProbeData& data)
     return m;
 }
 
+/* ===================== --watch：触发式常驻采集 =====================
+   动机（2026-10-10 教训）：教师监视/点名/全屏广播都是"一次、没预告、几分钟"，
+   定时探针赌的是时间点，10-09 那次正好卡在广播开始前 3 秒，整段全屏态丢掉。
+   这里改成"事件触发"：只要出现新远志进程 / 任何进程加载了采集组件 /
+   出现疑似广播窗口，就立刻落一份完整报告，并往 watch 日志写一行。
+   另每分钟写一条心跳——"没采到"和"没在跑"必须能区分开，否则数据无法判读。 */
+namespace
+{
+std::wstring  g_watchLogPath;
+bool          g_watchLogStarted = false;
+volatile LONG g_watchStop       = 0;
+
+BOOL WINAPI WatchConsoleHandler(DWORD type)
+{
+    if (type == CTRL_C_EVENT || type == CTRL_BREAK_EVENT || type == CTRL_CLOSE_EVENT)
+    {
+        InterlockedExchange(&g_watchStop, 1);
+        return TRUE;
+    }
+    return FALSE;
+}
+
+void WatchLogRaw(const std::wstring& text)
+{
+    HANDLE h = CreateFileW(g_watchLogPath.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ,
+                           nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE)
+        return;
+    DWORD written = 0;
+    if (!g_watchLogStarted)
+    {
+        g_watchLogStarted = true;
+        const char bom[3] = { '\xEF', '\xBB', '\xBF' };
+        WriteFile(h, bom, 3, &written, nullptr);
+        const std::wstring head = L"# YZProbe --watch 触发式采集日志（探针 " YZ_VERSION_STR L"）\r\n";
+        const std::string headUtf8 = yz::WideToUtf8(head);
+        WriteFile(h, headUtf8.data(), static_cast<DWORD>(headUtf8.size()), &written, nullptr);
+    }
+    const std::string utf8 = yz::WideToUtf8(text);
+    WriteFile(h, utf8.data(), static_cast<DWORD>(utf8.size()), &written, nullptr);
+    CloseHandle(h);
+}
+
+void WatchLog(const std::wstring& text)
+{
+    const std::wstring line = L"[" + yz::NowStampEx() + L"] " + text + L"\r\n";
+    WatchLogRaw(line);
+    wprintf(L"%s", line.c_str());
+    fflush(stdout);
+}
+
+/* 报告落盘（wmain 与 --watch 共用） */
+bool WriteReports(const std::wstring& outDir, const ProbeData& data,
+                  const std::wstring& nameMid,
+                  std::wstring* outJson, std::wstring* outMd)
+{
+    yz::EnsureDirectory(outDir);
+    const std::wstring jsonPath = yz::JoinPath(outDir, L"YZProbe-report-" + nameMid + L".json");
+    const std::wstring mdPath   = yz::JoinPath(outDir, L"YZProbe-report-" + nameMid + L".md");
+    WriteUtf8File(jsonPath, ProbeToJson(data));
+    WriteUtf8File(mdPath, ProbeToMarkdown(data));
+    if (outJson != nullptr) *outJson = jsonPath;
+    if (outMd != nullptr)   *outMd = mdPath;
+    return yz::FileExists(jsonPath) && yz::FileExists(mdPath);
+}
+
+struct WatchWindowHit
+{
+    HWND         hwnd;
+    DWORD        pid;
+    std::wstring cls;
+    std::wstring title;
+    std::wstring exePath;
+    LONG         style;
+    LONG         exStyle;
+    RECT         rect;
+    std::wstring why;
+};
+
+BOOL CALLBACK WatchWindowProc(HWND hwnd, LPARAM lParam)
+{
+    std::vector<WatchWindowHit>* out = reinterpret_cast<std::vector<WatchWindowHit>*>(lParam);
+    if (!IsWindowVisible(hwnd))
+        return TRUE;
+
+    DWORD pid = 0;
+    GetWindowThreadProcessId(hwnd, &pid);
+    const std::wstring exePath = yz::GetProcessImagePath(pid);
+
+    wchar_t cls[256] = {0};
+    GetClassNameW(hwnd, cls, 256);
+    const bool brwClass = _wcsnicmp(cls, L"Brw:", 4) == 0;
+    const bool vendor   = yz::IsYuanzhiInstallPath(exePath);
+    if (!brwClass && !vendor)
+        return TRUE;
+
+    RECT rc;
+    GetWindowRect(hwnd, &rc);
+    const LONG style = GetWindowLongW(hwnd, GWL_STYLE);
+    const LONG ex    = GetWindowLongW(hwnd, GWL_EXSTYLE);
+
+    bool covers = false;
+    HMONITOR mon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+    MONITORINFO mi;
+    mi.cbSize = sizeof(mi);
+    if (GetMonitorInfoW(mon, &mi))
+    {
+        const int tol = 3;
+        covers = (rc.left <= mi.rcMonitor.left + tol && rc.top <= mi.rcMonitor.top + tol &&
+                  rc.right >= mi.rcMonitor.right - tol && rc.bottom >= mi.rcMonitor.bottom - tol);
+    }
+
+    std::wstring why;
+    if (brwClass)
+        why = L"类名 Brw:（广播窗口）";
+    else if (covers && (style & WS_CAPTION) != WS_CAPTION)
+        why = (ex & WS_EX_TOPMOST) ? L"远志进程 + 覆盖整屏 + 无标题栏 + 置顶" : L"远志进程 + 覆盖整屏 + 无标题栏";
+    else
+        return TRUE;
+
+    WatchWindowHit hit;
+    hit.hwnd = hwnd;
+    hit.pid = pid;
+    hit.cls = cls;
+    wchar_t title[512] = {0};
+    GetWindowTextW(hwnd, title, 512);
+    hit.title = title;
+    hit.exePath = exePath;
+    hit.style = style;
+    hit.exStyle = ex;
+    hit.rect = rc;
+    hit.why = why;
+    out->push_back(hit);
+    return TRUE;
+}
+
+int RunWatch(const std::wstring& outDir, DWORD durationSec, DWORD intervalSec, bool includeAllModules)
+{
+    if (intervalSec < 1)
+        intervalSec = 1;
+    if (durationSec == 0)
+        durationSec = 0;   /* 0 = 一直挂到 Ctrl+C */
+
+    yz::EnsureDirectory(outDir);
+    g_watchLogPath = yz::JoinPath(outDir, L"YZProbe-watch-" + yz::NowStamp() + L".log");
+    SetConsoleCtrlHandler(WatchConsoleHandler, TRUE);
+
+    WatchLog(yz::Format(L"watch 启动：间隔 %u 秒，时长 %s，输出目录 %s",
+                        intervalSec, durationSec ? yz::Format(L"%u 秒", durationSec).c_str() : L"不限（Ctrl+C 结束）",
+                        outDir.c_str()));
+    WatchLog(L"触发条件：新远志进程出现 / 任何进程加载 ExdDtDup·ExdElite·ExdPaint / "
+             L"ScreenRecoder.exe 出现 / 出现 Brw: 或覆盖整屏的无边框远志窗口");
+    WatchLog(L"另每分钟一条心跳；每条触发都会落一份完整报告（文件名带 -watch-<原因>）");
+
+    const ULONGLONG startTick = GetTickCount64();
+    const DWORD heartbeatEvery = (60 + intervalSec - 1) / intervalSec;
+    const DWORD fullSweepEvery = (60 + intervalSec - 1) / intervalSec;
+    /* "新进程观察窗"：进程起来之后头 30 秒每隔一轮都重扫它的模块。
+       这条是必需的——现场那种 helper 往往是先启动、过几秒才把 ExdDtDup 加载进来，
+       只在"第一次看到这个 pid"时扫一次必然漏掉（本机测试就复现了这个漏）。 */
+    const DWORD youngTicks = (30 + intervalSec - 1) / intervalSec;
+    DWORD   tick = 0;
+    unsigned reports = 0;
+    std::map<DWORD, DWORD>   firstSeenTick;
+    std::set<DWORD>          knownPids;
+    std::set<std::wstring>   reported;      /* pid+组件 去重 */
+    std::set<HWND>           knownWindows;
+
+    while (InterlockedCompareExchange(&g_watchStop, 0, 0) == 0)
+    {
+        if (durationSec != 0 && (GetTickCount64() - startTick) / 1000 >= durationSec)
+            break;
+
+        tick++;
+        const bool fullSweep = (tick % fullSweepEvery) == 1;
+
+        std::vector<ProbeProcBrief> procs;
+        ProbeSnapshotProcesses(procs);
+
+        struct Hit
+        {
+            DWORD        pid;
+            std::wstring name;
+            std::wstring path;
+            std::wstring module;
+            std::wstring tag;              /* window / gdi / capture / proc */
+            bool         viaNewProcess;
+        };
+        std::vector<Hit> hits;
+        std::set<DWORD>  hitPids;          /* 同一个进程一轮只留一条：组件命中优先于"进程出现" */
+
+        for (size_t i = 0; i < procs.size(); i++)
+        {
+            const ProbeProcBrief& b = procs[i];
+            bool isNew = knownPids.find(b.pid) == knownPids.end();
+            if (isNew)
+            {
+                knownPids.insert(b.pid);
+                firstSeenTick[b.pid] = tick;
+            }
+            const bool isYoung = (tick - firstSeenTick[b.pid]) <= youngTicks;
+
+            if (yz::IsCaptureStackProcessName(b.name))
+            {
+                const std::wstring key = yz::Format(L"gdi:%u", b.pid);
+                if (reported.find(key) == reported.end())
+                {
+                    reported.insert(key);
+                    Hit h; h.pid = b.pid; h.name = b.name; h.path = b.path;
+                    h.module = L"ScreenRecoder.exe（GDI 抓屏 helper）"; h.tag = L"gdi";
+                    h.viaNewProcess = isNew;
+                    hits.push_back(h);
+                    hitPids.insert(b.pid);
+                }
+            }
+
+            /* 抓采集组件：新进程立刻查；已知进程只在"可疑名字"上查（成本低）；
+               每 60 秒做一次全进程兜底扫（覆盖"我们启动前就已经加载"的情形）。 */
+            const bool worthCheck = isNew || isYoung || fullSweep || yz::IsVendorCaptureRelatedName(b.name);
+            if (worthCheck)
+            {
+                std::wstring modName;
+                std::wstring modPath;
+                if (ProbeScanCaptureModule(b.pid, &modName, &modPath))
+                {
+                    const std::wstring key = yz::Format(L"cap:%u:%s", b.pid, modName.c_str());
+                    if (reported.find(key) == reported.end())
+                    {
+                        reported.insert(key);
+                        Hit h; h.pid = b.pid; h.name = b.name; h.path = modPath.empty() ? b.path : modPath;
+                        h.module = modName; h.tag = L"capture"; h.viaNewProcess = isNew;
+                        hits.push_back(h);
+                        hitPids.insert(b.pid);
+                    }
+                }
+            }
+
+            /* 新出现的远志进程本身也值得留一份（客户端被守卫重启、换进程等） */
+            if (isNew && yz::IsVendorCaptureRelatedName(b.name) &&
+                hitPids.find(b.pid) == hitPids.end())
+            {
+                const std::wstring key = yz::Format(L"proc:%u", b.pid);
+                if (reported.find(key) == reported.end())
+                {
+                    reported.insert(key);
+                    Hit h; h.pid = b.pid; h.name = b.name; h.path = b.path;
+                    h.module = L"（进程出现）"; h.tag = L"proc"; h.viaNewProcess = true;
+                    hits.push_back(h);
+                    hitPids.insert(b.pid);
+                }
+            }
+        }
+
+        /* 窗口触发 */
+        std::vector<WatchWindowHit> wins;
+        EnumWindows(WatchWindowProc, reinterpret_cast<LPARAM>(&wins));
+        for (size_t i = 0; i < wins.size(); i++)
+        {
+            if (knownWindows.find(wins[i].hwnd) != knownWindows.end())
+                continue;
+            knownWindows.insert(wins[i].hwnd);
+            Hit h;
+            h.pid = wins[i].pid;
+            h.name = yz::FileNameOf(wins[i].exePath);
+            h.path = wins[i].exePath;
+            h.module = yz::Format(L"窗口 %p 类=%s 样式=0x%08X/0x%08X 矩形=%d,%d,%d,%d 标题=%s（%s）",
+                                  wins[i].hwnd, wins[i].cls.c_str(),
+                                  static_cast<unsigned>(wins[i].style),
+                                  static_cast<unsigned>(wins[i].exStyle),
+                                  wins[i].rect.left, wins[i].rect.top,
+                                  wins[i].rect.right, wins[i].rect.bottom,
+                                  wins[i].title.c_str(), wins[i].why.c_str());
+            h.tag = L"window";
+            h.viaNewProcess = true;
+            hits.push_back(h);
+        }
+
+        /* 触发 → 立刻落一份完整报告 */
+        for (size_t i = 0; i < hits.size(); i++)
+        {
+            const std::wstring& tag = hits[i].tag;
+            ProbeData data;
+            ProbeCollect(data, includeAllModules);
+            data.notes.insert(data.notes.begin(), yz::Format(
+                L"watch 触发（%s）：PID=%u %s；%s", tag.c_str(), hits[i].pid,
+                hits[i].name.c_str(), hits[i].module.c_str()));
+            if (hits[i].viaNewProcess)
+                data.notes.insert(data.notes.begin() + 1, L"该进程是本轮 watch 期间新出现的");
+
+            const std::wstring mid = yz::NowStampEx() + L"-watch-" + tag;
+            std::wstring jsonPath;
+            if (WriteReports(outDir, data, mid, &jsonPath, nullptr))
+                reports++;
+
+            WatchLog(yz::Format(L"触发落盘[%s]：PID=%u %s %s → %s", tag.c_str(), hits[i].pid,
+                                hits[i].name.c_str(), hits[i].module.c_str(), jsonPath.c_str()));
+            for (size_t n = 0; n < data.notes.size(); n++)
+            {
+                if (yz::ContainsNoCase(data.notes[n], L"采集组件扫描") ||
+                    yz::ContainsNoCase(data.notes[n], L"图形采集栈 PID") ||
+                    yz::ContainsNoCase(data.notes[n], L"GDI 抓屏 helper"))
+                {
+                    WatchLog(L"  " + data.notes[n]);
+                }
+            }
+        }
+
+        if ((tick % heartbeatEvery) == 0)
+        {
+            size_t vendorCount = 0;
+            for (size_t i = 0; i < procs.size(); i++)
+            {
+                if (yz::IsYuanzhiInstallPath(procs[i].path) ||
+                    yz::IsVendorCaptureRelatedName(procs[i].name))
+                {
+                    vendorCount++;
+                }
+            }
+            WatchLog(yz::Format(L"心跳：进程 %zu 个（远志相关 %zu），已落盘报告 %u 份%s",
+                                procs.size(), vendorCount, reports,
+                                fullSweep ? L"，本轮做了全进程采集组件兜底扫" : L""));
+        }
+
+        Sleep(intervalSec * 1000);
+    }
+
+    WatchLog(yz::Format(L"watch 结束：共落盘 %u 份报告，日志 %s", reports, g_watchLogPath.c_str()));
+    SetConsoleCtrlHandler(WatchConsoleHandler, FALSE);
+    return 0;
+}
+} /* namespace */
+
 int wmain(int argc, wchar_t** argv)
 {
     /* 控制台按 UTF-8 输出，CRT 也要用 UTF-8 区域设置，否则宽字符会退化成 '?' */
@@ -538,6 +877,9 @@ int wmain(int argc, wchar_t** argv)
 
     std::wstring outDir = yz::GetExeDir();
     bool includeAllModules = false;
+    bool watchMode = false;
+    DWORD watchDuration = 0;
+    DWORD watchInterval = 3;
     DWORD accessPid = 0;
     bool  noPause = false;
 
@@ -552,6 +894,18 @@ int wmain(int argc, wchar_t** argv)
         {
             includeAllModules = true;
         }
+        else if (arg == L"--watch")
+        {
+            watchMode = true;
+        }
+        else if (arg == L"--duration" && i + 1 < argc)
+        {
+            watchDuration = static_cast<DWORD>(_wtoi(argv[++i]));
+        }
+        else if (arg == L"--interval" && i + 1 < argc)
+        {
+            watchInterval = static_cast<DWORD>(_wtoi(argv[++i]));
+        }
         else if (arg == L"--access" && i + 1 < argc)
         {
             accessPid = static_cast<DWORD>(_wtoi(argv[++i]));
@@ -562,15 +916,21 @@ int wmain(int argc, wchar_t** argv)
         }
         else if (arg == L"-h" || arg == L"--help")
         {
-            wprintf(L"用法: YZProbe.exe [-o 输出目录] [--modules] [--access <pid>] [--no-pause]\n");
+            wprintf(L"用法: YZProbe.exe [-o 输出目录] [--modules] [--access <pid>] [--watch [--duration 秒] [--interval 秒]] [--no-pause]\n");
             wprintf(L"  --modules       采集所有进程的模块（默认只采集远志相关进程）\n");
-        wprintf(L"  --access <pid>  对指定进程做注入能力探测（保护级别/句柄实得权限/逐权限位/读/分配/写/线程句柄）\n");
+            wprintf(L"  --access <pid>  对指定进程做注入能力探测（保护级别/句柄实得权限/逐权限位/读/分配/写/线程句柄）\n");
+            wprintf(L"  --watch         常驻触发式采集：新远志进程/采集组件加载/疑似广播窗口出现时立刻落一份报告\n");
+            wprintf(L"  --duration <秒>  --watch 的时长（默认 0 = 一直挂到 Ctrl+C）\n");
+            wprintf(L"  --interval <秒>  --watch 的轮询间隔（默认 3）\n");
             wprintf(L"  双击运行时结束会等你按回车；脚本里用 --no-pause 跳过\n");
             if (!noPause)
                 yz::PauseIfSoleConsole();
             return 0;
         }
     }
+
+    if (watchMode)
+        return RunWatch(outDir, watchDuration, watchInterval, includeAllModules);
 
     wprintf(L"YZProbe 正在采集（管理员权限下信息最完整）...\n");
 
@@ -582,13 +942,10 @@ int wmain(int argc, wchar_t** argv)
         data.notes.push_back(yz::Format(L"按 --access 参数额外探测了 PID=%u", accessPid));
     }
 
-    yz::EnsureDirectory(outDir);
-    std::wstring stamp = yz::NowStamp();
-    std::wstring jsonPath = yz::JoinPath(outDir, L"YZProbe-report-" + stamp + L".json");
-    std::wstring mdPath   = yz::JoinPath(outDir, L"YZProbe-report-" + stamp + L".md");
-
-    WriteUtf8File(jsonPath, ProbeToJson(data));
-    WriteUtf8File(mdPath, ProbeToMarkdown(data));
+    const std::wstring mid = yz::NowStamp();
+    std::wstring jsonPath;
+    std::wstring mdPath;
+    WriteReports(outDir, data, mid, &jsonPath, &mdPath);
 
     size_t yuanzhiProcesses = 0;
     for (size_t i = 0; i < data.processes.size(); i++)

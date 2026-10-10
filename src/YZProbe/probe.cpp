@@ -1,5 +1,6 @@
 #include "probe.h"
 
+#include "../common/yz_capture.h"
 #include "../common/yz_util.h"
 
 #include <iphlpapi.h>
@@ -623,48 +624,15 @@ void CollectDiskExports(const std::wstring& exePath, ProbeProcess& p)
      它**不导入**任何 GDI 抓屏 API（BitBlt / StretchBlt / PrintWindow / GetDC 全无）。
      → 采集层是 DXGI 桌面复制，冻结画面只钩 GDI 不够，必须准备 DXGI 路径。
    这里把"本次运行到底有没有把它加载起来"记进报告：上机一次即可确认。 */
+/* 采集栈一行判词：判定逻辑与判词都交给 common/yz_capture.cpp（与主程序共用，
+   避免两份报告对同一件事说法不同）。 */
 std::wstring GraphicsStackDesc(const ProbeProcess& p)
 {
-    const wchar_t* kProbe[] = { L"ExdDtDup.dll", L"d3d11.dll", L"dxgi.dll",
-                                L"dwmapi.dll", L"gdi32.dll" };
-    bool hit[5] = { false, false, false, false, false };
-    for (size_t i = 0; i < 5; i++)
-    {
-        for (size_t k = 0; k < p.modules.size(); k++)
-        {
-            if (_wcsicmp(p.modules[k].name.c_str(), kProbe[i]) == 0)
-            {
-                hit[i] = true;
-                break;
-            }
-        }
-    }
-
-    /* 安装目录里的 KsFiles\ExdDtDup.dll 是静态事实，与"本进程是否已加载"互补 */
-    std::wstring dir = p.path;
-    const size_t cut = dir.find_last_of(L"\\/");
-    dir = (cut == std::wstring::npos) ? std::wstring() : dir.substr(0, cut);
-    const bool diskDD = !dir.empty() && yz::FileExists(dir + L"\\KsFiles\\ExdDtDup.dll");
-
-    const wchar_t* verdict;
-    if (hit[0])
-        verdict = L"采集层=DXGI 桌面复制（ExdDtDup 已加载）";
-    else if (diskDD)
-        verdict = L"采集层=DXGI 桌面复制（磁盘有 ExdDtDup，本进程未加载，可能在别的远志进程里）";
-    else if (hit[1] || hit[2])
-        verdict = L"疑似 DXGI（d3d11/dxgi 已加载但未见 ExdDtDup）";
-    else
-        verdict = L"未见 DXGI 采集模块（GDI 抓屏嫌疑，只钩 GDI 或许够）";
-
-    return yz::Format(L"图形采集栈 PID=%u %s：内存 %s=%s %s=%s %s=%s %s=%s %s=%s；"
-                      L"磁盘 KsFiles\\ExdDtDup.dll=%s；%s",
-                      p.pid, p.name.c_str(),
-                      kProbe[0], hit[0] ? L"是" : L"否",
-                      kProbe[1], hit[1] ? L"是" : L"否",
-                      kProbe[2], hit[2] ? L"是" : L"否",
-                      kProbe[3], hit[3] ? L"是" : L"否",
-                      kProbe[4], hit[4] ? L"是" : L"否",
-                      diskDD ? L"在" : L"无", verdict);
+    std::vector<std::wstring> names;
+    names.reserve(p.modules.size());
+    for (size_t i = 0; i < p.modules.size(); i++)
+        names.push_back(p.modules[i].name);
+    return ProbeCaptureStackLine(p.pid, p.name, p.path, names);
 }
 
 void CollectProcesses(ProbeData& data, bool includeAllModules)
@@ -691,6 +659,8 @@ void CollectProcesses(ProbeData& data, bool includeAllModules)
             p.integrity  = 0;
             p.elevated   = false;
             p.protectionLevel = 0;
+            p.modulesReadable = false;
+            p.hasCaptureModule = false;
 
             HANDLE hp = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, p.pid);
             if (hp != nullptr)
@@ -708,21 +678,49 @@ void CollectProcesses(ProbeData& data, bool includeAllModules)
                     p.protectionLevel = level;
             }
 
-            if (!includeAllModules && !p.isYuanzhi && p.pid != GetCurrentProcessId())
+            /* 决定要不要为这个进程枚举完整模块表：
+               - --modules：全部进程
+               - 远志进程 / 自己：需要（远志进程还要读导出表、做注入能力实测）
+               - 其余进程：先跳过，由下面的"采集组件轻量扫描"兜住。
+                 2026-10-11 理由：厂商采集组件可能挂在一个"看起来不像远志"的进程里
+                 （ExdDtDup.dll 自己就导入 CreateProcessW/DuplicateTokenEx/切桌面），
+                 只扫远志命名的进程会漏掉真正持 DuplicateOutput 的那个。 */
+            const bool self = (p.pid == GetCurrentProcessId());
+            if (!includeAllModules && !p.isYuanzhi && !self)
             {
+                std::wstring hitName;
+                std::wstring hitPath;
+                if (ProbeScanCaptureModule(p.pid, &hitName, &hitPath))
+                {
+                    p.hasCaptureModule  = true;
+                    p.captureModuleName = hitName;
+                    p.captureModulePath = hitPath;
+                    p.isYuanzhi         = true;
+                }
                 data.processes.push_back(p);
                 continue;
             }
 
-            CollectModules(p.pid, p.modules);
+            p.modulesReadable = CollectModules(p.pid, p.modules) && !p.modules.empty();
             for (size_t i = 0; i < p.modules.size(); i++)
             {
-                if (yz::ContainsNoCase(p.modules[i].name, L".ads") ||
-                    yz::ContainsNoCase(p.modules[i].name, L"ExdHooks") ||
-                    yz::ContainsNoCase(p.modules[i].name, L"KeyboardHook") ||
-                    yz::ContainsNoCase(p.modules[i].name, L"PlayerGUI"))
+                const std::wstring& modName = p.modules[i].name;
+                if (yz::ContainsNoCase(modName, L".ads") ||
+                    yz::ContainsNoCase(modName, L"ExdHooks") ||
+                    yz::ContainsNoCase(modName, L"KeyboardHook") ||
+                    yz::ContainsNoCase(modName, L"PlayerGUI"))
                 {
                     p.isYuanzhi = true;
+                }
+                if (yz::IsCaptureStackModule(modName))
+                {
+                    p.isYuanzhi = true;
+                    if (!p.hasCaptureModule)
+                    {
+                        p.hasCaptureModule  = true;
+                        p.captureModuleName = modName;
+                        p.captureModulePath = p.modules[i].path;
+                    }
                 }
             }
 
@@ -739,12 +737,25 @@ void CollectProcesses(ProbeData& data, bool includeAllModules)
 
             if (p.isYuanzhi)
             {
-                /* 采集层是 DXGI 还是 GDI，直接写进报告（冻结画面要按它选钩子路径） */
-                data.notes.push_back(GraphicsStackDesc(p));
-                if (p.modules.empty())
+                /* 采集层是 DXGI 还是 GDI，直接写进报告（冻结画面要按它选钩子路径）。
+                   轻量扫描命中的进程没有完整模块表，只报"命中了哪个组件"——
+                   不要在这里套用完整判词，否则那一串"内存 X=否"全是未枚举导致的假否定。 */
+                if (p.hasCaptureModule && p.modules.empty())
                 {
                     data.notes.push_back(yz::Format(
-                        L"模块枚举失败（读不到目标内存，通常意味着进程受保护）: PID=%u %s",
+                        L"采集组件扫描命中（只扫了采集相关模块、未逐一枚举）: PID=%u %s 加载了 %s；模块路径=%s",
+                        p.pid, p.name.c_str(), p.captureModuleName.c_str(),
+                        p.captureModulePath.c_str()));
+                }
+                else
+                {
+                    data.notes.push_back(GraphicsStackDesc(p));
+                }
+                if (!p.modulesReadable && !p.hasCaptureModule)
+                {
+                    data.notes.push_back(yz::Format(
+                        L"模块枚举失败（读不到目标内存，通常意味着进程受保护）: PID=%u %s；"
+                        L"此时上面那行的“内存未见…”是“读不到”，不能当“没加载”用",
                         p.pid, p.name.c_str()));
                     CollectDiskExports(p.path, p);
                 }
@@ -763,6 +774,36 @@ void CollectProcesses(ProbeData& data, bool includeAllModules)
 
     }
     CloseHandle(snap);
+
+    /* 汇总：这一趟到底有没有人在抓本机屏。教师监视/缩略图那一下是瞬时的，
+       散在逐进程的 notes 里不好判读，所以再补一行。 */
+    std::wstring hits;
+    std::wstring gdiHelpers;
+    for (size_t i = 0; i < data.processes.size(); i++)
+    {
+        const ProbeProcess& p = data.processes[i];
+        if (p.hasCaptureModule)
+        {
+            hits += yz::Format(L"PID=%u %s → %s；", p.pid, p.name.c_str(), p.captureModuleName.c_str());
+        }
+        if (yz::IsCaptureStackProcessName(p.name))
+        {
+            gdiHelpers += yz::Format(L"PID=%u %s；", p.pid, p.name.c_str());
+        }
+    }
+    if (hits.empty())
+    {
+        data.notes.push_back(L"采集组件扫描：全进程均未加载 ExdDtDup/ExdElite/ExdPaint"
+                             L"（说明采样这一刻没人抓本机屏，或抓屏不经过这几个模块）");
+    }
+    else
+    {
+        data.notes.push_back(L"采集组件扫描命中：" + hits);
+    }
+    if (!gdiHelpers.empty())
+    {
+        data.notes.push_back(L"GDI 抓屏 helper 正在运行（独立进程，不在我们的注入目标里）：" + gdiHelpers);
+    }
 }
 
 struct WindowCtx
@@ -1058,6 +1099,88 @@ void CollectOsInfo(ProbeData& data)
     }
 }
 } /* namespace */
+
+std::wstring ProbeCaptureStackLine(DWORD pid, const std::wstring& exeName,
+                                   const std::wstring& exePath,
+                                   const std::vector<std::wstring>& moduleNames)
+{
+    const yz::CaptureStackInfo info = yz::CaptureStackProbe(moduleNames, exeName, exePath);
+    return yz::CaptureStackLine(pid, exeName, info);
+}
+
+bool ProbeReadModuleNames(DWORD pid, std::vector<std::wstring>& out)
+{
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid);
+    if (snap == INVALID_HANDLE_VALUE)
+        return false;
+
+    MODULEENTRY32W me;
+    ZeroMemory(&me, sizeof(me));
+    me.dwSize = sizeof(me);
+    if (Module32FirstW(snap, &me))
+    {
+        do
+        {
+            out.push_back(me.szModule);
+        } while (Module32NextW(snap, &me));
+    }
+    CloseHandle(snap);
+    return !out.empty();
+}
+
+bool ProbeScanCaptureModule(DWORD pid, std::wstring* outName, std::wstring* outPath)
+{
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid);
+    if (snap == INVALID_HANDLE_VALUE)
+        return false;
+
+    bool found = false;
+    MODULEENTRY32W me;
+    ZeroMemory(&me, sizeof(me));
+    me.dwSize = sizeof(me);
+    if (Module32FirstW(snap, &me))
+    {
+        do
+        {
+            if (!yz::IsCaptureStackModule(me.szModule))
+                continue;
+            if (outName != nullptr)
+                *outName = me.szModule;
+            if (outPath != nullptr)
+                *outPath = me.szExePath;
+            found = true;
+            break;
+        } while (Module32NextW(snap, &me));
+    }
+    CloseHandle(snap);
+    return found;
+}
+
+bool ProbeSnapshotProcesses(std::vector<ProbeProcBrief>& out)
+{
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap == INVALID_HANDLE_VALUE)
+        return false;
+
+    PROCESSENTRY32W pe;
+    ZeroMemory(&pe, sizeof(pe));
+    pe.dwSize = sizeof(pe);
+    if (Process32FirstW(snap, &pe))
+    {
+        do
+        {
+            if (pe.th32ProcessID == 0)
+                continue;
+            ProbeProcBrief b;
+            b.pid  = pe.th32ProcessID;
+            b.name = pe.szExeFile;
+            b.path = yz::GetProcessImagePath(b.pid);
+            out.push_back(b);
+        } while (Process32NextW(snap, &pe));
+    }
+    CloseHandle(snap);
+    return true;
+}
 
 bool ProbeIsYuanzhiPath(const std::wstring& path, const std::wstring& exeName)
 {

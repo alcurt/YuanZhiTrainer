@@ -83,8 +83,10 @@
     <ClCompile Include="main.cpp" />
     <ClCompile Include="payload.cpp" />
     <ClCompile Include="winfix.cpp" />
+    <ClCompile Include="capturewatch.cpp" />
     <ClCompile Include="..\common\yz_log.cpp" />
     <ClCompile Include="..\common\yz_util.cpp" />
+    <ClCompile Include="..\common\yz_capture.cpp" />
   </ItemGroup>
   <ItemGroup>
 

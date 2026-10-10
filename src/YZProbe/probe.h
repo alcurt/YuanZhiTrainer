@@ -25,6 +25,13 @@ struct ProbeProcess
     bool                     elevated;
     bool                     isYuanzhi;
     DWORD                    protectionLevel;   /* PROCESS_PROTECTION_LEVEL_INFORMATION，0xFFFFFFFE=无保护 */
+    /* 模块枚举是否成功。false 表示模块读不到（受保护/已退出），
+       此时报告里的"内存未见 ExdDtDup"是"读不到"，不能当"没加载"用。 */
+    bool                     modulesReadable;
+    /* 全进程扫描的产物：该进程加载了采集组件（ExdDtDup/ExdElite/ExdPaint） */
+    bool                     hasCaptureModule;
+    std::wstring             captureModuleName;
+    std::wstring             captureModulePath;
     std::vector<ProbeModule> modules;
     /* 进程模块读不到（受保护）时的兜底：直接读安装目录里的关键模块导出表 */
     std::vector<ProbeModule> diskModules;
@@ -139,6 +146,26 @@ struct ProbeData
 };
 
 bool ProbeCollect(ProbeData& data, bool includeAllModules);
+
+/* 只取模块名（不保留列表）——全进程扫"采集组件"用，报告体积不受影响 */
+bool ProbeReadModuleNames(DWORD pid, std::vector<std::wstring>& out);
+
+/* 扫一个进程有没有加载采集组件（ExdDtDup/ExdElite/ExdPaint）；命中回报名字与路径 */
+bool ProbeScanCaptureModule(DWORD pid, std::wstring* outName, std::wstring* outPath);
+
+/* 采集栈一行判词（与主程序诊断包用同一套判词，见 common/yz_capture.h） */
+std::wstring ProbeCaptureStackLine(DWORD pid, const std::wstring& exeName,
+                                   const std::wstring& exePath,
+                                   const std::vector<std::wstring>& moduleNames);
+
+/* 进程清单（--watch 常驻模式用，只要 pid/名字/路径） */
+struct ProbeProcBrief
+{
+    DWORD        pid;
+    std::wstring name;
+    std::wstring path;
+};
+bool ProbeSnapshotProcesses(std::vector<ProbeProcBrief>& out);
 
 std::wstring ProbeToJson(const ProbeData& data);
 std::wstring ProbeToMarkdown(const ProbeData& data);

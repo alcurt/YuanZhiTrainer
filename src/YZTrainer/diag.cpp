@@ -3,6 +3,7 @@
 //
 #include "app.h"
 
+#include "capturewatch.h"
 #include "payload.h"
 
 #include "yz_log.h"
@@ -253,6 +254,9 @@ static bool BuildDiagnostics(const std::wstring& dir, const wchar_t* reason)
                            g_app.status.hostPath);
     snapshot += ProcessDump();
     snapshot += L"\r\n";
+    /* 采集栈快照：冻结画面要按"教师监视时谁在抓屏"选钩子路径，而那一刻极难人工复现，
+       所以常驻监控每 30 秒扫一次，把结果一并写进每份诊断包。 */
+    snapshot += capturewatch::Dump();
     snapshot += WindowDump(g_app.targetPid != 0 ? g_app.targetPid : clientPid);
     snapshot += L"\r\n";
     snapshot += ServiceDump();
@@ -293,4 +297,12 @@ void AutoExportOnBroadcastOnce(const wchar_t* evidence)
         return;
     g_app.autoExportedBroadcast = true;      /* 先置位：导出本身失败也不要反复重试 */
     AutoExportDiagnostics((evidence != nullptr) ? evidence : L"首次识别到广播窗口");
+}
+
+void AutoExportOnCaptureOnce(const wchar_t* evidence)
+{
+    if (!g_app.cfg.autoExportOnCapture || g_app.autoExportedCapture)
+        return;
+    g_app.autoExportedCapture = true;
+    AutoExportDiagnostics((evidence != nullptr) ? evidence : L"首次发现采集组件");
 }

@@ -33,6 +33,9 @@ struct AppConfig
        ①首次识别到广播窗口时静默导出一份 ②退出时再导出一份。默认都开。 */
     bool         autoExportOnBroadcast;
     bool         autoExportOnExit;
+    /* 首次发现采集组件（ExdDtDup/ScreenRecoder 等）时也静默导出一份：
+       "教师监视时谁在抓屏"只在教师动手的那几秒可采，错过就得再等一节课。 */
+    bool         autoExportOnCapture;
     std::wstring targetDir;        /* 远志安装目录，空=按进程路径自动判定 */
     std::wstring hookDllPath;      /* 空=用内嵌资源；填路径则强制使用该文件 */
     std::vector<std::wstring> processNames;
@@ -69,6 +72,7 @@ struct AppRuntime
     DWORD            injectFailPid;
     bool             autoHookFallback;
     bool             autoExportedBroadcast;   /* "首次识别到广播窗口"那份是否已导过 */
+    bool             autoExportedCapture;     /* "首次发现采集组件"那份是否已导过 */
 };
 
 extern AppRuntime g_app;
@@ -121,5 +125,7 @@ void ExportDiagnostics(HWND owner);
 void AutoExportDiagnostics(const wchar_t* reason);
 /* "广播首次出现"那份：带一次性守卫（每进程只导一次），evidence 只用于日志与快照 */
 void AutoExportOnBroadcastOnce(const wchar_t* evidence);
+/* "首次发现采集组件"那份：同样带一次性守卫（用于判定冻结画面该走 DXGI 还是 GDI） */
+void AutoExportOnCaptureOnce(const wchar_t* evidence);
 
 

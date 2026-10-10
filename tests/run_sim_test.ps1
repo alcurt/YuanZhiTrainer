@@ -32,6 +32,13 @@
          外部纠正必须**认输停手**，而不是陪着一起高频横跳
          （日志出现"已对该窗口停手"）
 
+    阶段七（采集栈监控 + 自动导出，v0.6.12）断言 2 条：
+      14. 某个进程加载了 ExdDtDup.dll（用改名的 version.dll 做替身）时，主程序的常驻监控
+          会发现并在日志里写明（"采集栈监控: PID=… 出现采集组件 ExdDtDup.dll"）
+      15. 这次命中会触发一次静默自动导出，且诊断包 snapshot.txt 里含
+          "== 采集栈快照 ==" 与该命中记录
+          （动机：教师监视/缩略图只在几秒里出现，"冻结画面"走 DXGI 还是 GDI 就靠这份数据）
+
     运行前请关闭其它 YZTrainer 实例（含改名副本）：主程序用全局互斥体防重入，
     别的实例在跑时本脚本启动的那份会静默退出，测试结果会变成假失败。
 
@@ -425,6 +432,80 @@ finally {
 }
 
 Write-Host ''
+# ---------------------------------------------------------------------------
+# 阶段七：采集栈监控 + 自动导出（v0.6.12）
+# 动机：教师监视/缩略图时厂商会在某个进程里加载 ExdDtDup.dll（DXGI 桌面复制）或拉起
+#       ScreenRecoder.exe（GDI 抓屏 helper）——"冻结画面"钩哪条路由这件事决定，而它只在
+#       教师动手的那几秒里出现，靠人在现场跑探针赌不起（10-09 那次就赌输了）。
+# 做法：把一个改名的版本 DLL（version.dll → ExdDtDup.dll）用 YZSimTarget --load 载入，
+#       模拟"某进程加载了 DXGI 采集组件"；先让它存在，再启动主程序，第一轮扫描就该命中。
+# 断言：日志出现"采集栈监控: PID=… 出现采集组件 ExdDtDup.dll"，且自动导出的诊断包里
+#       snapshot.txt 含"== 采集栈快照 =="与该命中。
+# ---------------------------------------------------------------------------
+Write-Host ''
+Write-Host '==== 阶段七：采集栈监控 ===='
+
+$ddStubDir = Join-Path $env:TEMP 'yzt-capture'
+$ddStub    = Join-Path $ddStubDir 'ExdDtDup.dll'
+# 替身 DLL 的位数必须与模拟目标一致：dist\x64 用 System32、dist\Win32 用 SysWOW64
+$ddStubSrc = if ($DistDir -match 'x64$') { Join-Path $env:WINDIR 'System32\version.dll' }
+             else { Join-Path $env:WINDIR 'SysWOW64\version.dll' }
+if (-not (Test-Path $ddStubSrc)) { $ddStubSrc = Join-Path $env:WINDIR 'System32\version.dll' }
+
+$phase7Ini = @(
+    '[General]',
+    'Flags=5',
+    'WindowPercent=60',
+    'LogLevel=3',
+    'AutoInject=0',
+    'InjectMethod=0',
+    'EnableExamGuard=1',
+    'ExternalWindowFix=0',
+    'AutoExportOnCapture=1',
+    'ProcessNames=Yistart.exe;TEACHCMD.exe;PlayerGUI.exe;ExdPaintHelper.exe;YZSimTarget.exe'
+)
+Set-Content -LiteralPath $iniFile -Value $phase7Ini -Encoding utf8
+
+$sim7Proc = $null
+$app7Proc = $null
+
+try {
+    if (-not (Test-Path $ddStubSrc)) {
+        $result.Add('WARN  系统里没有 version.dll 可做替身，跳过阶段七')
+    }
+    else {
+        New-Item -ItemType Directory -Force -Path $ddStubDir | Out-Null
+        Copy-Item -LiteralPath $ddStubSrc -Destination $ddStub -Force
+
+        $sim7Proc = Start-Process -FilePath $sim -ArgumentList '--load', $ddStub -PassThru
+        Start-Sleep -Seconds 7
+        $app7Proc = Start-Process -FilePath $trainer -PassThru
+        Start-Sleep -Seconds 10
+
+        $capHit = (Test-Path $appLog) -and
+                  (Select-String -LiteralPath $appLog -Pattern '采集栈监控: PID=\d+ .*ExdDtDup\.dll' -Quiet)
+        Write-Host ("采集栈监控命中: " + $capHit)
+        if ($capHit) { $result.Add('PASS  常驻监控发现进程加载了 ExdDtDup.dll') }
+        else { $result.Add('FAIL  常驻监控没有发现 ExdDtDup.dll 被加载') }
+
+        $snapHit = $false
+        foreach ($d in (Get-ChildItem -LiteralPath $DistDir -Directory -Filter 'diag-*-auto' -ErrorAction SilentlyContinue)) {
+            $snap = Join-Path $d.FullName 'snapshot.txt'
+            if (-not (Test-Path $snap)) { continue }
+            if ((Select-String -LiteralPath $snap -Pattern '== 采集栈快照 ==' -Quiet) -and
+                (Select-String -LiteralPath $snap -Pattern 'ExdDtDup\.dll' -Quiet)) { $snapHit = $true; break }
+        }
+        Write-Host ("诊断包采集栈快照命中: " + $snapHit)
+        if ($snapHit) { $result.Add('PASS  诊断包快照里带采集栈快照与命中记录') }
+        else { $result.Add('FAIL  诊断包快照里没有采集栈命中记录') }
+    }
+}
+finally {
+    if ($sim7Proc -and -not $sim7Proc.HasExited) { Stop-Process -Id $sim7Proc.Id -Force -ErrorAction SilentlyContinue }
+    Start-Sleep -Milliseconds 500
+    if ($app7Proc -and -not $app7Proc.HasExited) { Stop-Process -Id $app7Proc.Id -Force -ErrorAction SilentlyContinue }
+}
+
 Write-Host '==== 测试结果 ===='
 $result | ForEach-Object { Write-Host $_ }
 $failCount = @($result | Where-Object { $_ -like 'FAIL*' }).Count

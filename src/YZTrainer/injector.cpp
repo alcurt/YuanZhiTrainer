@@ -5,6 +5,7 @@
 #include "yz_log.h"
 #include "yz_util.h"
 
+#include "capturewatch.h"
 #include "winfix.h"
 
 #include <tlhelp32.h>
@@ -552,6 +553,10 @@ void WatchdogTick()
         winfix::WinFixSetSkipPid(0);
         return;
     }
+
+    /* 采集栈监控：低频（30 秒）扫"教师监视时谁在抓屏"。放在最前面，
+       与 autoInject 开关、目标进程能不能找到都无关——它记录的是别的东西。 */
+    capturewatch::Tick();
 
     DWORD pid = FindTargetProcess(g_app.cfg);
     g_app.targetPid = pid;
