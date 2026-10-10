@@ -31,6 +31,10 @@ bool  g_execRequested = false;
    主动拔钩的重试（NativeUnhookTick）会不会真的再试一次。模块名必须与被查的名字
    一致（例如把 ExdHooks.dll 复制出来单独放）。 */
 std::wstring g_lateLoadDll;
+/* --hook / --hook-thread：像厂商那样"自己装键盘钩子 + 把 NULL 当生死判据"（阶段八回归替身） */
+bool g_hookMode       = false;
+bool g_hookThreadMode = false;
+int  g_exitCode       = 0;     /* 非 0 = 模拟客户端"自杀"退出，回归据此判 FAIL */
 HBITMAP g_captureBmp = nullptr;
 void*   g_captureBits = nullptr;
 int     g_captureW = 0;
@@ -200,6 +204,39 @@ void LoadLateDllOnce()
                           reinterpret_cast<void*>(mod), mod ? 0u : GetLastError()));
 }
 
+/* --hook / --hook-thread 的实体：像厂商那样自己装键盘钩子，并且**把返回 NULL 当生死判据**。
+   现场证据（2026-10-09）：v0.6.10 把远志的 SetWindowsHookEx 拦成 NULL 时 Yistart.exe 8 毫秒内
+   退出，守卫 4 秒后拉起 → 十秒级重启循环（电子点名窗口立不住）。v0.6.11 改成"用本 DLL 的空过程
+   顶替、返回合法 HHOOK"后客户端不再重启。这里复现那条致命反应，让回归阶段八**真的能变红**：
+   拿到 NULL 就退出码 3。
+     --hook        hMod = 本 exe 模块（与现场"厂商 DLL 传自己模块"同构，命中模块路径判据）
+     --hook-thread hMod = NULL + 本线程 tid（命中"回调地址反查模块"那条判据）
+   两者都要求模拟目标被放在**路径含 GZYZ** 的目录里，否则 ShouldBlockHook 会正确地放行
+   （回归脚本就是这么摆的：先复制到 %TEMP%\GZYZ-yzsim\ 再跑，再等 8 秒装钩子——
+   那时 YZHook 已经注进来了；启动时立刻装会走系统原生路径，第一版实测两边都不命中）。 */
+void InstallSelfHookOrDie()
+{
+    if (!g_hookMode && !g_hookThreadMode)
+        return;
+
+    HHOOK h = g_hookThreadMode
+        ? SetWindowsHookExW(WH_KEYBOARD, KeyHookProc, nullptr, GetCurrentThreadId())
+        : SetWindowsHookExA(WH_KEYBOARD_LL, KeyHookProc, GetModuleHandleW(nullptr), 0);
+    AppendFile(yz::JoinPath(g_exeDir, L"sim_log.txt"),
+               yz::Format(L"hook-install mode=%s hhook=%p err=%u tick=%u",
+                          g_hookThreadMode ? L"thread" : L"ll-with-hmod",
+                          reinterpret_cast<void*>(h), GetLastError(), GetTickCount()));
+    if (h == nullptr)
+    {
+        AppendFile(yz::JoinPath(g_exeDir, L"sim_log.txt"),
+                   L"hook-install FAILED -> 模拟客户端据此自杀（现场：8 毫秒内进程消失）");
+        g_exitCode = 3;
+        PostQuitMessage(3);
+        return;
+    }
+    g_keyHook = h;
+}
+
 void SpawnChildOnce()
 {
     wchar_t sysDir[MAX_PATH] = {0};
@@ -265,6 +302,16 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             /* --fight：200ms 一次把无边框全屏抢回来，复现"客户端响应我们的改动、
                外部纠正怎么改都马上被顶回去"的横跳场景（验证反横跳闸门）。 */
             MakeFullscreen();
+        }
+        else if (wParam == 8)
+        {
+            /* --hook / --hook-thread：**延迟**装自己的键盘钩子。
+               为什么必须延迟：现场那次（2026-10-09）客户端是在 Trainer 已经注入之后
+               才装钩子的；如果模拟目标在启动时（= 注入之前）就装，走的是系统原生路径，
+               根本不会经过我们的 SetWindowsHookEx 钩子，阶段八就白测了
+               ——第一版本就是这么写的，实测两边都不命中，日志里是原生 hhook。 */
+            KillTimer(hwnd, 8);
+            InstallSelfHookOrDie();
         }
         return 0;
 
@@ -380,6 +427,30 @@ int WINAPI wWinMain(HINSTANCE hinst, HINSTANCE, LPWSTR cmdLine, int)
                yz::Format(L"start tick=%u keyHook=%p registerHotKey(F9)=%d",
                           GetTickCount(), g_keyHook, hotkeyOk ? 1 : 0));
 
+    /* --hook / --hook-thread：模拟"客户端自己装钩子、并且把 SetWindowsHookEx 的返回值当生死判据"。
+       现场证据（2026-10-09）：v0.6.10 把安装拦成 NULL 时 Yistart.exe 8 毫秒内退出，守卫 4 秒后
+       拉起，形成十秒级重启循环（电子点名窗口因此立不住）。所以回归必须**复现这个致命反应**——
+       否则模拟目标对 NULL 无动于衷，"空过程替换"这条修复就没有防线。
+         --hook        hMod = 本 exe 模块（与现场"厂商 DLL 传自己模块"同构，命中模块路径判据）
+         --hook-thread hMod = NULL + 本线程 tid（命中"回调地址反查模块"那条判据）
+       两者都要求模拟目标被放在**路径含 GZYZ** 的目录里，否则 ShouldBlockHook 会正确地放行。
+       **延迟 8 秒**再装：现场那次是"注入之后"才装钩子的，启动时立刻装会走系统原生路径、
+       完全绕开我们的钩子（第一版就是这么写的，实测两边都不命中）。 */
+    if (cmdLine != nullptr)
+    {
+        if ((wcsstr(cmdLine, L"--hook") != nullptr))
+        {
+            g_hookMode       = (wcsstr(cmdLine, L"--hook-thread") == nullptr);
+            g_hookThreadMode = (wcsstr(cmdLine, L"--hook-thread") != nullptr);
+            SetTimer(g_main, 8, 8000, nullptr);
+        }
+    }
+
+    /* 本节只是把 --hook 的开关记下来并挂一个"8 秒后执行"的定时器；
+       真正的安装与"拿 NULL 就自杀"在 InstallSelfHookOrDie() 里（见 WM_TIMER 分支）。
+       为什么必须延迟：现场那次客户端是在 Trainer 已经注入之后才装钩子的；
+       如果在启动时（= 注入之前）就装，走的是系统原生路径、根本不会经过我们的钩子。 */
+
     if (g_examRequested)
     {
         WNDCLASSEXW ec;
@@ -408,7 +479,7 @@ int WINAPI wWinMain(HINSTANCE hinst, HINSTANCE, LPWSTR cmdLine, int)
     if (g_keyHook != nullptr)
         UnhookWindowsHookEx(g_keyHook);
     ClipCursor(nullptr);
-    return 0;
+    return g_exitCode;
 }
 
 

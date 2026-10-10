@@ -1,6 +1,6 @@
 # YZTrainer
 
-> **v0.6.12** · 一款**远志多媒体教学管理软件 V9.0 网管版学生端**的解控软件 · 仅供**教育研究**与**技术学习**，禁止任何非法用途 · 与厂商无关联，使用者自行承担全部后果。
+> **v0.6.13** · 一款**远志多媒体教学管理软件 V9.0 网管版学生端**的解控软件 · 仅供**教育研究**与**技术学习**，禁止任何非法用途 · 与厂商无关联，使用者自行承担全部后果。
 
 > **部署硬要求（2026-09-29 机房实测）**：学生端以 SYSTEM 运行，而本程序默认是管理员（高完整性）。
 > 两者差一级完整性，`VirtualAllocEx` 注入、`SetWindowsHookEx` 消息钩子、跨进程改窗口**三样都会被 UIPI 挡住**
@@ -23,7 +23,7 @@
 ## 它不做什么（硬边界）
 
 * 不写内核驱动、不做手动映射、不碰远志的驱动文件。
-* 不修改、不替换任何远志文件；不写持久化注册表项（只在本进程存活期间恢复被远志改写的 HKCU 策略值，退出时还原）。
+* 不修改、不替换任何远志文件；不写持久化注册表项。**v0.6.13 起连"临时改写 HKCU 策略值"也删掉了**：机房实测（G3）证明远志的封锁不走 HKCU 策略，我们那套写入既没有作用对象、又落在默认用户模板（`.DEFAULT`）上——收益为零，副作用却是真的（进程被硬杀时"退出还原"不执行）。现在 `policy.cpp` 只保留一行**只读**的落点自报（`PolicyHive: 本进程 HKCU → …`）。
 * 不向其他机器发送指令、不做 UDP 攻击、不给同学机器远程发消息或执行命令。
 * 不做免杀、混淆、反检测。
 * **检测到考试/测验的强信号时，全部功能立即自动停用**：独立考试进程 `ExamDlg.exe`、进程内加载 `ExamDlg.exe` / `ExamDlg.dll` / `ORAL_EXAM.ocx` / `ExamEditor.exe`，或存在**可见**且标题命中考试类关键词的远志窗口。注意 `Exam.ads` / `ClassQuiz.ads` 属学生端启动即加载的常驻模块（弱信号），**只会记日志、不再触发熔断**——它们是就绪态而非"正在考试"的判据。
@@ -43,7 +43,8 @@ YZTrainer/
   src/YZUnhookTest/         免注入拔钩验证工具（本进程加载远志 DLL 调其导出，不注入）
   src/YZSysRun/             以 SYSTEM 身份运行指定程序的启动器（复制当前会话 winlogon 令牌，不装服务）
   third_party/minhook/      MinHook（BSD-2-Clause，已内置源码）
-  tests/run_sim_test.ps1    本地自动回归脚本（七阶段 15 项断言，需要管理员权限）
+  tests/run_sim_test.ps1    本地自动回归脚本（八阶段 17 项断言，需要管理员权限），
+                            阶段八是 P0"空过程替换"的回归闸门（v0.6.13），含负向 A/B 验证
   dist/                     构建产物输出目录（含 `build.ps1` 写出的出厂 `YZTrainer.ini`）
   archive/                  机房实测档案（含机位名/账户/IP，**只留本地、绝不入库**）
   工作顺序.txt              每次上机的操作清单（本地文件，不入库）
@@ -85,13 +86,13 @@ pwsh -File build.ps1 -Both
 | `YZProbe.exe` | 机房侦察工具，只读，建议先跑它。报告 `notes` 里会给出每个远志进程的**图形采集栈**行（`ExdDtDup.dll` / `d3d11` / `dxgi` / `gdi32` 是否已加载 + 磁盘 `KsFiles\ExdDtDup.dll` 是否存在 + 判定"DXGI 桌面复制 / GDI 抓屏 helper"），"冻结画面"要按它选钩子路径（v0.6.11 起）。v0.6.12 起：**对全部进程**轻量扫 `ExdDtDup/ExdElite/ExdPaint`（这三者可能挂在一个"看起来不像远志"的进程里），并区分"模块枚举失败"与"确实没加载"；另新增**触发式常驻模式** `YZProbe.exe --watch [--duration 秒] [--interval 秒]`——出现新远志进程、任何进程加载采集组件、或出现 `Brw:`/覆盖整屏的无边框远志窗口时立刻落一份完整报告，每分钟一条心跳 |
 | `YZSysRun.exe` | **以 SYSTEM 身份运行指定程序**的轻量启动器（令牌复制，不装服务、不写注册表）：用来复测"换个身份是否就不被剥句柄权限"。用法 `YZSysRun.exe -- YZProbe.exe -o <目录> --no-pause`。它从**当前会话**的 `winlogon.exe` 复制主令牌并以 `winsta0\default` 启动子进程，因此子进程仍在交互桌面上；启动后会打印令牌来源、子进程会话与完整性级别（应为 系统(16384) 且会话号与当前一致）。**控制台的全部输出同时写成同目录 `YZSysRun-<时间戳>.txt`（可用 `--log <文件>` 指定路径，exe 目录不可写时依次退当前目录、`%TEMP%\YZTrainer\`）**，免得现场来不及另存 |
 | `YZUnhookTest.exe` | 免注入拔钩验证工具：默认只体检（读文件导出表 + 调用约定自检）并把过程写入同目录 `YZUnhookTest-<时间戳>.txt`；`--apply` 才真正调用远志的拔钩导出，`--arm` 待机等你回车再执行，`--delay N` 待机 N 秒后自动执行（被锁键鼠时唯一可行的触发方式），`--no-pause` 供脚本调用。调用前后会打印对照节的**基址、大小、前 32 字节原始值**和三个 HHOOK/标志字（v0.6.2 起按**节名+节内偏移**定位；此前写死的 RVA 差了两个数量级，所以在现场报告里从来没出现过对照行） |
-| `YZSimTarget.exe` | 模拟学生端，仅本地测试用。`--exam` 造考试窗口、`--exec` 4 秒后拉起子进程（验证审计）、**`--load <dll>` 4 秒后加载指定 DLL**（验证"钩子模块晚于注入出现"时主动拔钩的重试，见阶段五） |
+| `YZSimTarget.exe` | 模拟学生端，仅本地测试用。`--exam` 造考试窗口、`--exec` 4 秒后拉起子进程（验证审计）、**`--load <dll>` 4 秒后加载指定 DLL**（验证"钩子模块晚于注入出现"时主动拔钩的重试，见阶段五）、**`--hook` / `--hook-thread` 像厂商那样自己装键盘钩子并把 `NULL` 当生死判据**（v0.6.13，P0"空过程替换"的回归替身，见阶段八；配合把 exe 放进路径含 `GZYZ` 的目录使用） |
 
 上表里会离开本机的四个工具（`YZTrainer.exe` / `YZProbe.exe` / `YZSysRun.exe` / `YZUnhookTest.exe`）自 v0.6.10 起带版本资源，`FILEVERSION`/`PRODUCTVERSION` 与字符串字段统统由 `src\common\yz_version.h` 单点提供——现场比对"U 盘上这份是不是最新"可以直接看文件属性，不必再靠字节数猜。`yz_protocol.h` 里派生的字符串与那份数值宏由一条 `static_assert` 互相咬合，只改一处会直接编译失败。`YZHook.dll` 故意不加版本资源：它是注入载荷，写 `CompanyName`/`ProductName` 等于给教师端软件留下可识别特征，它的身份已经由 `YZHook_x86_<hash>.dll` 这个文件名唯一确定。
 
 ## 建议的使用流程
 
-1. **本地先跑通**：管理员 PowerShell 执行 `pwsh -File tests\run_sim_test.ps1`，确认七个阶段共 **15 项断言**全通过——阶段一（注入路径）4 项：全屏置顶 / 窗口化 / 带 WS_CAPTION / 冻结画面；阶段二（免注入路径）2 项 + 1 条 WARN；阶段三（假全屏）2 项；阶段四（远程执行审计）2 项；阶段五（主动拔钩的晚加载重试，v0.6.3）1 项：`YZSimTarget --load` 在注入之后才加载一个名叫 `ExdHooks.dll` 的替身 DLL，日志里必须出现"NativeUnhook: 目标模块 ExdHooks.dll 已加载，开始尝试"；阶段六（反横跳闸门，v0.6.6）1 项：`YZSimTarget --fight` 每 200ms 抢回无边框全屏（复现机房"全屏↔窗口横跳"），外部纠正必须在几次短间隔抢回后**认输停手**（日志出现"已对该窗口停手"）；阶段七（采集栈监控，v0.6.12）2 项：某进程加载 `ExdDtDup.dll` 时日志必须出现"采集栈监控: PID=… 出现采集组件 ExdDtDup.dll"，且自动导出的诊断包 `snapshot.txt` 里含"== 采集栈快照 =="与该命中。
+1. **本地先跑通**：管理员 PowerShell 执行 `pwsh -File tests\run_sim_test.ps1`，确认八个阶段共 **17 项断言**全通过——阶段一（注入路径）4 项：全屏置顶 / 窗口化 / 带 WS_CAPTION / 冻结画面；阶段二（免注入路径）2 项 + 1 条 WARN；阶段三（假全屏）2 项；阶段四（远程执行审计）2 项；阶段五（主动拔钩的晚加载重试，v0.6.3）1 项：`YZSimTarget --load` 在注入之后才加载一个名叫 `ExdHooks.dll` 的替身 DLL，日志里必须出现"NativeUnhook: 目标模块 ExdHooks.dll 已加载，开始尝试"；阶段六（反横跳闸门，v0.6.6）1 项：`YZSimTarget --fight` 每 200ms 抢回无边框全屏（复现机房"全屏↔窗口横跳"），外部纠正必须在几次短间隔抢回后**认输停手**（日志出现"已对该窗口停手"）；阶段七（采集栈监控，v0.6.12）2 项：某进程加载 `ExdDtDup.dll` 时日志必须出现"采集栈监控: PID=… 出现采集组件 ExdDtDup.dll"，且自动导出的诊断包 `snapshot.txt` 里含"== 采集栈快照 =="与该命中；阶段八（P0 空过程替换，v0.6.13）2 项：把模拟目标复制到**路径含 `GZYZ`** 的目录里（命中 `IsYuanzhiInstallPath` 的子串判据，不需要在生产代码里开后门）并用 `--hook` 让它像厂商那样"自己装钩子、拿 `NULL` 就自杀"，此时日志必须出现 `已用空过程替换远志键盘/鼠标钩子… hhook=0x非零`，且该进程**仍然存活**。
 2. **机房侦察（先跑探针）**：把 `YZProbe.exe`（x64 版本信息最全）拷到机房机器，右键以管理员运行，生成 `YZProbe-report-*.json/.md`。重点看：
    * “远志相关进程”里哪个进程加载了 `Rmdesk.ads` / `PlayerGUI.dll` / `ExdHooks.dll`；
    * 远志模块导出表里 `KillHook` / `UnSetExdHooks` / `UnSetExdHooks2` 是否存在（与本地版本比对，决定主动拔钩可用性）；
@@ -142,6 +143,8 @@ WindowPercent=60   ; 窗口化后的宽度占屏幕百分比（20-100）
 LogLevel=2         ; 0=错误 1=警告 2=信息 3=调试
 AutoInject=1       ; 是否自动注入 / 客户端被服务重启后自动补注入
 InjectMethod=0     ; 注入方式：0=CreateRemoteThread+LoadLibrary（默认）；1=SetWindowsHookEx 消息钩子
+                   ; v0.6.13 起注入前先读一次句柄实得权限：缺 PROCESS_VM_OPERATION 时（内核剥夺，
+                   ; 机房实测实得恒为 0x1402）直接跳过注定失败的远程线程注入，不再白试 3 次
 TargetDir=         ; 远志安装目录，留空=自动判定
 HookDllPath=       ; 留空=用内嵌的 YZHook.dll；填路径可强制改用外部 DLL（调试用）
 EnableExamGuard=1  ; 考试模式守护：1=仅强信号熔断（默认）；0=完全跳过考试检测
@@ -149,6 +152,8 @@ ExternalWindowFix=1; 免注入的外部窗口纠正：1=开（默认）0=关，�
 AutoExportOnBroadcast=1; 首次识别到广播窗口时静默导出一份诊断包（默认开，每进程一次）
 AutoExportOnExit=1 ; 退出时静默导出一份诊断包（默认开）
 AutoExportOnCapture=1; 首次发现采集组件（ExdDtDup/ScreenRecoder 等）时静默导出一份（默认开，每进程一次）
+BlockMessageHooks=1; 是否也把远志的 WH_GETMESSAGE/WH_CALLWNDPROC 换成空过程（默认开）
+                   ; 现场出现“广播画面不动/窗口消息异常”时改成 0 重启即可做二分，不必重编（v0.6.13）
 ProcessNames=Yistart.exe;TEACHCMD.exe;PlayerGUI.exe;ExdPaintHelper.exe
 ```
 
@@ -167,11 +172,11 @@ ProcessNames=Yistart.exe;TEACHCMD.exe;PlayerGUI.exe;ExdPaintHelper.exe
 * **窗口层（两种模式）**：hook `SetWindowPos` / `MoveWindow` / `ShowWindow` / `SetWindowLongA/W`，命中“本进程 + 无标题栏 + 覆盖整块显示器 + 置顶或 POPUP”的窗口后按模式处理——**窗口化**改写 `WS_OVERLAPPEDWINDOW`（默认屏宽 60% 居中、不抢焦点），**假全屏**保留 `WS_POPUP` 全屏外观、只把 `WS_EX_TOPMOST` 去掉并强制 `HWND_NOTOPMOST`；两者都在客户端每 3 秒抢回全屏时按 500ms 节流重新纠正，假全屏另有"已达稳态就不再改"的判据，避免每秒白改一次。
 * **外部窗口纠正（免注入兜底）**：窗口样式是会话级对象，改别人的窗口不需要目标进程配合。主程序每秒按**同一套结构判据**枚举顶层窗口，命中"属于远志进程 + 无属主 + 无标题栏 + 非子窗口 + 非桌面壳类 + 覆盖整块显示器 + POPUP 或置顶"后用跨进程 `SetWindowLongPtrW` + `SetWindowPos(..., SWP_ASYNCWINDOWPOS)` 改成普通窗口（`ExternalWindowFix`），节流 1 秒；`Flags` 里给的是假全屏时同样支持跨进程做假全屏。这是"客户端被剥夺句柄权限、`VirtualAllocEx` 返回 0x5"时唯一还能生效的窗口手段；进程内 Hook 已生效的宿主进程会被跳过（避免两边抢同一个窗口），其余远志进程仍由它兜底。写入被拒（UIPI / win32k 权限检查）会记 WARN 并在状态栏显示"有写入失败"，不静默失败。
 * **远程执行审计层**：hook `kernel32!CreateProcessA/W`、`WinExec`、`user32!ExitWindowsEx`，以及（仅当目标进程已加载 `shell32` 时）`shell32!ShellExecuteExW`。一律**先调用原函数拿到真实结果，再写审计**，不做任何拦截。审计行同时落 `yzt.log` 侧的 INFO 与 `remote-exec.log`，按 exe 是否在远志安装目录里标注 `origin=self|remote`，界面日志只播报 `remote` 的条目。不为了审计去加载 shell32。
-* **输入层**：把学生端安装的键盘/鼠标钩子**替换成我们 DLL 里的空过程**（v0.6.11 起；命中判据不变——**线程内钩子（`hMod == NULL`）按回调地址反查所属模块**，只有落在远志目录里才处理，归属不明的放行并记账，避免误伤输入法/公共控件）。**为什么不再返回失败（P0）**：2026-10-09 实测，把 `SetWindowsHookEx` 拦成 `NULL` 会让客户端在 8 毫秒内自杀、守卫每 4 秒把它拉起来，形成 10 秒级重启循环（电子点名窗口因此立不住）；改成“返回合法 HHOOK + 空过程”后客户端不再重启，而它的过滤逻辑照样不执行，日志文案为 `已用空过程替换远志键盘/鼠标钩子(W/A)`。`RegisterHotKey` 只拦 Win / Alt+Tab / Alt+Esc / Alt+F4 / Alt+Space / Ctrl+Esc / Ctrl+Shift+Esc 这些“逃生键”；`SystemParametersInfoW` **和 `SystemParametersInfoA`**（屏保/快速任务切换；v0.6.3 补上 A 版——`KeyboardHook.dll` 导入的正是 A 版，只挂 W 会漏）、`ClipCursor`、`BlockInput` 按开关放行或替换；`InputEnforceTick` 每秒强制 `ClipCursor(NULL)` / `BlockInput(FALSE)` 一次；被改写的 HKCU 策略值（任务管理器/锁屏/Win 键/GameDVR）在后台持续恢复，退出时还原原值（**hive 归属存疑，见“已知限制”第 12 条**）。拦截遥控输入时 `SendInput` 返回“全部投递成功”而不是 0，减少被学生端察觉后重试的概率。
+* **输入层**：把学生端安装的键盘/鼠标钩子**替换成我们 DLL 里的空过程**（v0.6.11 起；命中判据不变——**线程内钩子（`hMod == NULL`）按回调地址反查所属模块**，只有落在远志目录里才处理，归属不明的放行并记账，避免误伤输入法/公共控件）。**为什么不再返回失败（P0）**：2026-10-09 实测，把 `SetWindowsHookEx` 拦成 `NULL` 会让客户端在 8 毫秒内自杀、守卫每 4 秒把它拉起来，形成 10 秒级重启循环（电子点名窗口因此立不住）；改成“返回合法 HHOOK + 空过程”后客户端不再重启，而它的过滤逻辑照样不执行，日志文案为 `已用空过程替换远志键盘/鼠标钩子(W/A)`。`RegisterHotKey` 只拦 Win / Alt+Tab / Alt+Esc / Alt+F4 / Alt+Space / Ctrl+Esc / Ctrl+Shift+Esc 这些“逃生键”；`SystemParametersInfoW` **和 `SystemParametersInfoA`**（屏保/快速任务切换；v0.6.3 补上 A 版——`KeyboardHook.dll` 导入的正是 A 版，只挂 W 会漏）、`ClipCursor`、`BlockInput` 按开关放行或替换；`InputEnforceTick` 每秒强制 `ClipCursor(NULL)` / `BlockInput(FALSE)` 一次。v0.6.13 两点变化：① 消息层那两类钩子（`WH_GETMESSAGE`/`WH_CALLWNDPROC`）由 ini 项 `BlockMessageHooks` 控制，现场可二分；② **不再有任何 HKCU 策略读写**（原来那套在后台恢复"任务管理器/锁屏/Win 键/GameDVR"的写入已整段删除，见"已知限制"第 15 条）。拦截遥控输入时 `SendInput` 返回“全部投递成功”而不是 0，减少被学生端察觉后重试的概率。
 * **采集层**：跟踪进程内取得的屏幕 DC（`GetDC(NULL)`/`GetWindowDC`/`CreateDCW("DISPLAY")`），冻结时把 `BitBlt`/`StretchBlt`/`PrintWindow` 的源改为开启瞬间抓取的 DIB，从而只影响学生端自己抓屏，不影响你本地显示。**注意这条只覆盖 GDI 抓屏路径**；厂商的采集层有 DXGI（`ExdDtDup.dll`）与 GDI（`ScreenRecoder.exe` 独立进程）两条实现，所以防监视默认关闭；v0.6.12 起主程序会**常驻监控**这两条路径何时出现，并把结果写进每份诊断包的 `== 采集栈快照 ==`。
 * **通信**：命名管道 `\\.\pipe\YZTrainer`，帧格式 `[magic 'YZT1'][opcode][len][payload]`；Hook DLL 主动连接并上报状态与日志。
 * **考试模式判定（强/弱信号分级）**：弱信号（`Exam.ads` / `ClassQuiz.ads` 已加载）只按节流记 INFO；强信号（独立 `ExamDlg.exe` 进程、进程内加载考试对话框组件、或**可见**且标题命中 `考试|测验|答题|试卷|快问快答|Exam|Quiz` 的远志窗口）任一命中才熔断并恢复策略、清零功能位。判据走严格目录前缀比较（避免 `...V9.0 StudentX` 这类前缀误判），窗口用 `IsWindowVisible` 过滤隐藏窗口；熔断时输出诊断（命中原因 / 考试进程路径 / 强信号模块 / 进程模块清单）到日志与 `%TEMP%\YZTrainer\exam-debug.txt`，同内容 30 秒节流 + FNV-1a 去重。开关 `EnableExamGuard`（默认 1）以控制位 `YZ_CFG_EXAM_GUARD` 随配置下发，用 `YZ_FLAG_FUNCTION_MASK` 剔除，保证功能位上报不被污染。
-* **还原**：收到卸载指令或客户端进程退出时，全量 `MH_DisableHook` + `MH_RemoveHook` + `MH_Uninitialize`，恢复策略值，释放冻结位图；不调用 `FreeLibrary`（避免崩溃），DLL 留在进程内但完全停用。
+* **还原**：收到卸载指令或客户端进程退出时，全量 `MH_DisableHook` + `MH_RemoveHook` + `MH_Uninitialize`，释放冻结位图；不调用 `FreeLibrary`（避免崩溃），DLL 留在进程内但完全停用。（v0.6.13 起不再有“恢复策略值”这一步——已经没有策略写入了。）
 
 ## 已知限制
 
@@ -197,10 +202,10 @@ ProcessNames=Yistart.exe;TEACHCMD.exe;PlayerGUI.exe;ExdPaintHelper.exe
 12. **策略项（HKCU）的 hive 归属——已有本机实测证据，批次 2 待上机确认**：`policy.cpp` 里全部走 `HKEY_CURRENT_USER`，而这段代码跑在**目标进程**里（`Yistart.exe` 以 SYSTEM 运行时就是 SYSTEM 的 HKCU），跟登录学生那一家不是同一个。2026-09-23 本机实测（令牌复制方式启动、会话 1 的 SYSTEM 进程）：
     * `RegOpenCurrentUser` + `NtQueryKey` 自报的 HKCU 是 `\REGISTRY\USER\.DEFAULT`，**不是** `S-1-5-18`；
     * 但我们 `PolicyEnforce` 写下的值**同时**出现在 `HKU\.DEFAULT` 与 `HKU\S-1-5-18` 下，两处 `Environment` 内容逐字相同 → 这台机器上这两个名字是**同一个 hive**。
-    所以：外部只看 `S-1-5-18` 会得出"根本没写过策略"的错误结论。**v0.6.4 起注入侧自己会报一行 `PolicyHive: 本进程 HKCU → …`**（只读、不改状态），现场以它为准；确认前不引入 `WTSQueryUserToken`/跨 hive 穿透逻辑（注入本身还没稳，不想再加一层不确定性）。
-13. **消息层钩子的处理是“可二分的风险点”**：`ShouldBlockHook` 也会把 `WH_GETMESSAGE` / `WH_CALLWNDPROC` 换成空过程（远志的 `KeyboardHook.dll` 导出了 `SetMessageCallback`/`SetWndProcCallback`，这两类钩子可能是锁键鼠的载体，但也可能是广播消息链的一环）。现场若出现“广播画面不动/窗口消息异常”，第一件事就是把 `hooks_input.cpp` 顶部的 `YZ_BLOCK_MESSAGE_HOOKS` 改成 0 重新编译做对照；这两类在日志里单独记成 `已用空过程替换远志消息层钩子(W/A)`，便于定位。
+    所以：外部只看 `S-1-5-18` 会得出"根本没写过策略"的错误结论。**v0.6.4 起注入侧自己会报一行 `PolicyHive: 本进程 HKCU → …`**（只读、不改状态），现场以它为准；确认前不引入 `WTSQueryUserToken`/跨 hive 穿透逻辑（注入本身还没稳，不想再加一层不确定性）。**v0.6.13 起这段代码只做只读自报，不再写任何策略值**（见第 15 条）。
+13. **消息层钩子的处理是“可二分的风险点”（v0.6.13 起不必再重编）**：`ShouldBlockHook` 也会把 `WH_GETMESSAGE` / `WH_CALLWNDPROC` 换成空过程（远志的 `KeyboardHook.dll` 导出了 `SetMessageCallback`/`SetWndProcCallback`，这两类钩子可能是锁键鼠的载体，但也可能是广播消息链的一环）。现场若出现“广播画面不动/窗口消息异常”，把 ini 里的 `BlockMessageHooks` 改成 `0` 重启程序即可做对照——v0.6.13 把这个开关从编译期宏改成了配置位（`YZ_CFG_BLOCK_MESSAGE_HOOKS`），不必再改代码重编、重发产物。这两类在日志里单独记成 `已用空过程替换远志消息层钩子(W/A)`，便于定位。
 14. **键鼠封锁：2026-10-09 终结实验，正式结案（用户态无解）**。三条证据：① 整段广播期客户端**一次都没调用** `ClipCursor` / `BlockInput` / SPI 改写 / 抢注热键（这些拦截点命中即打印，计数全为 0）；② 内核 `clip` 矩形全程 `0,0,1920,1080`（整屏），而光标在广播期间约 90% 采样停在 `(0,0)`，广播一结束立刻恢复自由；③ 客户端在 09:01:15.427 尝试安装自己的 `WH_MOUSE_LL`（idHook=14），被我们成功拦下，之后 38 分钟鼠标照锁不误。再加上封锁由 `Yistart.exe` 每 2~3 秒拉起的 `KillMain.exe -d:set` 维持（该 exe 只导入 `DeviceIoControl`/`CreateFileW`/`WriteFile`/`TerminateProcess`，没有任何用户态输入 API）→ **封锁在驱动/设备层，用户态（含进程内 hook）不可能解开**。判读提醒：`ClipCursor 探针` 的 `clip` 读数会被我们自己的钩子影响（`Hook_ClipCursor` 命中时会把钳制清零成全屏），所以看读数前先确认日志里 `已解除鼠标区域锁定(ClipCursor)` 的计数——**计数 >0 时该读数不构成证据**。
-15. **策略项（HKCU）在机房机器上的实测结论**：学生 hive（`S-1-5-21-…-500`）里**一条策略值都没有**；有值的只有 `.DEFAULT`/`S-1-5-18`（同一 hive）——而那正是我们自己的 `PolicyEnforce` 写进去的（注入侧自报 `PolicyHive: 本进程 HKCU → \REGISTRY\USER\.DEFAULT`）。也就是说：远志的封锁**不走 HKCU 策略**，我们那套策略读写既没作用在正确位置、也没必要。**据此"批次 2（改主程序侧跨 hive 修策略）"已取消**：留着只会多一个与真实机制无关、还得长期维护的模块。`policy.cpp` 暂时保留原样（它现在的副作用只是把几个 0/1 写进默认 hive，无害），等下次动代码时再决定是删掉还是显式降级为"默认关闭"。
+15. **策略项（HKCU）在机房机器上的实测结论 —— 已据此删除写入逻辑（v0.6.13）**：学生 hive（`S-1-5-21-…-500`）里**一条策略值都没有**；有值的只有 `.DEFAULT`/`S-1-5-18`（同一 hive）——而那正是我们自己的 `PolicyEnforce` 写进去的（注入侧自报 `PolicyHive: 本进程 HKCU → \REGISTRY\USER\.DEFAULT`）。也就是说：远志的封锁**不走 HKCU 策略**，我们那套策略读写既没作用在正确位置、也没必要。**"批次 2（改主程序侧跨 hive 修策略）"早已取消**；v0.6.13 又把 `policy.cpp` 里的 `PolicyBackup`/`PolicyEnforce`/`PolicyRestore` 连同那张策略项表**整段删掉**，只保留 `PolicyLogCurrentUserHive()` 这行只读自报。留着的副作用是"把几个 0/1 写进默认用户模板"（`.DEFAULT` 会被之后新建的 profile 继承，而进程被硬杀时"退出还原"根本不会执行），收益为零——所以不再"等下次动代码时再决定"。
 
 ## 网管版（GZYZ）适配
 
@@ -213,7 +218,7 @@ ProcessNames=Yistart.exe;TEACHCMD.exe;PlayerGUI.exe;ExdPaintHelper.exe
 * **窗口化不依赖注入（v0.4.0 起）**：正因为上面这条，**广播窗口化改走双路**——进程内 Hook 拿不到目标进程时，主程序用跨进程 `SetWindowLongPtrW`/`SetWindowPos` 直接改那个窗口（`ExternalWindowFix=1` 默认开）。跨进程改样式是会话级操作，不需要目标进程配合，但需要过 win32k 的完整性检查（目标以 SYSTEM 运行、我们以管理员运行时是否放行，以机房实测为准，日志会记 WARN）。
 * **首要怀疑对象：`ProcessProtect.sys`**（2026-09-23 三台学生机交叉比对得出）：`C:\Windows\system32\Drivers\ProcessProtect.sys`，无厂商、无文件版本，在 `YZ-26.9.23-Mine`、`YZ-26.9.23-ClassmateA` 与 09-18 的学生机报告里**都出现**，而**教师机没有**——"保护只针对学生端"这件事与它的名字都对得上。名字相似的 `pkdsk` / `pkprot` / `pkdhlp` 教师机同样存在，可以排除；`BrDevfer`（`BRUsbFilter.sys`）降为次要候选。下次上机要做的是：用新版探针的逐权限位表确认它是否在有人打开 `Yistart.exe` 句柄时削减权限，并补记它的签名者与文件版本。
 * **不要再用“完整性级别差”解释 0x5**：同日实测里 `Nmdeputy.exe` 与学生端同为 SYSTEM / 系统完整性(16384)，而探针以高完整性(12288)对它的模块枚举、`ReadProcessMemory`、`VirtualAllocEx`、`WriteProcessMemory` **全部成功**。若是 `UIPI` / 强制完整性策略的写升拦截，Nmdeputy 也必须失败。所以 `VirtualAllocEx 0x5` 只能来自针对**特定进程**的句柄权限剥夺（内核回调），而不是级别不够——这条同时意味着"提到 SYSTEM 就能过"并不必然成立，必须以新版探针在 SYSTEM 身份下的复测为准。
-* **打包提醒**：`build.ps1` 会在 `dist\<平台>\` 写入一份出厂默认 `YZTrainer.ini`（`Flags=5`、`LogLevel=2`、`EnableExamGuard=1`、`ExternalWindowFix=1`、`InjectMethod=0`），避免把调试配置（例如打开防监视的 `Flags=13`）随压缩包发出去。
+* **打包提醒**：`build.ps1` 会在 `dist\<平台>\` 写入一份出厂默认 `YZTrainer.ini`（`Flags=5`、`LogLevel=2`、`EnableExamGuard=1`、`ExternalWindowFix=1`、`InjectMethod=0`、`AutoExportOnCapture=1`、`BlockMessageHooks=1`），避免把调试配置（例如打开防监视的 `Flags=13`）随压缩包发出去。
 
 ### 为什么注入会失败（`VirtualAllocEx` 返回 0x5）
 
@@ -301,6 +306,38 @@ ProcessNames=Yistart.exe;TEACHCMD.exe;PlayerGUI.exe;ExdPaintHelper.exe
    如实标注：真实 `ExdDtDup.dll` 在本机普通进程里**载不进去**（x64 报 193 位数不符、x86 报 127 缺导出），
    所以本地用的是改名替身；检测逻辑只看模块名，这条验证有效，但"真机上由谁加载"仍只能机房实测。
 
+### 2026-10-11（第二轮）v0.6.13：P0 修复补上回归闸门 + 三项清理
+
+第一轮把"取证链"做好之后，这一轮做清单里的第 2 项（本地防线）与 3/4/5 三项清理。
+
+1. **阶段八：P0"空过程替换"的回归闸门**。v0.6.11 那条修复此前只有真机验证、没有任何本地防线
+   （模拟目标对 `SetWindowsHookEx` 的返回值根本不在乎）。现在给 `YZSimTarget` 加了
+   `--hook` / `--hook-thread`：像厂商那样自己装键盘钩子，并**把返回 `NULL` 当生死判据直接退出**
+   （复现现场"8 毫秒内进程消失"）；回归脚本把模拟目标复制到**路径含 `GZYZ`** 的目录里跑，
+   命中 `IsYuanzhiInstallPath()` 的子串判据——**不需要在生产代码里开任何后门**。
+   注意 `--hook` 是**启动 8 秒后**才装钩子：现场那次客户端也是"Trainer 已经在跑之后"才装的；
+   启动时立刻装会走系统原生路径、完全绕开我们的钩子（第一版就这么写的，实测两边都不命中）。
+2. **负向 A/B：证明这条闸门真的会拦人**。一次编排里跑三段：
+   正常代码 **17 项全 PASS**；把 `ReplaceWithPassthrough` 临时改成 `return nullptr`（= v0.6.10 行为）
+   后 **15 PASS / 2 FAIL，红的正是阶段八那两条**；撤掉补丁重编后又是 **17 PASS / 0 FAIL**
+   （`build\logs\sim-test-v0613.log`、`-ab-null.log`、`-final.log`）。
+3. **顺手修掉回归脚本自己的两个真问题**：① 阶段八的句柄正则只认带 `0x` 前缀的格式，
+   而模拟目标用 `%p` 打印（`hhook=000B0E84`）——改用 `hhook=(?:0x)?0*[1-9A-Fa-f]`；
+   ② 断言原来直接 grep 整个 `yzt.log`，而它是追加写的、跨次运行共用，**会被上一次运行的旧行满足**
+   （负向 A/B 里差点变成恒绿）。现在脚本用 `Get-LogLength`/`Read-LogTail` 只匹配本阶段新增的那段。
+4. **清理项 3（注入体验）**：注入前先读一次目标句柄的实得权限（`NtQueryObject`，结构体必须恰好 56 字节），
+   缺 `PROCESS_VM_OPERATION` 就直接跳过注定失败的远程线程注入、改走消息钩子，
+   不再白试 3 次/约 5 秒/3 条 WRN。同时收紧自动改道的前提：本程序完整性**低于**目标时不改道
+   （那种情况下消息钩子同样被 UIPI 挡下），只记一条"请用 YZSysRun 以 SYSTEM 启动"。
+   `InjectMethod` 出厂默认**仍是 0**——消息钩子会把 DLL 映射进本会话所有 GUI 进程，默认开的面太大。
+5. **清理项 5（消息层钩子开关）**：原来的编译期宏 `YZ_BLOCK_MESSAGE_HOOKS` 改成配置位
+   `YZ_CFG_BLOCK_MESSAGE_HOOKS` + ini 项 `BlockMessageHooks`（默认 1）。现场要二分
+   "消息层钩子是不是广播链一环"时改 ini 重启即可，不必改代码重编、重发产物。
+6. **清理项 4（HKCU 策略写入）**：`PolicyBackup` / `PolicyEnforce` / `PolicyRestore` 与那张策略表
+   **整段删除**，只留只读的 `PolicyHive: 本进程 HKCU → …` 自报。理由见已知限制 12/15：
+   机房实测远志的封锁不走 HKCU 策略，而那套写入落在**默认用户模板**（`.DEFAULT`）上，
+   进程被硬杀时"退出还原"根本不执行——收益为零、副作用是真的。
+
 ## 免责声明与使用边界
 
 本项目仅供**教育研究**与**技术学习**目的使用，为学习、研究相关软件在 Windows 用户态的运行机制（进程注入、API Hook、窗口与输入子系统）而编写，**禁止用于任何非法用途**。作者的出发点与 JiYuTrainer 相同：在**不影响正常教学**的前提下改善个人课堂体验。
@@ -311,7 +348,7 @@ ProcessNames=Yistart.exe;TEACHCMD.exe;PlayerGUI.exe;ExdPaintHelper.exe
 * **不规避技术措施**：本项目不以破解、复制、传播他人软件为目的，仓库内不包含任何厂商文件；请自行通过合法渠道获取相关软件。
 * **无担保与已知风险**：软件按“现状”提供，不附带任何明示或默示担保。它需要管理员权限并向其他进程注入代码，可能被防病毒软件、EDR 或学校终端管理系统拦截、隔离或告警。
 * **禁止恶意用途**：禁止将本项目或其衍生代码用于免杀、反检测、捆绑传播或任何攻击性用途。
-* **考试模式硬边界**：程序检测到考试/测验的**强信号**时会立即自动停用全部功能并恢复被改写的策略值；默认开启的"考试模式守护"（`EnableExamGuard`）只做判定，**关闭它等于停止检测，不改变本项目的使用边界**——任何考试、测验、监考场景都禁止使用本工具。
+* **考试模式硬边界**：程序检测到考试/测验的**强信号**时会立即自动停用全部功能；默认开启的"考试模式守护"（`EnableExamGuard`）只做判定，**关闭它等于停止检测，不改变本项目的使用边界**——任何考试、测验、监考场景都禁止使用本工具。
 
 本声明随版本更新；它不构成对使用者的责任豁免，也不能替代你的法律意见。
 

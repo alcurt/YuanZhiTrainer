@@ -6,77 +6,22 @@
 #include <sddl.h>
 #include <vector>
 
+/* ============================ v0.6.13 的重要决定 ============================
+   本文件原来做三件事：备份 / 周期性把被远志改写的"HKCU 策略项"改回自由状态 / 退出时还原。
+   2026-09-29 机房实测（G3）证明这套东西**没有作用对象**：
+     学生 hive（S-1-5-21-…-500）里一条策略值都没有；有值的只有 .DEFAULT / S-1-5-18
+     ——而那正是我们自己写进去的（注入侧自报 `PolicyHive: 本进程 HKCU → \REGISTRY\USER\.DEFAULT`）。
+   也就是说远志的封锁不走 HKCU 策略，而我们那套写入落在**默认用户模板**上：
+   进程被硬杀时"退出还原"不执行，0/1 就留在模板里被之后新建的 profile 继承。
+   收益为零、代价是在别人机器上留下持续副作用，所以 v0.6.13 起**移除全部写入**，
+   只保留下面这个纯只读的落点自报——它的诊断价值还在（现场一眼能看出目标进程的 HKCU 指向哪），
+   而且是判断"某个值到底是谁写的"的第一视角证据。
+   ========================================================================== */
+
 namespace
 {
-/* ⚠ 已知边界（批次 2 待验证，先不动）：
-   本文件全部用 HKEY_CURRENT_USER，而这段代码跑在**目标进程**里（Yistart.exe 以
-   SYSTEM 运行），所以解析出来的是 SYSTEM 的 hive，不是登录学生那个用户的 hive。
-   后果：把 DisableTaskMgr / NoWinKeys 之类"改回来"对登录用户可能根本没生效，
-   PolicyRestore 也可能是"执行了但用户侧没变化"。
-   2026-09-23 复核 P1.2。验证办法：在被锁的机器上分别读
-     HKU\<学生 SID>\Software\Microsoft\Windows\CurrentVersion\Policies\...
-   与 SYSTEM 的 hive，看远志到底写在哪一侧。确认后再决定是否引入
-   WTSQueryUserToken / 直接操作交互用户 hive —— 注入本身还没稳之前不加这层不确定性。 */
-struct Item
-{
-    HKEY         root;
-    const wchar_t* subKey;
-    const wchar_t* name;
-    DWORD        desired;
-    bool         backedUp;
-    bool         hadValue;
-    DWORD        original;
-};
-
-Item g_items[] =
-{
-    { HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Policies\\System",    L"DisableTaskMgr",         0, false, false, 0 },
-    { HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Policies\\System",    L"DisableLockWorkstation", 0, false, false, 0 },
-    { HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Policies\\System",    L"DisableChangePassword",  0, false, false, 0 },
-    { HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Policies\\Explorer",  L"NoWinKeys",              0, false, false, 0 },
-    { HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\GameDVR",             L"AppCaptureEnabled",      1, false, false, 0 }
-};
-
-const size_t g_itemCount = sizeof(g_items) / sizeof(g_items[0]);
-
-bool ReadDword(const Item& item, DWORD* out)
-{
-    HKEY key = nullptr;
-    if (RegOpenKeyExW(item.root, item.subKey, 0, KEY_QUERY_VALUE, &key) != ERROR_SUCCESS)
-        return false;
-    DWORD type = 0;
-    DWORD size = sizeof(DWORD);
-    DWORD value = 0;
-    LONG rc = RegQueryValueExW(key, item.name, nullptr, &type, reinterpret_cast<LPBYTE>(&value), &size);
-    RegCloseKey(key);
-    if (rc != ERROR_SUCCESS || type != REG_DWORD)
-        return false;
-    *out = value;
-    return true;
-}
-
-bool WriteDword(const Item& item, DWORD value)
-{
-    HKEY key = nullptr;
-    if (RegCreateKeyExW(item.root, item.subKey, 0, nullptr, 0, KEY_SET_VALUE, nullptr, &key, nullptr) != ERROR_SUCCESS)
-        return false;
-    LONG rc = RegSetValueExW(key, item.name, 0, REG_DWORD,
-                             reinterpret_cast<const BYTE*>(&value), sizeof(DWORD));
-    RegCloseKey(key);
-    return rc == ERROR_SUCCESS;
-}
-
-void DeleteValue(const Item& item)
-{
-    HKEY key = nullptr;
-    if (RegOpenKeyExW(item.root, item.subKey, 0, KEY_SET_VALUE, &key) != ERROR_SUCCESS)
-        return;
-    RegDeleteValueW(key, item.name);
-    RegCloseKey(key);
-}
-
 /* ---------- HKCU 落点自报（复核 P1.2 的第一视角证据） ----------
-   本文件全用 HKEY_CURRENT_USER，而它跑在**目标进程**里：Yistart.exe 以 SYSTEM 运行时，
+   本文件用 HKEY_CURRENT_USER，而它跑在**目标进程**里：Yistart.exe 以 SYSTEM 运行时，
    解析出来的就是 SYSTEM 的 hive，跟登录学生那一家不是同一个。光靠外部脚本扫 HKU 只能
    推断"谁家被写了"，这里让进程自己报出它的 HKCU 到底叫什么名字。
    纯只读：只开句柄、查名字、关句柄。 */
@@ -153,8 +98,7 @@ std::wstring TokenUserSid()
     return sid;
 }
 
-/* SID 对应的 hive 是否已加载？没加载的话 HKCU 会自动落到 .DEFAULT，
-   这正是"策略改了半天没效果"的另一种可能。 */
+/* SID 对应的 hive 是否已加载？没加载的话 HKCU 会自动落到 .DEFAULT。 */
 bool HiveLoadedForSid(const std::wstring& sid)
 {
     if (sid.empty())
@@ -169,55 +113,6 @@ bool HiveLoadedForSid(const std::wstring& sid)
 
 namespace yzhook
 {
-void PolicyBackup()
-{
-    for (size_t i = 0; i < g_itemCount; i++)
-    {
-        if (g_items[i].backedUp)
-            continue;
-        DWORD value = 0;
-        g_items[i].hadValue = ReadDword(g_items[i], &value);
-        g_items[i].original = value;
-        g_items[i].backedUp = true;
-    }
-    YZLOGI(L"PolicyBackup: 已记录 %u 项策略原值", static_cast<unsigned>(g_itemCount));
-}
-
-void PolicyEnforce()
-{
-    if ((g_flags & YZ_FLAG_INPUT_UNLOCK) == 0)
-        return;
-
-    for (size_t i = 0; i < g_itemCount; i++)
-    {
-        DWORD value = 0;
-        bool exists = ReadDword(g_items[i], &value);
-        if (!exists || value != g_items[i].desired)
-        {
-            if (WriteDword(g_items[i], g_items[i].desired))
-            {
-                SendLogToHost(YZ_LOG_INFO,
-                    yz::Format(L"恢复被改写的策略项 %s = %u",
-                               g_items[i].name, g_items[i].desired).c_str());
-            }
-        }
-    }
-}
-
-void PolicyRestore()
-{
-    for (size_t i = 0; i < g_itemCount; i++)
-    {
-        if (!g_items[i].backedUp)
-            continue;
-        if (g_items[i].hadValue)
-            WriteDword(g_items[i], g_items[i].original);
-        else
-            DeleteValue(g_items[i]);
-    }
-    YZLOGI(L"PolicyRestore: 已恢复原始策略值");
-}
-
 void PolicyLogCurrentUserHive()
 {
     /* 第一视角：直接问内核"我这个 HKCU 句柄叫什么名字"。
@@ -243,13 +138,14 @@ void PolicyLogCurrentUserHive()
         return;
     }
 
-    YZLOGI(L"PolicyHive: 本进程 HKCU → %s（令牌 SID=%s，该 hive 已加载=%s）",
+    YZLOGI(L"PolicyHive: 本进程 HKCU → %s（令牌 SID=%s，该 hive 已加载=%s）；"
+           L"本程序不写策略（v0.6.13 起只报落点，见 policy.cpp 顶部说明）",
            path.c_str(), sidText, hiveLoaded ? L"是" : L"否");
 
     if (!sid.empty() && !hiveLoaded)
     {
-        YZLOGW(L"PolicyHive: 令牌 SID 对应的 hive 未加载 —— HKCU 会落到 .DEFAULT，"
-               L"策略项读写会写在别处（这正是复核 P1.2 要排除的情形）");
+        YZLOGW(L"PolicyHive: 令牌 SID 对应的 hive 未加载 —— HKCU 会落到 .DEFAULT。"
+               L"本程序不再写任何策略值，这一行只用于判读别人写的值落在哪一家");
     }
 }
 } /* namespace yzhook */

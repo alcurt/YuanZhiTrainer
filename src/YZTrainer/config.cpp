@@ -29,6 +29,17 @@ void SyncExamGuardBit(AppConfig& cfg)
     else
         cfg.flags &= ~YZ_CFG_EXAM_GUARD;
 }
+
+/* 消息层钩子开关同样是控制位：钩子侧 v0.6.13 起按这个位决定要不要把远志的
+   WH_GETMESSAGE/WH_CALLWNDPROC 也换成空过程。放 ini 里是为了现场能二分，
+   不必改代码重编（原来那是 hooks_input.cpp 顶部的编译期宏）。 */
+void SyncBlockMessageHooksBit(AppConfig& cfg)
+{
+    if (cfg.blockMessageHooks)
+        cfg.flags |= YZ_CFG_BLOCK_MESSAGE_HOOKS;
+    else
+        cfg.flags &= ~YZ_CFG_BLOCK_MESSAGE_HOOKS;
+}
 } /* namespace */
 
 std::wstring ConfigPath()
@@ -48,7 +59,9 @@ void ConfigApplyDefaults(AppConfig& cfg)
     cfg.autoExportOnBroadcast = true;
     cfg.autoExportOnExit = true;
     cfg.autoExportOnCapture = true;
+    cfg.blockMessageHooks = true;
     SyncExamGuardBit(cfg);
+    SyncBlockMessageHooksBit(cfg);
     cfg.processNames.clear();
     /* 客户端进程名单。网管版多一个守卫进程 Nmdeputy.exe，但它由注入器显式排除
        （IsGuardProcess），这里不放进来；需要时可在 INI 里自行添加。 */
@@ -77,9 +90,11 @@ void ConfigLoad(AppConfig& cfg, const std::wstring& iniPath)
 
     /* 考试守护开关以控制位形式随配置下发；其余功能位保持 ini 中的值 */
     SyncExamGuardBit(cfg);
+    SyncBlockMessageHooksBit(cfg);
     cfg.autoExportOnBroadcast = ReadInt(iniPath, L"AutoExportOnBroadcast", cfg.autoExportOnBroadcast ? 1 : 0) != 0;
     cfg.autoExportOnExit = ReadInt(iniPath, L"AutoExportOnExit", cfg.autoExportOnExit ? 1 : 0) != 0;
     cfg.autoExportOnCapture = ReadInt(iniPath, L"AutoExportOnCapture", cfg.autoExportOnCapture ? 1 : 0) != 0;
+    cfg.blockMessageHooks = ReadInt(iniPath, L"BlockMessageHooks", cfg.blockMessageHooks ? 1 : 0) != 0;
 
     wchar_t buf[1024] = {0};
     GetPrivateProfileStringW(kSection, L"TargetDir", L"", buf, 1024, iniPath.c_str());
@@ -114,6 +129,7 @@ void ConfigSave(const AppConfig& cfg, const std::wstring& iniPath)
     WriteInt(iniPath, L"AutoExportOnBroadcast", cfg.autoExportOnBroadcast ? 1 : 0);
     WriteInt(iniPath, L"AutoExportOnExit", cfg.autoExportOnExit ? 1 : 0);
     WriteInt(iniPath, L"AutoExportOnCapture", cfg.autoExportOnCapture ? 1 : 0);
+    WriteInt(iniPath, L"BlockMessageHooks", cfg.blockMessageHooks ? 1 : 0);
     WritePrivateProfileStringW(kSection, L"TargetDir", cfg.targetDir.c_str(), iniPath.c_str());
     WritePrivateProfileStringW(kSection, L"HookDllPath", cfg.hookDllPath.c_str(), iniPath.c_str());
 

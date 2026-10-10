@@ -36,6 +36,10 @@ struct AppConfig
     /* 首次发现采集组件（ExdDtDup/ScreenRecoder 等）时也静默导出一份：
        "教师监视时谁在抓屏"只在教师动手的那几秒可采，错过就得再等一节课。 */
     bool         autoExportOnCapture;
+    /* 消息层钩子开关（v0.6.13 由编译期宏改成配置位）：1=把远志的 WH_GETMESSAGE /
+       WH_CALLWNDPROC 也换成空过程（默认），0=只处理键盘/鼠标钩子。
+       现场若出现"广播画面不动/窗口消息异常"，改成 0 重启即可二分，不必重编。 */
+    bool         blockMessageHooks;
     std::wstring targetDir;        /* 远志安装目录，空=按进程路径自动判定 */
     std::wstring hookDllPath;      /* 空=用内嵌资源；填路径则强制使用该文件 */
     std::vector<std::wstring> processNames;

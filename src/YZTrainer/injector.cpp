@@ -44,6 +44,68 @@ void EnumAllProcesses(std::vector<ProcInfo>& out)
     CloseHandle(snap);
 }
 
+/* ---------------- 注入前的能力预检（v0.6.13） ----------------
+   2026-09-23 / 09-29 / 10-08 三次机房实测：受保护的客户端（Yistart.exe）在
+   OpenProcess 成功的前提下，句柄实得权限恒为 0x1402 —— 被内核回调削掉的正是
+   PROCESS_VM_OPERATION(0x8) / PROCESS_VM_WRITE(0x20) / PROCESS_VM_READ(0x10)。
+   于是"远程线程注入"这条路每次都要拿 3 次注定失败的尝试、约 5 秒、3 条 WRN 才兜底。
+   现在先读一次句柄实得权限：缺 PROCESS_VM_OPERATION 就直接跳到消息钩子。
+   注意结构体长度必须**恰好 56 字节**（PUBLIC_OBJECT_BASIC_INFORMATION），
+   传大了 NtQueryObject 会返回 STATUS_INFO_LENGTH_MISMATCH(0xC0000004) 而不填缓冲区
+   —— 探针当年就是踩了这个坑（YZProbe\probe.cpp 里有同一份实现与说明）。 */
+struct YzObjectBasicInformation56
+{
+    ULONG       attributes;
+    ACCESS_MASK grantedAccess;
+    ULONG       handleCount;
+    ULONG       pointerCount;
+    ULONG       reserved[10];
+};
+static_assert(sizeof(YzObjectBasicInformation56) == 56,
+              "PUBLIC_OBJECT_BASIC_INFORMATION 必须是 56 字节");
+
+typedef LONG (NTAPI *PFN_NtQueryObject_)(HANDLE, int, PVOID, ULONG, PULONG);
+
+DWORD QueryHandleGrantedAccess(HANDLE h)
+{
+    static PFN_NtQueryObject_ s_fn       = nullptr;
+    static bool               s_resolved = false;
+    if (!s_resolved)
+    {
+        s_resolved = true;
+        HMODULE nt = GetModuleHandleW(L"ntdll.dll");
+        if (nt != nullptr)
+            s_fn = reinterpret_cast<PFN_NtQueryObject_>(GetProcAddress(nt, "NtQueryObject"));
+    }
+    if (s_fn == nullptr)
+        return 0;
+
+    YzObjectBasicInformation56 info;
+    ZeroMemory(&info, sizeof(info));
+    ULONG ret = 0;
+    if (s_fn(h, 0 /*ObjectBasicInformation*/, &info, sizeof(info), &ret) != 0)
+        return 0;
+    return info.grantedAccess;
+}
+
+/* 目标是不是"OpenProcess 成功、但 VM_OPERATION 被削掉"？
+   返回 true 时把实得掩码写进 *grantedOut（0 表示读不到，此时返回 false）。 */
+bool VmOperationStripped(DWORD pid, DWORD* grantedOut)
+{
+    if (grantedOut != nullptr)
+        *grantedOut = 0;
+    HANDLE hp = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_OPERATION, FALSE, pid);
+    if (hp == nullptr)
+        return false;
+    const DWORD granted = QueryHandleGrantedAccess(hp);
+    CloseHandle(hp);
+    if (granted == 0)
+        return false;
+    if (grantedOut != nullptr)
+        *grantedOut = granted;
+    return (granted & PROCESS_VM_OPERATION) == 0;
+}
+
 bool NameInList(const AppConfig& cfg, const std::wstring& name)
 {
     for (size_t i = 0; i < cfg.processNames.size(); i++)
@@ -601,6 +663,22 @@ void WatchdogTick()
         g_app.injectFailStreak = 0;
     }
 
+    /* 预检：句柄 VM 权限被内核削掉时，远程线程注入 100% 失败（09-23/09-29/10-08 三次实测），
+       没必要再拿 3 次尝试、5 秒、3 条 WRN 去换同一个结果。读一次实得权限就直接改道。 */
+    if (g_app.cfg.injectMethod == 0 && !g_app.autoHookFallback)
+    {
+        DWORD granted = 0;
+        if (VmOperationStripped(pid, &granted))
+        {
+            g_app.autoHookFallback = true;
+            YZLOGW(L"目标 pid=%u 的句柄实得权限=0x%08X，缺 PROCESS_VM_OPERATION（内核剥夺，与身份无关）"
+                   L"→ 跳过注定失败的远程线程注入，本次运行直接改用消息钩子",
+                   pid, granted);
+            UiAppendLog(yz::kLogWarn, yz::Format(
+                L"目标句柄 VM 权限被削（0x%08X），已跳过远程线程注入、直接改用消息钩子", granted));
+        }
+    }
+
     /* 备用注入方式：消息钩子。挂上之后就不再重复挂，等目标连上管道。 */
     if (g_app.cfg.injectMethod == 1 || g_app.autoHookFallback)
     {
@@ -641,35 +719,52 @@ void WatchdogTick()
         /* 09-29 机房实测：目标（Yistart.exe）跑在 SYSTEM/16384，而本程序是管理员/12288。
            这种情况下三条路（VirtualAllocEx 注入、SetWindowsHookEx 消息钩子、跨进程改窗口）
            都会被 UIPI 一致性检查挡住；用 YZSysRun 以 SYSTEM 启动本程序后，后两条都立刻通了。
-           所以这里给一句明确提示，免得下一轮又在同一个坑里拆半天。 */
-        if (!g_app.integrityHintLogged)
+           所以这里给一句明确提示，免得下一轮又在同一个坑里拆半天。
+           v0.6.13 起顺便用这两个数决定"要不要自动改道"：身份低于目标时消息钩子同样进不去
+           （09-23 实测只落进我们自己进程），静默改道只会留下一条"看起来换路了"的假象。 */
+        DWORD targetIl = 0;
+        DWORD selfIl   = 0;
+        bool  identityKnown = false;
         {
             HANDLE hp = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
             if (hp != nullptr)
             {
-                const DWORD targetIl = yz::GetHandleIntegrityRid(hp);
+                targetIl = yz::GetHandleIntegrityRid(hp);
                 CloseHandle(hp);
-                const DWORD selfIl = yz::GetHandleIntegrityRid(GetCurrentProcess());
-                if (targetIl > selfIl && targetIl >= 0x4000u && selfIl != 0)
-                {
-                    g_app.integrityHintLogged = true;
-                    YZLOGW(L"目标完整性=0x%X 高于本程序=0x%X：注入/消息钩子/跨进程窗口写都会被 UIPI 挡下。"
-                           L"请改用 YZSysRun.exe -- YZTrainer.exe 以 SYSTEM 身份重新启动。",
-                           targetIl, selfIl);
-                    UiAppendLog(yz::kLogWarn,
-                                L"目标高于本程序完整性：请用 YZSysRun.exe -- YZTrainer.exe 以 SYSTEM 重新启动");
-                }
+                selfIl = yz::GetHandleIntegrityRid(GetCurrentProcess());
+                identityKnown = (targetIl != 0 && selfIl != 0);
             }
+        }
+        const bool selfBelowTarget = identityKnown && targetIl > selfIl;
+
+        if (!g_app.integrityHintLogged && selfBelowTarget && targetIl >= 0x4000u)
+        {
+            g_app.integrityHintLogged = true;
+            YZLOGW(L"目标完整性=0x%X 高于本程序=0x%X：注入/消息钩子/跨进程窗口写都会被 UIPI 挡下。"
+                   L"请改用 YZSysRun.exe -- YZTrainer.exe 以 SYSTEM 身份重新启动。",
+                   targetIl, selfIl);
+            UiAppendLog(yz::kLogWarn,
+                        L"目标高于本程序完整性：请用 YZSysRun.exe -- YZTrainer.exe 以 SYSTEM 重新启动");
         }
 
         /* 连续失败到阈值：运行期改用消息钩子（不改 ini）。09-29 实测：受保护的客户端
-           远程线程注入永远失败，而消息钩子在同级/更高完整性下能真正落进目标进程。 */
+           远程线程注入永远失败，而消息钩子在同级/更高完整性下能真正落进目标进程——
+           注意前提正是"同级或更高"，身份低于目标时不改道。 */
         if (!g_app.autoHookFallback && g_app.injectFailStreak >= 3)
         {
-            g_app.autoHookFallback = true;
-            YZLOGW(L"远程线程注入连续失败 %u 次，本次运行改为消息钩子注入（ini 值未改动）",
-                   static_cast<unsigned>(g_app.injectFailStreak));
-            UiAppendLog(yz::kLogWarn, L"注入连续失败，已自动切换为消息钩子注入");
+            if (selfBelowTarget)
+            {
+                YZLOGW(L"远程线程注入连续失败 %u 次，但本程序完整性(0x%X)低于目标(0x%X)："
+                       L"消息钩子同样会被 UIPI 挡下，本次不自动改道（先用 YZSysRun 以 SYSTEM 启动）",
+                       static_cast<unsigned>(g_app.injectFailStreak), selfIl, targetIl);
+            }
+            else
+            {
+                g_app.autoHookFallback = true;
+                YZLOGW(L"远程线程注入连续失败 %u 次，本次运行改为消息钩子注入（ini 值未改动）",
+                       static_cast<unsigned>(g_app.injectFailStreak));
+                UiAppendLog(yz::kLogWarn, L"注入连续失败，已自动切换为消息钩子注入");
+            }
         }
     }
 }

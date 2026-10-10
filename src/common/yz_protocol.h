@@ -56,6 +56,7 @@ static_assert(SameString(YZ_VERSION_STR_DERIVED_NARROW, YZ_VERSION_STR_NARROW),
 
 /* 控制位：不属于"功能开关"，不参与 g_flags 上报，只影响引擎行为 */
 #define YZ_CFG_EXAM_GUARD    0x00010000u  /* 1=启用考试模式强信号熔断，0=完全跳过检测 */
+#define YZ_CFG_BLOCK_MESSAGE_HOOKS 0x00020000u /* 1=把远志的 WH_GETMESSAGE/WH_CALLWNDPROC 也换成空过程（默认），0=只处理键盘/鼠标钩子（现场二分用） */
 #define YZ_FLAG_FUNCTION_MASK 0x0000FFFFu /* 功能开关掩码，用于剔除控制位 */
 
 enum YZ_OPCODE : DWORD

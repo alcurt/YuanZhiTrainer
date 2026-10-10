@@ -71,6 +71,7 @@ foreach ($p in $platforms) {
         'AutoExportOnBroadcast=1',
         'AutoExportOnExit=1',
         'AutoExportOnCapture=1',
+        'BlockMessageHooks=1',
         'TargetDir=',
         'HookDllPath=',
         'ProcessNames=Yistart.exe;TEACHCMD.exe;PlayerGUI.exe;ExdPaintHelper.exe'

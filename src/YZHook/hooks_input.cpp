@@ -46,10 +46,15 @@ bool g_hooksReady = false;
 
 /* 拦不拦消息层钩子（WH_GETMESSAGE / WH_CALLWNDPROC）——已知风险开关。
    它们未必只服务于输入封锁：远志的广播/窗口消息链也可能用（KeyboardHook.dll 导出了
-   SetMessageCallback / SetWndProcCallback）。目前保持 1（现场四次实测广播都没因此中断，
-   且这两类是"锁键鼠"的常见载体）；一旦现场出现"广播画面不动/窗口消息异常"，
-   把这里改成 0 重新编译，只留键盘/鼠标钩子做对照——这是最快的二分定位手段。 */
-#define YZ_BLOCK_MESSAGE_HOOKS 1
+   SetMessageCallback / SetWndProcCallback）。默认拦（现场四次实测广播都没因此中断，
+   且这两类是"锁键鼠"的常见载体）。
+   v0.6.13 起这个开关从**编译期宏改成配置位**（YZ_CFG_BLOCK_MESSAGE_HOOKS，ini 项
+   BlockMessageHooks，默认 1）：现场出现"广播画面不动/窗口消息异常"时只要把 ini 改成 0
+   重启程序即可做对照，不必再改代码重编、重发一份产物。 */
+bool ShouldBlockMessageHooks()
+{
+    return (yzhook::g_flags & YZ_CFG_BLOCK_MESSAGE_HOOKS) != 0;
+}
 
 /* 回调地址落在哪个模块里？跨模块判断"这个钩子是不是远志自己装的"靠它。
    GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS 对未知/已卸载地址会失败，失败即视为
@@ -94,11 +99,14 @@ bool ShouldBlockHook(int idHook, HOOKPROC lpfn, HINSTANCE hMod)
     case WH_MOUSE_LL:
     case WH_KEYBOARD:
     case WH_MOUSE:
-#if YZ_BLOCK_MESSAGE_HOOKS
-    /* 消息层：见文件头 YZ_BLOCK_MESSAGE_HOOKS 的风险说明 */
+        break;
+    /* 消息层：见文件头 ShouldBlockMessageHooks 的风险说明（ini 项 BlockMessageHooks）。
+       这个 if 必须留在这两个 case 自己的分支里——case 标签不构成作用域，
+       放到上面那四个 case 后面会把键盘/鼠标钩子一并门控掉。 */
     case WH_GETMESSAGE:
     case WH_CALLWNDPROC:
-#endif
+        if (!ShouldBlockMessageHooks())
+            return false;
         break;
     default:
         return false;

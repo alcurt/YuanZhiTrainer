@@ -37,6 +37,13 @@
           会发现并在日志里写明（"采集栈监控: PID=… 出现采集组件 ExdDtDup.dll"）
       15. 这次命中会触发一次静默自动导出，且诊断包 snapshot.txt 里含
           "== 采集栈快照 ==" 与该命中记录
+
+    阶段八（P0 空过程替换的回归闸门，v0.6.13）断言 2 条：
+      16. 远志自己装键盘钩子时被换成"空过程"且返回**合法 HHOOK**
+          （日志"已用空过程替换远志键盘/鼠标钩子… hhook=0x非零"）
+      17. 模拟客户端拿到合法句柄后**继续存活**——旧行为（返回 NULL）下它会像现场那样
+          8 毫秒内退出，本断言会红。做法：把模拟目标复制到路径含 GZYZ 的目录里，用
+          --hook 让它"自己装钩子 + 拿 NULL 就自杀"（不需要在生产代码里开后门）。
           （动机：教师监视/缩略图只在几秒里出现，"冻结画面"走 DXGI 还是 GDI 就靠这份数据）
 
     运行前请关闭其它 YZTrainer 实例（含改名副本）：主程序用全局互斥体防重入，
@@ -76,6 +83,8 @@ $stamp     = Get-Date -Format 'yyyyMMdd-HHmmss'
 $stateFile = Join-Path $DistDir 'sim_state.txt'
 $capFile   = Join-Path $DistDir 'sim_capture.csv'
 $iniFile   = Join-Path $DistDir 'YZTrainer.ini'
+# 主程序日志：阶段二起多处断言都只按「本阶段新增的行」匹配（见 Get-LogLength/Read-LogTail）
+$appLog    = Join-Path (Join-Path $env:TEMP 'YZTrainer') 'yzt.log'
 
 # 备份已有产物（不删除任何文件）
 foreach ($f in @($stateFile, $capFile, $iniFile)) {
@@ -99,6 +108,27 @@ Set-Content -LiteralPath $iniFile -Value $iniLines -Encoding utf8
 $simProc = $null
 $appProc = $null
 $result  = New-Object System.Collections.Generic.List[string]
+
+# 断言只看"本阶段新产生的日志行"：yzt.log 是追加写的，跨阶段、跨次运行共用同一个文件，
+# 直接对整个文件 Select-String 会被上一次运行的旧行骗过（v0.6.13 的负向 A/B 就踩到了）。
+# 用法：阶段开始前 $mark = Get-LogLength $appLog，断言处用 Read-LogTail $appLog $mark。
+function Get-LogLength([string]$Path) {
+    if ([string]::IsNullOrEmpty($Path)) { return 0 }
+    if (Test-Path -LiteralPath $Path) { return (Get-Item -LiteralPath $Path).Length }
+    return 0
+}
+function Read-LogTail([string]$Path, [long]$From) {
+    if ([string]::IsNullOrEmpty($Path)) { return '' }
+    if (-not (Test-Path -LiteralPath $Path)) { return '' }
+    $fs = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open,
+                                 [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+    try {
+        [void]$fs.Seek($From, [System.IO.SeekOrigin]::Begin)
+        $sr = New-Object System.IO.StreamReader($fs)
+        return $sr.ReadToEnd()
+    }
+    finally { $fs.Dispose() }
+}
 
 try {
     Write-Host '启动模拟目标 ...'
@@ -174,6 +204,7 @@ try {
     $sim2Proc = Start-Process -FilePath $sim -PassThru
     Start-Sleep -Seconds 3
 
+    $mark2 = Get-LogLength $appLog
     $app2Proc = Start-Process -FilePath $trainer -PassThru
 
     $fixed = $false
@@ -195,7 +226,7 @@ try {
     }
 
     $appLog = Join-Path (Join-Path $env:TEMP 'YZTrainer') 'yzt.log'
-    if ((Test-Path $appLog) -and (Select-String -LiteralPath $appLog -Pattern '外部窗口纠正' -Quiet)) {
+    if ((Read-LogTail $appLog $mark2) -match '外部窗口纠正') {
         $result.Add('PASS  主程序日志里出现“外部窗口纠正”记录')
     } else {
         $result.Add('WARN  未在 yzt.log 里找到“外部窗口纠正”记录（不影响窗口化结论）')
@@ -362,15 +393,13 @@ try {
 
         $sim5Proc = Start-Process -FilePath $sim -ArgumentList '--load', $stubDll -PassThru
         Start-Sleep -Seconds 2
+        $mark5 = Get-LogLength $appLog
         $app5Proc = Start-Process -FilePath $trainer -PassThru
         Start-Sleep -Seconds 14
 
-        $retryHit = $false
-        $skipHit  = $false
-        if (Test-Path $appLog) {
-            $retryHit = (Select-String -LiteralPath $appLog -Pattern 'NativeUnhook: 目标模块 ExdHooks\.dll 已加载，开始尝试' -Quiet)
-            $skipHit  = (Select-String -LiteralPath $appLog -Pattern '找不到导出 UnSetExdHooks' -Quiet)
-        }
+        $seg5     = Read-LogTail $appLog $mark5
+        $retryHit = $seg5 -match 'NativeUnhook: 目标模块 ExdHooks\.dll 已加载，开始尝试'
+        $skipHit  = $seg5 -match '找不到导出 UnSetExdHooks'
         Write-Host ("晚加载重试命中: " + $retryHit + " ; 找不到导出(替身预期): " + $skipHit)
 
         if ($retryHit) { $result.Add('PASS  钩子模块晚于注入出现时，主动拔钩会重试') }
@@ -416,11 +445,11 @@ $app6Proc = $null
 try {
     $sim6Proc = Start-Process -FilePath $sim -ArgumentList '--fight' -PassThru
     Start-Sleep -Seconds 2
+    $mark6 = Get-LogLength $appLog
     $app6Proc = Start-Process -FilePath $trainer -PassThru
     Start-Sleep -Seconds 12
 
-    $gaveUp = (Test-Path $appLog) -and
-              (Select-String -LiteralPath $appLog -Pattern '已对该窗口停手' -Quiet)
+    $gaveUp = (Read-LogTail $appLog $mark6) -match '已对该窗口停手'
     Write-Host ("认输停手日志命中: " + $gaveUp)
     if ($gaveUp) { $result.Add('PASS  客户端高频抢回全屏时，外部纠正会认输停手（不再横跳）') }
     else { $result.Add('FAIL  高频抢回场景下外部纠正没有停手（仍会来回横跳）') }
@@ -477,19 +506,21 @@ try {
         New-Item -ItemType Directory -Force -Path $ddStubDir | Out-Null
         Copy-Item -LiteralPath $ddStubSrc -Destination $ddStub -Force
 
+        $stage7Start = Get-Date
         $sim7Proc = Start-Process -FilePath $sim -ArgumentList '--load', $ddStub -PassThru
         Start-Sleep -Seconds 7
+        $mark7 = Get-LogLength $appLog
         $app7Proc = Start-Process -FilePath $trainer -PassThru
         Start-Sleep -Seconds 10
 
-        $capHit = (Test-Path $appLog) -and
-                  (Select-String -LiteralPath $appLog -Pattern '采集栈监控: PID=\d+ .*ExdDtDup\.dll' -Quiet)
+        $capHit = (Read-LogTail $appLog $mark7) -match '采集栈监控: PID=\d+ .*ExdDtDup\.dll'
         Write-Host ("采集栈监控命中: " + $capHit)
         if ($capHit) { $result.Add('PASS  常驻监控发现进程加载了 ExdDtDup.dll') }
         else { $result.Add('FAIL  常驻监控没有发现 ExdDtDup.dll 被加载') }
 
         $snapHit = $false
-        foreach ($d in (Get-ChildItem -LiteralPath $DistDir -Directory -Filter 'diag-*-auto' -ErrorAction SilentlyContinue)) {
+        foreach ($d in (Get-ChildItem -LiteralPath $DistDir -Directory -Filter 'diag-*-auto' -ErrorAction SilentlyContinue |
+                        Where-Object { $_.LastWriteTime -ge $stage7Start })) {
             $snap = Join-Path $d.FullName 'snapshot.txt'
             if (-not (Test-Path $snap)) { continue }
             if ((Select-String -LiteralPath $snap -Pattern '== 采集栈快照 ==' -Quiet) -and
@@ -504,6 +535,80 @@ finally {
     if ($sim7Proc -and -not $sim7Proc.HasExited) { Stop-Process -Id $sim7Proc.Id -Force -ErrorAction SilentlyContinue }
     Start-Sleep -Milliseconds 500
     if ($app7Proc -and -not $app7Proc.HasExited) { Stop-Process -Id $app7Proc.Id -Force -ErrorAction SilentlyContinue }
+}
+
+# ---------------------------------------------------------------------------
+# 阶段八：P0"空过程替换"的回归闸门（v0.6.13）
+# 现场证据（2026-10-09）：v0.6.10 把远志的 SetWindowsHookEx 拦成 NULL 时，Yistart.exe 8 毫秒内
+# 退出、守卫 4 秒后拉起，形成十秒级重启循环（电子点名窗口因此立不住）。v0.6.11 改成"用本 DLL 的
+# 空过程顶替、返回合法 HHOOK"。这条修复此前**没有任何本地防线**，本阶段补上。
+# 做法：把模拟目标复制到**路径含 GZYZ** 的目录（命中 IsYuanzhiInstallPath 的子串判据，不需要在
+# 生产代码里开后门），用 --hook 让它像厂商那样自己装钩子、拿 NULL 就自杀。
+# 注意 --hook 是**启动 8 秒后**才装钩子：现场那次是注入之后才装的；启动时立刻装会走系统原生
+# 路径，完全绕开我们的钩子（第一版就是这么写的，实测两边都不命中）。
+# 断言：
+#   16. 日志出现"已用空过程替换远志键盘/鼠标钩子"，且返回的 hhook 非 0
+#   17. 模拟客户端在替换之后仍然存活（旧行为是 8 毫秒内退出 → 本断言会红）
+#      注意模拟目标用 %p 打印句柄（不带 0x 前缀），匹配两种写法才不会被格式坑到
+# 负向验证（人工做一次即可）：把 hooks_input.cpp 的 ReplaceWithPassthrough 暂时改成直接
+# return nullptr，重编后本阶段必须失败——证明这条闸门真的会拦人。
+# ---------------------------------------------------------------------------
+Write-Host ''
+Write-Host '==== 阶段八：P0 空过程替换（客户端自杀回归）===='
+
+$gzyzDir     = Join-Path $env:TEMP 'GZYZ-yzsim'
+$gzyzSim     = Join-Path $gzyzDir 'YZSimTarget.exe'
+$gzyzHookLog = Join-Path $gzyzDir 'sim_log.txt'
+
+$phase8Ini = @(
+    '[General]',
+    'Flags=5',
+    'WindowPercent=60',
+    'LogLevel=3',
+    'AutoInject=1',
+    'InjectMethod=0',
+    'EnableExamGuard=1',
+    'ExternalWindowFix=0',
+    'ProcessNames=Yistart.exe;TEACHCMD.exe;PlayerGUI.exe;ExdPaintHelper.exe;YZSimTarget.exe'
+)
+Set-Content -LiteralPath $iniFile -Value $phase8Ini -Encoding utf8
+
+$sim8Proc = $null
+$app8Proc = $null
+
+try {
+    New-Item -ItemType Directory -Force -Path $gzyzDir | Out-Null
+    if (Test-Path $gzyzHookLog) { Move-Item -LiteralPath $gzyzHookLog -Destination "$gzyzHookLog.bak8-$stamp" -Force }
+    Copy-Item -LiteralPath $sim -Destination $gzyzSim -Force
+
+    # 模拟目标在启动 8 秒后才装钩子（现场那次是注入之后才装的）：先让它起来，再启动主程序
+    # 完成注入，最后等它装钩子并观察是否存活。
+    $sim8Proc = Start-Process -FilePath $gzyzSim -ArgumentList '--hook' -PassThru
+    Start-Sleep -Seconds 4
+    $mark8 = Get-LogLength $appLog
+    $app8Proc = Start-Process -FilePath $trainer -PassThru
+    Start-Sleep -Seconds 14
+
+    $seg8      = Read-LogTail $appLog $mark8
+    $replaced  = $seg8 -match '已用空过程替换远志键盘/鼠标钩子'
+    $legalHook = $seg8 -match '已用空过程替换远志键盘/鼠标钩子.*hhook=0x0*[1-9A-Fa-f]'
+    $simAlive = $sim8Proc -and (-not $sim8Proc.HasExited)
+    $simHookLine = if (Test-Path $gzyzHookLog) {
+        (Get-Content -LiteralPath $gzyzHookLog | Where-Object { $_ -match 'hook-install' } | Select-Object -Last 1)
+    } else { '' }
+    Write-Host ("替换命中: " + $replaced + " ; 合法句柄: " + $legalHook + " ; 客户端存活: " + $simAlive)
+    Write-Host ("模拟客户端钩子日志: " + $simHookLine)
+
+    if ($replaced -and $legalHook) { $result.Add('PASS  远志钩子安装被换成空过程且返回合法 HHOOK') }
+    else { $result.Add('FAIL  没有看到“已用空过程替换…且 hhook 非 0”（退回拦截，客户端会自杀）') }
+
+    if ($simAlive -and $simHookLine -match 'hhook=(?:0x)?0*[1-9A-Fa-f]') { $result.Add('PASS  模拟客户端拿到合法句柄后继续存活（不再十秒一跳）') }
+    else { $result.Add('FAIL  模拟客户端没能存活/没拿到合法句柄——P0 修复被改回去了') }
+}
+finally {
+    if ($sim8Proc -and -not $sim8Proc.HasExited) { Stop-Process -Id $sim8Proc.Id -Force -ErrorAction SilentlyContinue }
+    Start-Sleep -Milliseconds 500
+    if ($app8Proc -and -not $app8Proc.HasExited) { Stop-Process -Id $app8Proc.Id -Force -ErrorAction SilentlyContinue }
 }
 
 Write-Host '==== 测试结果 ===='

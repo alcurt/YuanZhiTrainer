@@ -176,7 +176,6 @@ void ExamTick()
     if (exam && before == 0)
     {
         InterlockedExchange(&yzhook::g_examMode, 1);
-        yzhook::PolicyRestore();
         ApplyEffectiveFlags();
         yzhook::SendLogToHost(YZ_LOG_WARN,
             yz::Format(L"检测到考试/测验模式(%s)，已停用全部功能",
@@ -250,7 +249,6 @@ void SweepTick()
         return;
     yzhook::WindowSweepTick();
     yzhook::InputEnforceTick();
-    yzhook::PolicyEnforce();
 
     /* 主动拔钩的重试（P1.3）：注入通常早于远志加载它自己的钩子 DLL，
        所以要在解锁开启期间按节流反复试，而不是只试一次。考试模式已在上面早退。 */
@@ -433,7 +431,6 @@ void EngineThreadProc()
     yzhook::InputHooksInstall(true);
     yzhook::CaptureHooksInstall(true);
     yzhook::ExecHooksInstall(true);
-    yzhook::PolicyBackup();
     /* 只读自报：本进程的 HKCU 落在哪个 hive（\REGISTRY\USER\S-1-5-18 之类）。
        有了它，现场就不必再靠外部脚本扫 HKU 去猜"策略被写进谁家"（P0 的日志镜像
        会把这一行带回宿主日志/诊断包）。 */
@@ -472,7 +469,6 @@ void EngineThreadProc()
     YZLOGI(L"引擎线程退出，开始还原");
     yzhook::CaptureUnfreeze();
     yzhook::ExecHooksShutdown();
-    yzhook::PolicyRestore();
     if (g_hooksReady)
     {
         yzhook::HookDetachAll();
@@ -637,7 +633,7 @@ namespace
    动机（2026-09-23 复核 P0）：hook DLL 的日志目录是**目标进程**的 %TEMP%，目标以
    SYSTEM 运行时那是 C:\Windows\Temp\YZTrainer\yzt.log，永远进不了宿主导出的诊断包——
    现场只剩 SendLogToHost 显式发的那几行，HookAttach 失败、NativeUnhook 跳过、
-   PolicyBackup/PolicyRestore、hook 组安装失败这些关键证据全部丢失。
+   策略落点自报（PolicyHive）、hook 组安装失败这些关键证据全部丢失。
    安全性：yz::LogWrite 是在离开它自己的临界区之后才回调 sink 的，而 SendLogToHost
    只做"入队 + SetEvent"，不会再写日志，因此不会自激死锁或递归。 */
 void LogSinkToHost(int level, const wchar_t* text, void* /*ctx*/)
