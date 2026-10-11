@@ -64,7 +64,10 @@ std::wstring StateName(DWORD state)
     }
 }
 
-/* 进程保护级别文本（PROTECTION_LEVEL 枚举，见 WinBase.h） */
+/* 进程保护级别文本（PROTECTION_LEVEL 枚举，见 WinBase.h）。
+   注意 level==0 是**合法**的 PROTECTION_LEVEL_WINTCB_LIGHT，不能拿它当"查不到"的哨兵：
+   查询失败必须走 ProtectionTextFor(known=false) 那条路（v0.6.23 修的就是把二者混起来，
+   结果现场最想看的那个抓屏进程被报成"受 PPL 保护"）。 */
 std::wstring ProtectionText(DWORD level)
 {
     switch (level)
@@ -81,6 +84,15 @@ std::wstring ProtectionText(DWORD level)
     case 0x00000008: return L"PPL_APP";
     default:         return yz::Format(L"未知(0x%08X)", level);
     }
+}
+
+/* known=false 表示查询失败（句柄打不开或 API 不可用）：只说"未知"，并保留一句有信息量的提示，
+   不去猜具体级别。level==0 是合法的 WINTCB_LIGHT，所以绝不能用它当"查不到"的哨兵。 */
+std::wstring ProtectionTextFor(bool known, DWORD level)
+{
+    if (known)
+        return ProtectionText(level);
+    return L"未知（查询失败：句柄打不开，常见于 PPL/受保护进程）";
 }
 
 void WriteUtf8File(const std::wstring& path, const std::wstring& text)
@@ -138,6 +150,7 @@ std::wstring ProbeToJson(const ProbeData& data)
         j += yz::Format(L"      \"elevated\": %s,\n", p.elevated ? L"true" : L"false");
         j += yz::Format(L"      \"isYuanzhi\": %s,\n", p.isYuanzhi ? L"true" : L"false");
         j += yz::Format(L"      \"protectionLevel\": \"0x%08X\",\n", p.protectionLevel);
+        j += yz::Format(L"      \"protectionKnown\": %s,\n", p.protectionKnown ? L"true" : L"false");
         j += yz::Format(L"      \"modulesReadable\": %s,\n", p.modulesReadable ? L"true" : L"false");
         j += yz::Format(L"      \"hasCaptureModule\": %s,\n", p.hasCaptureModule ? L"true" : L"false");
         j += L"      \"captureModule\": \"" + JsonEscape(p.captureModuleName) + L"\",\n";
@@ -325,7 +338,7 @@ std::wstring ProbeToMarkdown(const ProbeData& data)
             continue;
         m += yz::Format(L"| %u | %s | %s | %s | %s | %s | %s |\n", p.pid, p.name.c_str(), p.user.c_str(),
                         IntegrityName(p.integrity).c_str(), p.elevated ? L"是" : L"否",
-                        ProtectionText(p.protectionLevel).c_str(), p.path.c_str());
+                        ProtectionTextFor(p.protectionKnown, p.protectionLevel).c_str(), p.path.c_str());
     }
 
     m += L"\n### 远志进程加载的关键模块\n\n";

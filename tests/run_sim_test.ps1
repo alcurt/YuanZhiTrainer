@@ -117,6 +117,13 @@
          整趟数据作废，所以必须钉住。
      39. x64 探针的"全进程采集组件扫描"也命中该 32 位目标（另一处枚举代码）。
 
+    阶段十八（探针的保护级别判读，v0.6.23）断言 2 条：
+     40. 仅因"采集组件扫描"晋级的进程（放在不带远志路径特征的目录里）确实进了
+         "远志相关进程"表——这类进程正是现场最想看的"真正持 DuplicateOutput 的那个"
+     41. 它的"进程保护"列必须是"无/无保护"，**不能**是 `PPL/WinTcbLight`
+         （v0.6.23 修的 bug：级别只在 isYuanzhi 时查，而晋级发生在之后，于是级别留在初值 0，
+         而 0 在枚举里等于 WINTCB_LIGHT，现场会读成"这个抓屏进程受 PPL 保护"）
+
     运行前请关闭其它 YZTrainer 实例（含改名副本）：主程序用全局互斥体防重入，
     别的实例在跑时本脚本启动的那份会静默退出，测试结果会变成假失败。
 
@@ -1418,6 +1425,65 @@ else {
     finally {
         if ($archSim -and -not $archSim.HasExited) { Stop-Process -Id $archSim.Id -Force -ErrorAction SilentlyContinue }
     }
+}
+
+# ---------------------------------------------------------------------------
+# 阶段十八：探针不能把"仅因采集组件晋级的进程"报成受 PPL 保护（v0.6.23 修的 bug）
+# 根因：保护级别原来只在 p.isYuanzhi 为真时查，而"采集组件轻量扫描"（v0.6.12 加的）会在之后
+# 把进程晋级成远志——那类进程正是现场最想看的"真正持 DuplicateOutput 的那个"。
+# 于是级别留在初值 0，而映射表里 0 = "PPL/WinTcbLight"：现场会读成"这个抓屏进程受 PPL 保护"。
+# 做法：把模拟目标放在**不带远志路径特征**的目录里、让它加载改名成 ExdDtDup.dll 的替身
+# （于是它只能靠"采集组件扫描"晋级），再用 **x64** 探针扫一遍，检查那一行的"进程保护"列。
+# 断言：
+#   40. 它确实出现在"远志相关进程"表里（晋级口径仍在——否则这条断言失去意义）
+#   41. 它的"进程保护"列不是 PPL/WinTcbLight，而是"无"/"无保护"（修好的那条）
+# ---------------------------------------------------------------------------
+Write-Host ''
+Write-Host '==== 阶段十八：探针的保护级别判读（仅因采集组件晋级的进程）===='
+
+$nonVendorDir = Join-Path $env:TEMP 'yzt-not-yuanzhi'
+$nonVendorSim = Join-Path $nonVendorDir 'YZSimTarget.exe'
+New-Item -ItemType Directory -Force -Path $nonVendorDir | Out-Null
+New-Item -ItemType Directory -Force -Path $ddStubDir | Out-Null
+Copy-Item -LiteralPath $sim -Destination $nonVendorSim -Force
+Copy-Item -LiteralPath $ddStubSrc -Destination $ddStub -Force
+
+$protOut = Join-Path $env:TEMP 'yzt-probe-prot'
+New-Item -ItemType Directory -Force -Path $protOut | Out-Null
+
+$protSim = $null
+try {
+    $protSim = Start-Process -FilePath $nonVendorSim -ArgumentList '--load', $ddStub -PassThru
+    Start-Sleep -Seconds 6
+    $protProbe = Start-Process -FilePath $probeExe64 -PassThru -WindowStyle Hidden `
+        -ArgumentList '-o', $protOut, '--no-pause'
+    $protProbe.WaitForExit()
+    Start-Sleep -Seconds 1
+
+    $protReport = Get-ChildItem -LiteralPath $protOut -Filter 'YZProbe-report-*.md' -ErrorAction SilentlyContinue |
+                  Sort-Object LastWriteTime | Select-Object -Last 1
+    $protTxt = ''
+    if ($protReport) { $protTxt = Get-Content -LiteralPath $protReport.FullName -Raw }
+    $protRow = ([regex]::Match($protTxt, "\| $($protSim.Id) \| [^\r\n]*")).Value
+
+    $inTable   = ($protRow -ne '')
+    $badLabel  = ($protRow -match 'PPL/WinTcbLight')
+    $goodLabel = ($protRow -match '\| 无 \|') -or ($protRow -match '无保护')
+
+    Write-Host ("该 pid 在远志相关进程表里=" + $inTable + " 行: " + $protRow)
+    if ($inTable) {
+        $result.Add('PASS  仅因采集组件晋级的进程确实进了"远志相关进程"表（晋级口径仍在）')
+    } else {
+        $result.Add('FAIL  仅因采集组件晋级的进程没进表——现场会漏掉真正抓屏的那个进程')
+    }
+    if ($inTable -and -not $badLabel -and $goodLabel) {
+        $result.Add('PASS  该进程的保护级别判读正确（无保护），没有被误报成 PPL/WinTcbLight')
+    } else {
+        $result.Add('FAIL  该进程的保护级别判读错误（现场会误判"抓屏进程受 PPL 保护"）')
+    }
+}
+finally {
+    if ($protSim -and -not $protSim.HasExited) { Stop-Process -Id $protSim.Id -Force -ErrorAction SilentlyContinue }
 }
 
 Write-Host '==== 测试结果 ===='

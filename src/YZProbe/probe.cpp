@@ -89,7 +89,9 @@ const wchar_t* ProtectionLevelText(DWORD level)
 }
 
 /* GetProcessInformation(ProcessProtectionLevelInfo = 7)，Win8.1+，动态解析以兼容旧系统 */
-bool QueryProtectionLevel(DWORD pid, DWORD* outLevel)
+/* 用**已经打开的**句柄查保护级别：CollectProcesses 已经为每个进程开了 QUERY_LIMITED 句柄，
+   这里复用可以避免每进程再多开一次句柄（也顺带解决"必须在晋级成远志之前就查到级别"的问题）。 */
+bool QueryProtectionLevelHandle(HANDLE hp, DWORD* outLevel)
 {
     typedef BOOL (WINAPI *PFN_GetProcessInformation)(HANDLE, int, LPVOID, DWORD);
     static PFN_GetProcessInformation s_fn       = nullptr;
@@ -101,20 +103,25 @@ bool QueryProtectionLevel(DWORD pid, DWORD* outLevel)
         if (k32 != nullptr)
             s_fn = reinterpret_cast<PFN_GetProcessInformation>(GetProcAddress(k32, "GetProcessInformation"));
     }
-    if (s_fn == nullptr)
-        return false;
-
-    HANDLE hp = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
-    if (hp == nullptr)
+    if (s_fn == nullptr || hp == nullptr)
         return false;
 
     DWORD      level = 0;
     const BOOL ok    = s_fn(hp, 7, &level, sizeof(level));
-    CloseHandle(hp);
     if (ok == FALSE)
         return false;
     *outLevel = level;
     return true;
+}
+
+bool QueryProtectionLevel(DWORD pid, DWORD* outLevel)
+{
+    HANDLE hp = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (hp == nullptr)
+        return false;
+    const bool ok = QueryProtectionLevelHandle(hp, outLevel);
+    CloseHandle(hp);
+    return ok;
 }
 
 /* PUBLIC_OBJECT_BASIC_INFORMATION：4 + 4 + 10*4（保留字段）= 56 字节。
@@ -659,6 +666,7 @@ void CollectProcesses(ProbeData& data, bool includeAllModules)
             p.integrity  = 0;
             p.elevated   = false;
             p.protectionLevel = 0;
+            p.protectionKnown = false;
             p.modulesReadable = false;
             p.hasCaptureModule = false;
 
@@ -668,14 +676,16 @@ void CollectProcesses(ProbeData& data, bool includeAllModules)
                 p.user     = yz::GetHandleUser(hp);
                 p.integrity = yz::GetHandleIntegrityRid(hp);
                 yz::IsProcessHandleElevated(hp, &p.elevated);
-                CloseHandle(hp);
-            }
-
-            if (p.isYuanzhi)
-            {
+                /* 保护级别对**每个**进程都查，而且必须在下面"因采集组件晋级成远志"之前查完：
+                   v0.6.23 之前只在 isYuanzhi 时查，晋级发生在之后，于是那类（正是真正持
+                   DuplicateOutput 的）进程级别留在初值 0，被报告成"PPL/WinTcbLight"。 */
                 DWORD level = 0;
-                if (QueryProtectionLevel(p.pid, &level))
+                if (QueryProtectionLevelHandle(hp, &level))
+                {
                     p.protectionLevel = level;
+                    p.protectionKnown = true;
+                }
+                CloseHandle(hp);
             }
 
             /* 决定要不要为这个进程枚举完整模块表：

@@ -25,6 +25,11 @@ struct ProbeProcess
     bool                     elevated;
     bool                     isYuanzhi;
     DWORD                    protectionLevel;   /* PROCESS_PROTECTION_LEVEL_INFORMATION，0xFFFFFFFE=无保护 */
+    /* 保护级别查询是否成功。false 时 protectionLevel 不可信（初值 0 恰好等于枚举里的
+       PROTECTION_LEVEL_WINTCB_LIGHT，直接当级别显示会把"查不到"报成"PPL/WinTcbLight"——
+       v0.6.23 之前就是这么错的：只有 isYuanzhi 的进程才查级别，而"因采集组件晋级"的进程
+       那时还没被标成远志，于是现场最想看的那个抓屏进程被报成受 PPL 保护）。 */
+    bool                     protectionKnown;
     /* 模块枚举是否成功。false 表示模块读不到（受保护/已退出），
        此时报告里的"内存未见 ExdDtDup"是"读不到"，不能当"没加载"用。 */
     bool                     modulesReadable;
