@@ -147,6 +147,11 @@
      另：本机实测 Ctrl+Alt+F9 已被别的程序占用、RegisterHotKey 直接失败（err=1409），
          而老代码静默——v0.6.26 起注册失败会记 WARN（产品改动）。
 
+    阶段二十二（托盘菜单路径，v0.6.27）断言 2 条：
+     50. 托盘菜单能打开防监视（ini 出现防监视位 + 抓帧哈希停住）——v0.6.20 起冻结会把主界面
+         收进托盘，**冻结期间托盘菜单是唯一的图形开关入口**（复选框看不见、热键未必记得住）
+     51. 冻结收起主界面后，托盘"显示主界面"能恢复界面**且不解开冻结**（哈希仍停住）
+
     ── 断言写法约定（血泪换来的，新加阶段请照做）────────────────────────────
     * 日志里的句柄/地址用 %p 打印，**不带 0x 前缀**（"HHOOK=002A0E26"）。凡是要匹配它们，
       一律写成 `(?:0x)?0*[1-9A-Fa-f]`——v0.6.13 阶段八与 v0.6.25 阶段二十各栽过一次。
@@ -1856,6 +1861,132 @@ if ($hwndVisible -ne 0 -and $hwndHidden -eq 0 -and $hwndBack -ne 0) {
     $result.Add('PASS  Ctrl+Alt+F12 的处理器能显示/隐藏主界面（v0.6.26 修的"只显示不隐藏"）')
 } else {
     $result.Add('FAIL  F12 的显示/隐藏没生效（或只有单向）')
+}
+
+# ---------------------------------------------------------------------------
+# 阶段二十二：托盘菜单那条路径（v0.6.27）
+# 为什么补：托盘菜单是 `TrackPopupMenu` 之后由 `WM_COMMAND`（id 3001..3007）分发到 TrayMenuCommand，
+# 而 v0.6.20 起"冻结会把主界面收进托盘"——也就是说**冻结期间托盘菜单是唯一的图形开关入口**
+# （用户既看不到复选框，也不一定记得热键）。这条入口此前没有任何断言。
+# 做法（确定性驱动，不依赖鼠标/托盘图标）：
+#   ① 直接发 WM_COMMAND id=3005（防监视）→ 应当打开冻结：ini 出现防监视位 + 抓帧哈希停住；
+#   ② 冻结会自动把主界面收进托盘（v0.6.20），此时发 WM_COMMAND id=3001（显示主界面）
+#      → 主界面回来，而且**冻结不能被解开**（哈希仍应停住）——这是现场最常见的动作。
+# 断言：
+#   50. 托盘菜单能打开防监视（ini 出现防监视位，抓帧哈希停住）
+#   51. 冻结把主界面收进托盘后，托盘"显示主界面"能恢复界面，且冻结不被解开
+# ---------------------------------------------------------------------------
+Write-Host ''
+Write-Host '==== 阶段二十二：托盘菜单路径 ===='
+
+function Get-CapHashes22([int]$Take) {
+    if (-not (Test-Path -LiteralPath $capFile)) { return @() }
+    $l = Get-Content -LiteralPath $capFile | Select-Object -Last $Take
+    return @($l | ForEach-Object { ($_ -split ',')[1] } | Where-Object { $_ })
+}
+function Get-IniFlags22 {
+    $m = (Get-Content -LiteralPath $iniFile | Select-String '^Flags=')
+    if (-not $m) { return -1 }
+    return [int](($m -join '') -replace '^Flags=', '')
+}
+
+if (-not ('TrayDrive' -as [type])) {
+    $traySrc = @(
+        'using System;',
+        'using System.Runtime.InteropServices;',
+        'public class TrayDrive {',
+        '    [DllImport("user32.dll")] public static extern IntPtr SendMessage(IntPtr h, uint msg, IntPtr wp, IntPtr lp);',
+        '    public static void Menu(IntPtr main, int id) {',
+        '        SendMessage(main, 0x0111 /*WM_COMMAND*/, (IntPtr)id, IntPtr.Zero);',
+        '    }',
+        '}'
+    )
+    Add-Type -TypeDefinition ($traySrc -join "`r`n")
+}
+
+$IDM_TRAY_SHOW    = 3001
+$IDM_TRAY_ANTIMON = 3005
+
+foreach ($f in @($stateFile, $capFile)) {
+    if (Test-Path $f) { Move-Item -LiteralPath $f -Destination "$f.bak22-$stamp" -Force }
+}
+
+$phase22Ini = @(
+    '[General]',
+    'Flags=5',
+    'WindowPercent=60',
+    'LogLevel=3',
+    'AutoInject=1',
+    'InjectMethod=0',
+    'EnableExamGuard=1',
+    'ExternalWindowFix=0',
+    'ProcessNames=Yistart.exe;TEACHCMD.exe;PlayerGUI.exe;ExdPaintHelper.exe;YZSimTarget.exe'
+)
+Set-Content -LiteralPath $iniFile -Value $phase22Ini -Encoding utf8
+
+$sim22Proc = $null
+$app22Proc = $null
+$state22   = ''
+$trayFroze = $false
+$hidByFreeze = $false
+$showBack  = $false
+
+try {
+    $sim22Proc = Start-Process -FilePath $sim -PassThru
+    Start-Sleep -Seconds 3
+    $app22Proc = Start-Process -FilePath $trainer -PassThru
+
+    for ($i = 0; $i -lt 20; $i++) {
+        Start-Sleep -Milliseconds 700
+        $state22 = Get-Content -LiteralPath $stateFile -ErrorAction SilentlyContinue
+        if (($state22 -join ' ') -match 'fullscreen=0') { break }
+    }
+    Start-Sleep -Seconds 2
+
+    $app22Proc.Refresh()
+    $main22 = $app22Proc.MainWindowHandle
+
+    # ① 托盘菜单 → 防监视（打开冻结）
+    [TrayDrive]::Menu([IntPtr]$main22, $IDM_TRAY_ANTIMON)
+    Start-Sleep -Seconds 4
+    $flags22 = Get-IniFlags22
+    $h1 = Get-CapHashes22 6
+    $trayFroze = ($h1.Count -ge 3) -and (@($h1 | Select-Object -Unique).Count -eq 1) -and (($flags22 -band 8) -ne 0)
+
+    # 冻结应当把主界面收进托盘（v0.6.20 的行为）
+    $app22Proc.Refresh()
+    $hidByFreeze = ($app22Proc.MainWindowHandle -eq 0)
+
+    # ② 托盘菜单 → 显示主界面（冻结期间恢复界面）
+    [TrayDrive]::Menu([IntPtr]$main22, $IDM_TRAY_SHOW)
+    Start-Sleep -Seconds 3
+    $app22Proc.Refresh()
+    $hwndAfter22 = $app22Proc.MainWindowHandle
+    $h2 = Get-CapHashes22 6
+    $stillFrozen = ($h2.Count -ge 3) -and (@($h2 | Select-Object -Unique).Count -eq 1)
+    $showBack = ($hwndAfter22 -ne 0) -and $stillFrozen
+
+    # 收尾：关掉冻结
+    [TrayDrive]::Menu([IntPtr]$main22, $IDM_TRAY_ANTIMON)
+    Start-Sleep -Seconds 2
+}
+finally {
+    if ($sim22Proc -and -not $sim22Proc.HasExited) { Stop-Process -Id $sim22Proc.Id -Force -ErrorAction SilentlyContinue }
+    Start-Sleep -Milliseconds 500
+    if ($app22Proc -and -not $app22Proc.HasExited) { Stop-Process -Id $app22Proc.Id -Force -ErrorAction SilentlyContinue }
+}
+
+Write-Host ("托盘防监视生效=" + $trayFroze + "（ini Flags=" + $flags22 + "） 冻结后主界面被收起=" + $hidByFreeze +
+            " 托盘恢复界面且仍冻结=" + $showBack + "（句柄=" + $hwndAfter22 + "）")
+if ($trayFroze) {
+    $result.Add('PASS  托盘菜单能打开防监视（ini 出现防监视位且抓帧哈希停住）')
+} else {
+    $result.Add('FAIL  托盘菜单的防监视没生效（冻结期间用户就没有图形入口了）')
+}
+if ($hidByFreeze -and $showBack) {
+    $result.Add('PASS  冻结收起主界面后，托盘"显示主界面"能恢复界面且不解开冻结')
+} else {
+    $result.Add('FAIL  冻结收起主界面后托盘恢复异常（或恢复界面时把冻结也解开了）')
 }
 
 Write-Host '==== 测试结果 ===='
