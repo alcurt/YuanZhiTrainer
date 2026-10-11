@@ -159,11 +159,14 @@
      54. 三个 `AutoExportOn*` 全关时，阶段期间**不新增** diag-*-auto 目录（关掉就得真关掉，
          不能偷偷往磁盘写）
 
-    阶段二十四（诊断包自带各来源日志，v0.6.29）断言 2 条：
+    阶段二十四（诊断包自带各来源日志，v0.6.29 / v0.6.30）断言 3 条：
      55. 自动导出的诊断包里带 SYSTEM 侧日志（`yzt-sys.log`），且 `snapshot.txt` 的
          "== 日志来源 ==" 列出了 `sys=` —— 现场匆忙时最容易漏的就是"另一处"那份日志
      56. 日志目录里现存的每个 `yzt*.log` / `remote-exec*.log` 都在包里有副本（own 侧一个不漏；
          以前只认 `-1/-2` 两个固定名字，轮转更多次就漏）
+     57. 包自带 `== 打包清单 ==`（每项文件名 + 字节数 + 共几项），现场一眼核对；
+         探针产物也从"只认 report"放宽到 `YZProbe-*.*`，`--watch` 留下的
+         `YZProbe-watch-<时间戳>.log` 现在也进包（前提是探针用 `-o` 指向该目录）
 
     ── 断言写法约定（血泪换来的，新加阶段请照做）────────────────────────────
     * 日志里的句柄/地址用 %p 打印，**不带 0x 前缀**（"HHOOK=002A0E26"）。凡是要匹配它们，
@@ -201,6 +204,19 @@ foreach ($f in @($trainer, $sim)) {
     if (-not (Test-Path $f)) { throw "缺少文件: $f （请先运行 build.ps1）" }
 }
 
+# 开场检查（v0.6.30）：主程序用全局互斥体防重入，**只要有一个残留实例在跑**，本脚本启动的每一份
+# 主程序都会静默退出，整轮测试全变假红（我就是这么白等过一轮）。这里先查一遍，发现就直接报清楚。
+$stray = @(Get-Process -Name YZTrainer -ErrorAction SilentlyContinue)
+if ($stray.Count -gt 0) {
+    $pids = ($stray | ForEach-Object { $_.Id }) -join ','
+    throw ("检测到已有 YZTrainer 在运行（pid=$pids）：请先关掉（含改名副本）再跑本脚本。" +
+           "主程序的全局互斥体会让本脚本启动的那份静默退出，整轮结果都会是假红。")
+}
+$straySim = @(Get-Process -Name YZSimTarget -ErrorAction SilentlyContinue)
+if ($straySim.Count -gt 0) {
+    Write-Warning ("检测到 $($straySim.Count) 个残留的 YZSimTarget：脚本会继续，但它们可能抢走注入/窗口焦点。")
+}
+
 $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
 if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     if ($AllowUnelevated) {
@@ -210,6 +226,7 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
     }
 }
 
+$script:sw = [System.Diagnostics.Stopwatch]::StartNew()
 $stamp     = Get-Date -Format 'yyyyMMdd-HHmmss'
 $stateFile = Join-Path $DistDir 'sim_state.txt'
 $capFile   = Join-Path $DistDir 'sim_capture.csv'
@@ -923,7 +940,7 @@ else {
     $loadProc  = $null
     try {
         $watchProc = Start-Process -FilePath $probeExe -PassThru -WindowStyle Hidden `
-            -ArgumentList '-o', $watchOut, '--watch', '--duration', '26', '--interval', '2', '--no-pause'
+            -ArgumentList '-o', $watchOut, '--watch', '--duration', '14', '--interval', '2', '--no-pause'
         Start-Sleep -Seconds 4
         $loadProc = Start-Process -FilePath $sim -ArgumentList '--load', $ddStub -PassThru
         $watchProc.WaitForExit()
@@ -1606,7 +1623,7 @@ else {
     $load64  = $null
     try {
         $watch64 = Start-Process -FilePath $probeExe64 -PassThru -WindowStyle Hidden `
-            -ArgumentList '-o', $watchOut64, '--watch', '--duration', '22', '--interval', '2', '--no-pause'
+            -ArgumentList '-o', $watchOut64, '--watch', '--duration', '14', '--interval', '2', '--no-pause'
         Start-Sleep -Seconds 4
         $load64 = Start-Process -FilePath $gzyzSim -ArgumentList '--load', $ddStub -PassThru
         $watch64.WaitForExit()
@@ -2165,6 +2182,7 @@ finally {
 
 $sysPacked = $false
 $sysInSnap = $false
+$manifestOk = $false
 $ownMissing = @()
 if ($packDir -and (Test-Path $packDir)) {
     $sysPacked = Test-Path (Join-Path $packDir 'yzt-sys.log')
@@ -2172,6 +2190,9 @@ if ($packDir -and (Test-Path $packDir)) {
     if (Test-Path $snapPath) {
         $snapTxt = Get-Content -LiteralPath $snapPath -Raw
         $sysInSnap = ($snapTxt -match '== 日志来源 ==') -and ($snapTxt -match 'sys=')
+        # v0.6.30：包自带 == 打包清单 ==，现场一眼核对"该带的都带了"
+        $manifestOk = ($snapTxt -match '== 打包清单 ==') -and ($snapTxt -match 'yzt-sys\.log') -and
+                      ($snapTxt -match '共 \d+ 项')
     }
     # own 侧：日志目录里现存的每个 yzt*.log / remote-exec*.log 都应在包里
     $logDir = Join-Path (Join-Path $env:TEMP 'YZTrainer') ''
@@ -2196,8 +2217,14 @@ if ($packDir -and $ownMissing.Count -eq 0) {
 } else {
     $result.Add('FAIL  诊断包漏了本进程的日志：' + ($ownMissing -join ', '))
 }
+if ($manifestOk) {
+    $result.Add('PASS  诊断包自带"== 打包清单 =="（列出每项与字节数，现场可一眼核对）')
+} else {
+    $result.Add('FAIL  诊断包缺少打包清单（现场无法一眼确认该带的都带了）')
+}
 
-Write-Host '==== 测试结果 ===='
+$script:sw.Stop()
+Write-Host ("==== 测试结果（总用时 " + [Math]::Round($script:sw.Elapsed.TotalSeconds, 1) + " 秒）====")
 $result | ForEach-Object { Write-Host $_ }
 $failCount = @($result | Where-Object { $_ -like 'FAIL*' }).Count
 Write-Host ''

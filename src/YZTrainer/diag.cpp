@@ -304,7 +304,10 @@ static bool BuildDiagnostics(const std::wstring& dir, const wchar_t* reason)
 
     /* 上次探针报告 */
     WIN32_FIND_DATAW fd;
-    HANDLE find = FindFirstFileW(yz::JoinPath(g_app.exeDir, L"YZProbe-report-*.*").c_str(), &fd);
+    /* v0.6.30：放宽到 YZProbe-*.*——不只是 report，还有 --watch 落下的
+       YZProbe-watch-<时间戳>.log（现场判"没采到"还是"没在跑"就靠它）。
+       注意：探针要用 -o 指向本目录（工作顺序里就是这么写的），否则收不到。 */
+    HANDLE find = FindFirstFileW(yz::JoinPath(g_app.exeDir, L"YZProbe-*.*").c_str(), &fd);
     if (find != INVALID_HANDLE_VALUE)
     {
         do
@@ -363,6 +366,32 @@ static bool BuildDiagnostics(const std::wstring& dir, const wchar_t* reason)
     snapshot += WindowDump(g_app.targetPid != 0 ? g_app.targetPid : clientPid);
     snapshot += L"\r\n";
     snapshot += ServiceDump();
+
+    /* v0.6.30：把包里已有的东西列成清单，现场一眼就能核对"该带的都带了"。 */
+    {
+        std::wstring manifest = L"== 打包清单 ==\r\n";
+        WIN32_FIND_DATAW fd2;
+        HANDLE find2 = FindFirstFileW(yz::JoinPath(dir, L"*").c_str(), &fd2);
+        int count = 0;
+        if (find2 != INVALID_HANDLE_VALUE)
+        {
+            do
+            {
+                if ((fd2.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0)
+                    continue;
+                if (_wcsicmp(fd2.cFileName, L"snapshot.txt") == 0)
+                    continue;                       /* 清单不把自己算进去 */
+                const ULONGLONG size =
+                    (static_cast<ULONGLONG>(fd2.nFileSizeHigh) << 32) | fd2.nFileSizeLow;
+                manifest += yz::Format(L"  %-28s %llu 字节\r\n", fd2.cFileName, size);
+                ++count;
+            } while (FindNextFileW(find2, &fd2));
+            FindClose(find2);
+        }
+        manifest += yz::Format(L"  （共 %d 项；日志来源见上，各来源日志与探针产物都在这一份里）\r\n\r\n",
+                               count);
+        snapshot = manifest + snapshot;
+    }
 
     WriteTextFile(yz::JoinPath(dir, L"snapshot.txt"), snapshot);
     return true;
