@@ -84,6 +84,16 @@
          ——阶段三只覆盖了进程内假全屏、阶段二只覆盖了跨进程窗口化，这条组合是机房
          "注入不进去"时的兜底手段，此前没有断言。
 
+    阶段十四（身份不足时的判读，v0.6.19）断言 2 条：
+     32. 目标是 SYSTEM、主程序是管理员（高完整性）时，跨进程窗口写会被 UIPI 拒绝：
+         日志出现"外部窗口纠正…失败"（不静默失败），且目标仍是 fullscreen=1
+     33. 换成 YZSysRun 以 SYSTEM 启动主程序后，同一操作**成功**：目标状态由 fullscreen=1
+         变成 fullscreen=0，且"外部窗口纠正: 0x… -> x,y wxh"出现在**两份日志之一**
+         （SYSTEM 主程序的日志在 `C:\Windows\Temp\YZTrainer\yzt.log`，不在学生账户那份里
+         ——本轮实测确认，两条通道都查）
+         ——这两条就是 09-23 误判 / 09-29 判决的本地复现：0x5 是 UIPI 一致性检查，
+         不是"驱动剥夺"，同级完整性就放行。
+
     运行前请关闭其它 YZTrainer 实例（含改名副本）：主程序用全局互斥体防重入，
     别的实例在跑时本脚本启动的那份会静默退出，测试结果会变成假失败。
 
@@ -1032,6 +1042,123 @@ if ($fake13 -and $state13 -match 'style=0x([0-9A-Fa-f]{8})') {
     else { $result.Add('FAIL  跨进程假全屏下被加了标题栏') }
 } else {
     $result.Add('FAIL  免注入假全屏没成立，无法判断标题栏（见上一条）')
+}
+# ---------------------------------------------------------------------------
+# 阶段十四：身份不足时的判读（v0.6.19）
+# 本项目历史上最费时间的坑：09-23 把跨进程窗口写的 err=0x5 误判成"内核驱动剥夺句柄权限"，
+# 于是"换身份也没用"的结论被写进文档，两个 session 白跑；09-29 用 YZSysRun 换成 SYSTEM 后
+# 同一台机器、同一个客户端立刻成功——0x5 其实是 UIPI 的一致性检查。
+# 现在本地把两种身份并排复现（目标一律用 YZSysRun 起成 SYSTEM）：
+#   阶段 A：主程序用当前的管理员令牌 → 写 SYSTEM 窗口必须被拒，且**不静默**（winfix 记 WARN）
+#   阶段 B：主程序也用 YZSysRun 起成 SYSTEM → 同一操作成功
+# 断言：
+#   32. A 里日志有"外部窗口纠正…失败"，目标仍是 fullscreen=1（确实没改成）
+#   33. B 里日志有"外部窗口纠正: 0x… -> …"且目标变成 fullscreen=0
+# ---------------------------------------------------------------------------
+Write-Host ''
+Write-Host '==== 阶段十四：身份不足时的判读（UIPI 与 SYSTEM 对照）===='
+
+$identDir   = Join-Path $env:TEMP 'GZYZ-yzsim'
+$identSim   = Join-Path $identDir 'YZSimTarget.exe'
+$identState = Join-Path $identDir 'sim_state.txt'
+$sysrunExe2 = Join-Path $DistDir 'YZSysRun.exe'
+
+if (-not (Test-Path $sysrunExe2)) {
+    $result.Add('WARN  找不到 YZSysRun.exe，跳过阶段十四')
+}
+else {
+    New-Item -ItemType Directory -Force -Path $identDir | Out-Null
+    Copy-Item -LiteralPath $sim -Destination $identSim -Force
+
+    $identIni = @(
+        '[General]',
+        'Flags=5',
+        'WindowPercent=60',
+        'LogLevel=3',
+        'AutoInject=0',
+        'InjectMethod=0',
+        'EnableExamGuard=1',
+        'ExternalWindowFix=1',
+        'ProcessNames=Yistart.exe;TEACHCMD.exe;PlayerGUI.exe;ExdPaintHelper.exe;YZSimTarget.exe'
+    )
+    Set-Content -LiteralPath $iniFile -Value $identIni -Encoding utf8
+
+    # 只杀"本轮新增"的目标/主程序进程，避免误伤别的实例
+    function Get-NewPids([string]$Name, [datetime]$Since) {
+        return @(Get-Process -Name $Name -ErrorAction SilentlyContinue |
+                 Where-Object { $_.StartTime -ge $Since } | Select-Object -ExpandProperty Id)
+    }
+    function Stop-NewPids([string]$Name, [datetime]$Since) {
+        foreach ($id in (Get-NewPids $Name $Since)) {
+            Stop-Process -Id $id -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    # ---- 阶段 A：目标 SYSTEM + 主程序管理员 ----
+    $tA = Get-Date
+    $srSimA = Start-Process -FilePath $sysrunExe2 -PassThru -WindowStyle Hidden `
+        -ArgumentList '--log', (Join-Path $identDir 'sysrun-sim-a.txt'), '--', $identSim
+    Start-Sleep -Seconds 4
+    if (Test-Path -LiteralPath $identState) { Move-Item -LiteralPath $identState -Destination "$identState.bak14a-$stamp" -Force }
+    $mark14a = Get-LogLength $appLog
+    $appA = Start-Process -FilePath $trainer -PassThru
+    Start-Sleep -Seconds 12
+    $seg14a = Read-LogTail $appLog $mark14a
+    $stateA = Get-Content -LiteralPath $identState -ErrorAction SilentlyContinue
+    Stop-Process -Id $appA.Id -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Milliseconds 800
+    Stop-NewPids 'YZSimTarget' $tA
+    Stop-Process -Id $srSimA.Id -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Milliseconds 800
+
+    $deniedA = $seg14a -match '外部窗口纠正[^\r\n]*失败'
+    $fullA   = ($stateA -join ' ') -match 'fullscreen=1'
+    Write-Host ("A 身份不足: 记了写失败 WARN=" + $deniedA + " 目标仍全屏=" + $fullA)
+    if ($deniedA -and $fullA) {
+        $result.Add('PASS  身份不足时跨进程窗口写被 UIPI 拒绝且不静默（记 WARN，窗口仍全屏）')
+    } else {
+        $result.Add('FAIL  身份不足时的行为不对（要么没记 WARN，要么竟然改成功了）')
+    }
+
+    # ---- 阶段 B：目标 SYSTEM + 主程序 SYSTEM ----
+    # 注意：YZSysRun 起的**主程序**日志写在 SYSTEM 的 %TEMP%
+    # （`C:\Windows\Temp\YZTrainer\yzt.log`），不在学生账户那份里——本轮实测确认。
+    # 所以这里两份都看，并且都按"本阶段新增的行"匹配。
+    $sysLogPath = Join-Path $env:SystemRoot 'Temp\YZTrainer\yzt.log'
+    $tB = Get-Date
+    $srSimB = Start-Process -FilePath $sysrunExe2 -PassThru -WindowStyle Hidden `
+        -ArgumentList '--log', (Join-Path $identDir 'sysrun-sim-b.txt'), '--', $identSim
+    Start-Sleep -Seconds 4
+    if (Test-Path -LiteralPath $identState) { Move-Item -LiteralPath $identState -Destination "$identState.bak14b-$stamp" -Force }
+    $mark14b    = Get-LogLength $appLog
+    $markSysB   = Get-LogLength $sysLogPath
+    $srAppB = Start-Process -FilePath $sysrunExe2 -PassThru -WindowStyle Hidden `
+        -ArgumentList '--log', (Join-Path $identDir 'sysrun-app-b.txt'), '--', $trainer
+    Start-Sleep -Seconds 16
+    $seg14b = Read-LogTail $appLog $mark14b
+    $segSysB = Read-LogTail $sysLogPath $markSysB
+    $stateB = Get-Content -LiteralPath $identState -ErrorAction SilentlyContinue
+
+    $fixedB = ($seg14b -match '外部窗口纠正: 0x') -or ($segSysB -match '外部窗口纠正: 0x')
+    $windowizedB = ($stateB -join ' ') -match 'fullscreen=0'
+    $wasFullA    = ($stateA -join ' ') -match 'fullscreen=1'
+    Write-Host ("B 同级 SYSTEM: 外部纠正成功=" + $fixedB + " 目标已窗口化=" + $windowizedB +
+                "（阶段 A 当时仍全屏=" + $wasFullA + "）")
+    Write-Host ("  B 目标状态: " + ($stateB -join ' '))
+    Write-Host ("  SYSTEM 侧日志: " + $sysLogPath + " 新增 " + ($segSysB.Length) + " 字符")
+    if ($fixedB -and $windowizedB -and $wasFullA) {
+        $result.Add('PASS  换成 SYSTEM 主程序后跨进程窗口写成功（0x5 是 UIPI，不是驱动剥夺）')
+    } else {
+        $result.Add('FAIL  换成 SYSTEM 后仍然没成功——与 09-29 判决不符，需要人工复核')
+    }
+
+    # 清理：主程序是 SYSTEM，管理员令牌能杀；YZSysRun 自己等到子进程退出才返回
+    Stop-NewPids 'YZTrainer' $tB
+    Start-Sleep -Milliseconds 500
+    Stop-NewPids 'YZSimTarget' $tB
+    Start-Sleep -Milliseconds 500
+    Stop-Process -Id $srAppB.Id -Force -ErrorAction SilentlyContinue
+    Stop-Process -Id $srSimB.Id -Force -ErrorAction SilentlyContinue
 }
 Write-Host '==== 测试结果 ===='
 $result | ForEach-Object { Write-Host $_ }

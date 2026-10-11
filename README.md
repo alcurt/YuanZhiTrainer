@@ -1,6 +1,6 @@
 # YZTrainer
 
-> **v0.6.18** · 一款**远志多媒体教学管理软件 V9.0 网管版学生端**的解控软件 · 仅供**教育研究**与**技术学习**，禁止任何非法用途 · 与厂商无关联，使用者自行承担全部后果。
+> **v0.6.19** · 一款**远志多媒体教学管理软件 V9.0 网管版学生端**的解控软件 · 仅供**教育研究**与**技术学习**，禁止任何非法用途 · 与厂商无关联，使用者自行承担全部后果。
 
 > **部署硬要求（2026-09-29 机房实测）**：学生端以 SYSTEM 运行，而本程序默认是管理员（高完整性）。
 > 两者差一级完整性，`VirtualAllocEx` 注入、`SetWindowsHookEx` 消息钩子、跨进程改窗口**三样都会被 UIPI 挡住**
@@ -43,7 +43,7 @@ YZTrainer/
   src/YZUnhookTest/         免注入拔钩验证工具（本进程加载远志 DLL 调其导出，不注入）
   src/YZSysRun/             以 SYSTEM 身份运行指定程序的启动器（复制当前会话 winlogon 令牌，不装服务）
   third_party/minhook/      MinHook（BSD-2-Clause，已内置源码）
-  tests/run_sim_test.ps1    本地自动回归脚本（十三阶段 31 项断言，需要管理员权限），
+  tests/run_sim_test.ps1    本地自动回归脚本（十四阶段 33 项断言，需要管理员权限），
                             阶段八是 P0"空过程替换"的回归闸门（v0.6.13，含负向 A/B 验证，
                             v0.6.15 起还覆盖 hMod=NULL 的线程内钩子），
                             阶段九看消息层钩子开关（v0.6.14），
@@ -95,7 +95,7 @@ pwsh -File build.ps1 -Both
 
 ## 建议的使用流程
 
-1. **本地先跑通**：管理员 PowerShell 执行 `pwsh -File tests\run_sim_test.ps1`，确认十三个阶段共 **31 项断言**全通过——阶段一（注入路径）6 项：全屏置顶 / 窗口化 / 带 WS_CAPTION / 冻结画面 / 不受保护的目标仍走远程线程注入（v0.6.14）/ 注入预检没有误判（v0.6.14）；阶段二（免注入路径）3 项；阶段三（假全屏）2 项；阶段四（远程执行审计）2 项；阶段五（主动拔钩的晚加载重试，v0.6.3）1 项：`YZSimTarget --load` 在注入之后才加载一个名叫 `ExdHooks.dll` 的替身 DLL，日志里必须出现"NativeUnhook: 目标模块 ExdHooks.dll 已加载，开始尝试"；阶段六（反横跳闸门，v0.6.6）1 项：`YZSimTarget --fight` 每 200ms 抢回无边框全屏（复现机房"全屏↔窗口横跳"），外部纠正必须在几次短间隔抢回后**认输停手**（日志出现"已对该窗口停手"）；阶段七（采集栈监控，v0.6.12）2 项：某进程加载 `ExdDtDup.dll` 时日志必须出现"采集栈监控: PID=… 出现采集组件 ExdDtDup.dll"，且自动导出的诊断包 `snapshot.txt` 里含"== 采集栈快照 =="与该命中；阶段八（P0 空过程替换，v0.6.13）2 项：把模拟目标复制到**路径含 `GZYZ`** 的目录里（命中 `IsYuanzhiInstallPath` 的子串判据，不需要在生产代码里开后门）并用 `--hook` 让它像厂商那样"自己装钩子、拿 `NULL` 就自杀"，此时日志必须出现 `已用空过程替换远志键盘/鼠标钩子… hhook=0x非零`，且该进程**仍然存活**；阶段九（消息层钩子开关，v0.6.14）2 项：`BlockMessageHooks=1` 时键盘与消息层两类钩子都被换成空过程，`=0` 时只放行消息层、键盘钩子照旧被换掉；阶段十（探针 `--watch`，v0.6.15）2 项：常驻探针 + 某进程加载改名成 `ExdDtDup.dll` 的替身 → 必须落一份 `-watch-capture` 报告且内容命中，并按 `--duration` 正常退出（watch 日志有"watch 结束：共落盘 N 份报告"）；阶段八第二段（v0.6.15）2 项：`--hook-thread`（`hMod=NULL`）的线程内钩子同样被换成空过程且客户端存活；阶段十一（考试熔断，v0.6.16）2 项：`YZSimTarget --exam` 造出标题含"考试"的可见窗口时，若 `EnableExamGuard=1` 必须熔断且功能真的停（状态仍 `fullscreen=1`），对照组 `=0` 时钩子侧记录"考试模式检测已按配置关闭"且功能恢复；阶段十二（`YZSysRun` 令牌自检，v0.6.17）2 项：它自报的令牌必须是 `NT AUTHORITY\SYSTEM`/系统完整性，且子进程留在当前交互会话；阶段十三（免注入假全屏，v0.6.18）2 项：`AutoInject=0` + `ExternalWindowFix=1` + `Flags=36` 时，跨进程纠正也要做出假全屏（状态 `fullscreen=1` 且 `topmost=0`、日志有"外部窗口纠正(假全屏)"），且不给窗口加标题栏；阶段十一（考试熔断，v0.6.16）2 项：`YZSimTarget --exam` 造出标题含"考试"的可见窗口（进程在远志路径下）时，必须熔断且功能真的停（窗口不被窗口化、状态仍是 fullscreen=1），对照组 `EnableExamGuard=0` 时钩子侧记录"考试模式检测已按配置关闭"且功能恢复。
+1. **本地先跑通**：管理员 PowerShell 执行 `pwsh -File tests\run_sim_test.ps1`，确认十四个阶段共 **33 项断言**全通过——阶段一（注入路径）6 项：全屏置顶 / 窗口化 / 带 WS_CAPTION / 冻结画面 / 不受保护的目标仍走远程线程注入（v0.6.14）/ 注入预检没有误判（v0.6.14）；阶段二（免注入路径）3 项；阶段三（假全屏）2 项；阶段四（远程执行审计）2 项；阶段五（主动拔钩的晚加载重试，v0.6.3）1 项：`YZSimTarget --load` 在注入之后才加载一个名叫 `ExdHooks.dll` 的替身 DLL，日志里必须出现"NativeUnhook: 目标模块 ExdHooks.dll 已加载，开始尝试"；阶段六（反横跳闸门，v0.6.6）1 项：`YZSimTarget --fight` 每 200ms 抢回无边框全屏（复现机房"全屏↔窗口横跳"），外部纠正必须在几次短间隔抢回后**认输停手**（日志出现"已对该窗口停手"）；阶段七（采集栈监控，v0.6.12）2 项：某进程加载 `ExdDtDup.dll` 时日志必须出现"采集栈监控: PID=… 出现采集组件 ExdDtDup.dll"，且自动导出的诊断包 `snapshot.txt` 里含"== 采集栈快照 =="与该命中；阶段八（P0 空过程替换，v0.6.13）2 项：把模拟目标复制到**路径含 `GZYZ`** 的目录里（命中 `IsYuanzhiInstallPath` 的子串判据，不需要在生产代码里开后门）并用 `--hook` 让它像厂商那样"自己装钩子、拿 `NULL` 就自杀"，此时日志必须出现 `已用空过程替换远志键盘/鼠标钩子… hhook=0x非零`，且该进程**仍然存活**；阶段九（消息层钩子开关，v0.6.14）2 项：`BlockMessageHooks=1` 时键盘与消息层两类钩子都被换成空过程，`=0` 时只放行消息层、键盘钩子照旧被换掉；阶段十（探针 `--watch`，v0.6.15）2 项：常驻探针 + 某进程加载改名成 `ExdDtDup.dll` 的替身 → 必须落一份 `-watch-capture` 报告且内容命中，并按 `--duration` 正常退出（watch 日志有"watch 结束：共落盘 N 份报告"）；阶段八第二段（v0.6.15）2 项：`--hook-thread`（`hMod=NULL`）的线程内钩子同样被换成空过程且客户端存活；阶段十一（考试熔断，v0.6.16）2 项：`YZSimTarget --exam` 造出标题含"考试"的可见窗口时，若 `EnableExamGuard=1` 必须熔断且功能真的停（状态仍 `fullscreen=1`），对照组 `=0` 时钩子侧记录"考试模式检测已按配置关闭"且功能恢复；阶段十二（`YZSysRun` 令牌自检，v0.6.17）2 项：它自报的令牌必须是 `NT AUTHORITY\SYSTEM`/系统完整性，且子进程留在当前交互会话；阶段十三（免注入假全屏，v0.6.18）2 项：`AutoInject=0` + `ExternalWindowFix=1` + `Flags=36` 时，跨进程纠正也要做出假全屏（状态 `fullscreen=1` 且 `topmost=0`、日志有"外部窗口纠正(假全屏)"），且不给窗口加标题栏；阶段十四（身份不足时的判读，v0.6.19）2 项：目标是 SYSTEM、主程序是管理员时，跨进程窗口写必须被 UIPI 拒绝且**不静默**（记 WARN、窗口仍全屏）；换成 `YZSysRun` 以 SYSTEM 启动主程序后同一操作成功（状态由 `fullscreen=1` 变 `fullscreen=0`）——这就是 09-23 误判 / 09-29 判决的本地对照；阶段十一（考试熔断，v0.6.16）2 项：`YZSimTarget --exam` 造出标题含"考试"的可见窗口（进程在远志路径下）时，必须熔断且功能真的停（窗口不被窗口化、状态仍是 fullscreen=1），对照组 `EnableExamGuard=0` 时钩子侧记录"考试模式检测已按配置关闭"且功能恢复。
 2. **机房侦察（先跑探针）**：把 `YZProbe.exe`（x64 版本信息最全）拷到机房机器，右键以管理员运行，生成 `YZProbe-report-*.json/.md`。重点看：
    * “远志相关进程”里哪个进程加载了 `Rmdesk.ads` / `PlayerGUI.dll` / `ExdHooks.dll`；
    * 远志模块导出表里 `KillHook` / `UnSetExdHooks` / `UnSetExdHooks2` 是否存在（与本地版本比对，决定主动拔钩可用性）；
@@ -160,7 +160,7 @@ BlockMessageHooks=1; 是否也把远志的 WH_GETMESSAGE/WH_CALLWNDPROC 换成�
 ProcessNames=Yistart.exe;TEACHCMD.exe;PlayerGUI.exe;ExdPaintHelper.exe
 ```
 
-日志：`%TEMP%\YZTrainer\yzt.log`（超过 2MB 自动换用 `yzt-1.log`，不删除旧文件）；远程执行审计单独写在同目录 `remote-exec.log`。
+日志：`%TEMP%\YZTrainer\yzt.log`（超过 2MB 自动换用 `yzt-1.log`，不删除旧文件）；远程执行审计单独写在同目录 `remote-exec.log`。**注意有第二份**：用 `YZSysRun` 以 SYSTEM 启动的主程序，它的日志写在 **SYSTEM 的 `%TEMP%`**，即 `C:\Windows\Temp\YZTrainer\yzt.log`（v0.6.19 实测确认）——现场手工捞日志时要两份都拿，或直接拿主程序自己导出的诊断包（它只包含自己那一份，不会混）。
 **v0.6.3 起 Hook DLL 的日志会镜像回主程序**：此前 hook DLL 写的是**目标进程**的日志目录（目标以 SYSTEM 运行时是 `C:\Windows\Temp\YZTrainer\`），那些行永远进不了宿主导出的诊断包——现场只剩显式转发的那几行，`HookAttach` 失败、主动拔钩跳过、策略备份这类关键证据会全部丢失。现在引擎注册了 `yz::LogSetSink`，目标进程里每一条 `YZLOG*` 都随管道回到宿主日志（形如 `[Hook pid=…] [时间][TID][YZHook][INF] …`）。注意：**注入没成功时没有这层镜像**，那种情况下仍然是"日志断链"的状态。
 
 ## 实现要点
@@ -445,6 +445,29 @@ README 明确写了它同样支持假全屏，但此前一条断言都没有。
 采集层（GDI 冻结 + 采集栈监控 + 探针 `--watch`）、审计与卸载、以及身份相关的三条
 （注入预检、考试熔断、`YZSysRun` 令牌会话）全部有断言守着；没被断言的只剩 `LogLevel`、
 日志滚动、`AutoExportOn*` 置 0 这类低价值项。
+
+### 2026-10-11（第八轮）v0.6.19：身份不足时的判读进回归（31 → 33 项）
+
+这是本项目历史上**最费时间的坑**：09-23 把跨进程窗口写的 `err=0x5` 判成"内核驱动剥夺句柄权限"，
+于是"换身份也没用"的结论被写进交接文档，后续 session 白跑；09-29 用 `YZSysRun` 换成 SYSTEM 后，
+同一台机器、同一个客户端立刻成功——`0x5` 其实是 **UIPI 的一致性检查**。现在本地把两种身份
+并排复现（目标一律用 `YZSysRun` 起成 SYSTEM，放进路径含 `GZYZ` 的目录，配置固定为
+`Flags=5 + AutoInject=0 + ExternalWindowFix=1`，只走跨进程纠正）：
+
+* 断言 32：主程序是管理员（高完整性）时，写 SYSTEM 窗口**被拒且不静默**（记 WARN），
+  目标仍是 `fullscreen=1`；
+* 断言 33：主程序也换成 SYSTEM 后**成功**（状态由 `fullscreen=1` 变成 `fullscreen=0`，
+  日志出现 `外部窗口纠正: 0x… -> x,y wxh`）。
+
+**本轮实测的副产品（已补进本 README 的日志章节与 `工作顺序.txt`）**：阶段 B 第一次跑时断言红了，
+但目标状态文件明明显示 `fullscreen=0`——功能是成功的，只是那几行日志不在我们读的文件里。
+查证：**用 `YZSysRun` 以 SYSTEM 启动的主程序，日志写在 SYSTEM 的 `%TEMP%`**，即
+`C:\Windows\Temp\YZTrainer\yzt.log`，而不是学生账户的 temp。这正是"必须用 YZSysRun 启动"
+之后一直在用的路径，此前**没有任何文档写过**——现场手工捞 `yzt.log` 很容易捞到
+"非 SYSTEM 那一次"。修法是阶段十四同时读两份日志（各自按本阶段新增的行匹配）。
+
+实测：第一次 32 PASS/1 FAIL（红的正是日志通道），修好口径后 **33 PASS/0 FAIL**
+（`sim-test-v0619.log`）。
 
 ## 免责声明与使用边界
 
