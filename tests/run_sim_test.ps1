@@ -69,6 +69,14 @@
          注意：注入到配置到达之间约 1 秒内，钩子侧仍是 fail-closed 的默认守护开，
          那一段里本来就会有一条熔断日志（设计行为，不是 bug）。
 
+    阶段十二（YZSysRun 令牌复制自检，v0.6.17）断言 2 条：
+     28. YZSysRun 能把子进程以 SYSTEM 起起来（它自己写的 txt 里有
+         "NT AUTHORITY\SYSTEM … 16384"）
+     29. 子进程留在**当前交互会话**且是系统完整性（"已启动 … 会话=<当前会话> … 16384"）
+         ——会话错到 Session 0 的话，现场探针/窗口枚举全部失真，这条专门防它。
+         它是现场部署的强制启动路径（学生端跑 SYSTEM，主程序必须同级完整性），
+         此前没有任何断言覆盖。
+
     运行前请关闭其它 YZTrainer 实例（含改名副本）：主程序用全局互斥体防重入，
     别的实例在跑时本脚本启动的那份会静默退出，测试结果会变成假失败。
 
@@ -896,6 +904,58 @@ if ($guardOff -and $windowizedOff) {
     $result.Add('PASS  对照组 EnableExamGuard=0：守护位确实关闭了检测，功能恢复（窗口化生效）')
 } else {
     $result.Add('FAIL  对照组行为不对（考试守护位没有正确下发/生效）')
+}
+# ---------------------------------------------------------------------------
+# 阶段十二：YZSysRun 令牌复制自检（v0.6.17）
+# 为什么值得单独钉住：现场部署的**强制启动路径**就是 `YZSysRun.exe -- YZTrainer.exe`
+# （学生端以 SYSTEM 运行，主程序必须同级完整性，否则注入、消息钩子、跨进程窗口写全被 UIPI
+# 挡下）。这个工具此前一条断言都没有，而它的两种坏法都很致命：
+#   ① winlogon 令牌复制失败 → 子进程根本不是 SYSTEM，现场白跑；
+#   ② 子进程落到 Session 0 → 探针看不到窗口、挂不上消息队列，数据全部失真。
+# 做法：用它起一个 cmd.exe 子进程，并让它把输出写进指定的 txt，然后只匹配 ASCII 片段与数字
+# （与输出文件的编码无关）。
+# ---------------------------------------------------------------------------
+Write-Host ''
+Write-Host '==== 阶段十二：YZSysRun 令牌复制自检 ===='
+
+$sysrunExe = Join-Path $DistDir 'YZSysRun.exe'
+if (-not (Test-Path $sysrunExe)) {
+    $result.Add('WARN  找不到 YZSysRun.exe，跳过阶段十二')
+}
+else {
+    $sysrunDir = Join-Path $env:TEMP 'yzt-sysrun-regress'
+    New-Item -ItemType Directory -Force -Path $sysrunDir | Out-Null
+    $sysrunLog = Join-Path $sysrunDir 'sysrun.txt'
+    if (Test-Path -LiteralPath $sysrunLog) { Move-Item -LiteralPath $sysrunLog -Destination "$sysrunLog.bak12-$stamp" -Force }
+
+    try {
+        $sr = Start-Process -FilePath $sysrunExe -PassThru -Wait `
+            -ArgumentList '--log', $sysrunLog, '--', 'cmd.exe', '/c', 'echo yzt-sysrun-ok'
+        Write-Host ("YZSysRun 退出码: " + $sr.ExitCode)
+    }
+    catch {
+        Write-Host ("YZSysRun 启动失败: " + $_.Exception.Message)
+    }
+
+    $txt = ''
+    if (Test-Path -LiteralPath $sysrunLog) { $txt = Get-Content -LiteralPath $sysrunLog -Raw }
+    $mySession = (Get-Process -Id $PID).SessionId
+
+    $tokenOk = $txt -match 'NT AUTHORITY\\SYSTEM[\s\S]{1,80}16384'
+    Write-Host ("令牌复制为 SYSTEM: " + $tokenOk)
+    if ($tokenOk) { $result.Add('PASS  YZSysRun 复制的令牌是 NT AUTHORITY\SYSTEM（系统完整性）') }
+    else { $result.Add('FAIL  YZSysRun 没有自报 SYSTEM 令牌（现场强制启动路径会失效）') }
+
+    $childSession = -1
+    $m = [regex]::Match($txt, '已启动[^\r\n]*会话=(\d+)')
+    if ($m.Success) { $childSession = [int]$m.Groups[1].Value }
+    $childSys = $txt -match '已启动[^\r\n]*16384'
+    Write-Host ("子进程会话=" + $childSession + "（当前会话=" + $mySession + "）系统完整性=" + $childSys)
+    if ($childSession -eq $mySession -and $childSys) {
+        $result.Add('PASS  YZSysRun 的子进程留在当前交互会话且为系统完整性')
+    } else {
+        $result.Add('FAIL  YZSysRun 的子进程会话或完整性不对（Session 0 会让现场数据全部失真）')
+    }
 }
 Write-Host '==== 测试结果 ===='
 $result | ForEach-Object { Write-Host $_ }
