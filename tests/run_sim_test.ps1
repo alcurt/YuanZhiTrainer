@@ -59,6 +59,16 @@
      25. 探针按 --duration 正常退出（watch 日志里有"watch 结束：共落盘 N 份报告"）
          ——现场"教师监视时谁在抓屏"的主力采集器就是它（阶段七只覆盖了主程序那一半）。
 
+    阶段十一（考试/测验强信号熔断，v0.6.16）断言 2 条：
+     26. 强信号命中（YZSimTarget --exam 造一个标题含"考试"的窗口、且进程在远志路径下）时
+         必须立刻熔断：日志出现"检测到考试/测验模式"，并且功能**真的停了**
+         ——模拟目标的广播窗口不会被窗口化（状态文件仍是 fullscreen=1）
+     27. 对照组：EnableExamGuard=0 时钩子侧必须记录"考试模式检测已按配置关闭"，
+         且功能恢复（窗口化照常生效，fullscreen=0）。这条同时守住"考试守护位"这条控制位
+         下发链——v0.6.13/v0.6.14 两个 bug 都出在同类链上，而考试守护是项目的硬边界。
+         注意：注入到配置到达之间约 1 秒内，钩子侧仍是 fail-closed 的默认守护开，
+         那一段里本来就会有一条熔断日志（设计行为，不是 bug）。
+
     运行前请关闭其它 YZTrainer 实例（含改名副本）：主程序用全局互斥体防重入，
     别的实例在跑时本脚本启动的那份会静默退出，测试结果会变成假失败。
 
@@ -801,6 +811,91 @@ else {
     } else {
         $result.Add('FAIL  探针 --watch 没有正常退出（watch 日志缺少结束行）')
     }
+}
+# ---------------------------------------------------------------------------
+# 阶段十一：考试/测验强信号熔断（v0.6.16，项目硬边界）
+# 为什么单独钉住：AGENTS 写明"考试/测验强信号命中即全功能停用"，而 v0.6.13/v0.6.14 连着两个
+# bug 都出在"控制位下发"这条链上（控制位被功能位掩码剔除、ini 读值顺序反了）——考试守护位走的
+# 正是同一条链。现有断言里没有任何一条覆盖熔断，所以它一旦失效不会被发现。
+# 做法：把模拟目标放进路径含 GZYZ 的目录（强信号 3 要求窗口所属进程在远志路径下）并用 --exam
+# 造一个标题含"考试"的可见窗口；主程序正常注入（Flags=5，窗口化打开）。
+# 断言：
+#   26. EnableExamGuard=1（默认）：日志出现"检测到考试/测验模式"，且广播窗口**没有**被窗口化
+#       （GZYZ 目标的状态文件仍是 fullscreen=1 —— 光有日志不够，必须看到功能真的停了）
+#   27. EnableExamGuard=0（对照）：同一场景不熔断，窗口化照常生效（fullscreen=0）
+# ---------------------------------------------------------------------------
+Write-Host ''
+Write-Host '==== 阶段十一：考试/测验强信号熔断 ===='
+
+$examDir = Join-Path $env:TEMP 'GZYZ-yzsim'
+$examSim = Join-Path $examDir 'YZSimTarget.exe'
+$examState = Join-Path $examDir 'sim_state.txt'
+New-Item -ItemType Directory -Force -Path $examDir | Out-Null
+Copy-Item -LiteralPath $sim -Destination $examSim -Force
+
+function Invoke-ExamPhase([int]$Guard) {
+    $ini = @(
+        '[General]',
+        'Flags=5',
+        'WindowPercent=60',
+        'LogLevel=3',
+        'AutoInject=1',
+        'InjectMethod=0',
+        "EnableExamGuard=$Guard",
+        'ExternalWindowFix=0',
+        'ProcessNames=Yistart.exe;TEACHCMD.exe;PlayerGUI.exe;ExdPaintHelper.exe;YZSimTarget.exe'
+    )
+    Set-Content -LiteralPath $iniFile -Value $ini -Encoding utf8
+
+    if (Test-Path -LiteralPath $examState) {
+        Move-Item -LiteralPath $examState -Destination "$examState.bak11-$stamp" -Force
+    }
+
+    $s = $null
+    $a = $null
+    try {
+        $s = Start-Process -FilePath $examSim -ArgumentList '--exam' -PassThru
+        Start-Sleep -Seconds 3
+        $mark = Get-LogLength $appLog
+        $a = Start-Process -FilePath $trainer -PassThru
+        Start-Sleep -Seconds 14
+        $state = Get-Content -LiteralPath $examState -ErrorAction SilentlyContinue
+        return [pscustomobject]@{
+            Seg      = (Read-LogTail $appLog $mark)
+            State    = ($state -join ' ')
+            SimAlive = ($s -and (-not $s.HasExited))
+        }
+    }
+    finally {
+        if ($s -and -not $s.HasExited) { Stop-Process -Id $s.Id -Force -ErrorAction SilentlyContinue }
+        Start-Sleep -Milliseconds 500
+        if ($a -and -not $a.HasExited) { Stop-Process -Id $a.Id -Force -ErrorAction SilentlyContinue }
+    }
+}
+
+$examOn = Invoke-ExamPhase 1
+$fuseOn = $examOn.Seg -match '检测到考试/测验模式'
+$stillFullOn = $examOn.State -match 'fullscreen=1'
+Write-Host ("EnableExamGuard=1: 熔断日志=" + $fuseOn + " 仍全屏=" + $stillFullOn + " 客户端存活=" + $examOn.SimAlive)
+Write-Host ("  状态: " + $examOn.State)
+if ($fuseOn -and $stillFullOn) {
+    $result.Add('PASS  考试强信号命中即熔断：日志有熔断记录且窗口确实没有被窗口化')
+} else {
+    $result.Add('FAIL  考试强信号没有熔断（或熔断后功能仍在生效）——硬边界失效')
+}
+
+# 对照组只断言"守护位到了钩子侧并关闭了检测" + "功能恢复"。
+# 注意：注入后到配置到达之间（约 1 秒）钩子侧 g_examGuard 仍是 fail-closed 的默认 true，
+# 所以这一段里**本来就会有一条**"检测到考试/测验模式"——那是设计行为，不是 bug。
+$examOff = Invoke-ExamPhase 0
+$guardOff = $examOff.Seg -match '考试模式检测已按配置关闭\(EnableExamGuard=0\)'
+$windowizedOff = $examOff.State -match 'fullscreen=0'
+Write-Host ("EnableExamGuard=0: 守护位已关闭=" + $guardOff + " 已窗口化=" + $windowizedOff + " 客户端存活=" + $examOff.SimAlive)
+Write-Host ("  状态: " + $examOff.State)
+if ($guardOff -and $windowizedOff) {
+    $result.Add('PASS  对照组 EnableExamGuard=0：守护位确实关闭了检测，功能恢复（窗口化生效）')
+} else {
+    $result.Add('FAIL  对照组行为不对（考试守护位没有正确下发/生效）')
 }
 Write-Host '==== 测试结果 ===='
 $result | ForEach-Object { Write-Host $_ }
