@@ -40,6 +40,9 @@ struct AppConfig
        WH_CALLWNDPROC 也换成空过程（默认），0=只处理键盘/鼠标钩子。
        现场若出现"广播画面不动/窗口消息异常"，改成 0 重启即可二分，不必重编。 */
     bool         blockMessageHooks;
+    /* DXGI 桌面复制取证（默认关）：只计数、不改变行为。现场用来判断"教师监视/广播
+       到底有没有走桌面复制这条链"，也用来确认冻结 DXGI 不会误伤"接收广播"。 */
+    bool         traceDesktopDuplication;
     std::wstring targetDir;        /* 远志安装目录，空=按进程路径自动判定 */
     std::wstring hookDllPath;      /* 空=用内嵌资源；填路径则强制使用该文件 */
     std::vector<std::wstring> processNames;

@@ -104,6 +104,13 @@
          本机实测（2026-10-11）：该亲和性在 GDI BitBlt 与 DXGI 桌面复制两条抓屏路径上
          都会排除窗口，露出的是窗口后面的桌面内容而不是黑块；见 开发记录.md §26。
 
+    阶段十六（DXGI 桌面复制取证，v0.6.21）断言 2 条：
+     36. `TraceDesktopDuplication=1` 时日志出现"[DXGI 取证] 建立桌面复制成功"
+         （DuplicateOutput 被接管——只计数，不改任何返回值）
+     37. 日志出现"[DXGI 取证] 周期 取帧统计"，且模拟目标自己记到"dup: 完成 取到帧=N"（N>0）
+         这条钩子默认关闭，是给机房判"教师监视/广播到底有没有走桌面复制"用的；
+         尤其要看清学生机上的 DuplicateOutput 会不会也被"接收广播"用到。
+
     运行前请关闭其它 YZTrainer 实例（含改名副本）：主程序用全局互斥体防重入，
     别的实例在跑时本脚本启动的那份会静默退出，测试结果会变成假失败。
 
@@ -1265,6 +1272,78 @@ finally {
     if ($sim15Proc -and -not $sim15Proc.HasExited) { Stop-Process -Id $sim15Proc.Id -Force -ErrorAction SilentlyContinue }
     Start-Sleep -Milliseconds 500
     if ($app15Proc -and -not $app15Proc.HasExited) { Stop-Process -Id $app15Proc.Id -Force -ErrorAction SilentlyContinue }
+}
+
+# ---------------------------------------------------------------------------
+# 阶段十六：DXGI 桌面复制取证钩子（v0.6.21）
+# 这条钩子只计数、不改变行为（默认关闭，由 TraceDesktopDuplication=1 打开）。它的现场用途：
+# 判断"教师监视/广播到底有没有走桌面复制这条链"——尤其是学生机上的 DuplicateOutput 会不会
+# 也被"接收广播"用到（若会，盲写 DXGI 冻结就会把学生看广播的画面冻住）。
+# 做法：模拟目标放进 GZYZ 目录（当靶子），用 --dup 20 在启动 8 秒后真的建一次桌面复制并取 20 帧；
+# 主程序以 TraceDesktopDuplication=1 注入，取证钩子应当接管这两次调用。
+# 断言：
+#   36. 日志出现"[DXGI 取证] 建立桌面复制成功"（DuplicateOutput 被接管）
+#   37. 日志出现"[DXGI 取证] 周期 取帧统计"（AcquireNextFrame 被计数），
+#       且模拟目标自己记到"dup: 完成 取到帧=N" 里 N > 0（证明真的取到了帧，不是空转）
+# ---------------------------------------------------------------------------
+Write-Host ''
+Write-Host '==== 阶段十六：DXGI 桌面复制取证（只计数）===='
+
+$phase16Ini = @(
+    '[General]',
+    'Flags=5',
+    'WindowPercent=60',
+    'LogLevel=3',
+    'AutoInject=1',
+    'InjectMethod=0',
+    'EnableExamGuard=1',
+    'ExternalWindowFix=0',
+    'TraceDesktopDuplication=1',
+    'ProcessNames=Yistart.exe;TEACHCMD.exe;PlayerGUI.exe;ExdPaintHelper.exe;YZSimTarget.exe'
+)
+Set-Content -LiteralPath $iniFile -Value $phase16Ini -Encoding utf8
+
+$dupDir   = Join-Path $env:TEMP 'GZYZ-yzsim'
+$dupSim   = Join-Path $dupDir 'YZSimTarget.exe'
+$dupLog   = Join-Path $dupDir 'sim_log.txt'
+New-Item -ItemType Directory -Force -Path $dupDir | Out-Null
+Copy-Item -LiteralPath $sim -Destination $dupSim -Force
+if (Test-Path -LiteralPath $dupLog) { Move-Item -LiteralPath $dupLog -Destination "$dupLog.bak16-$stamp" -Force }
+
+$sim16Proc = $null
+$app16Proc = $null
+
+try {
+    $sim16Proc = Start-Process -FilePath $dupSim -ArgumentList '--dup 20' -PassThru
+    Start-Sleep -Seconds 4
+    $mark16 = Get-LogLength $appLog
+    $app16Proc = Start-Process -FilePath $trainer -PassThru
+    Start-Sleep -Seconds 14
+
+    $seg16   = Read-LogTail $appLog $mark16
+    $traceOk = $seg16 -match '\[DXGI 取证\] 建立桌面复制成功'
+    $statOk  = $seg16 -match '\[DXGI 取证\] 周期 取帧统计'
+    $simText = if (Test-Path -LiteralPath $dupLog) { Get-Content -LiteralPath $dupLog -Raw } else { '' }
+    $doneLine = ([regex]::Match($simText, 'dup: 完成[^\r\n]*')).Value
+    $framesOk = $false
+    if ($doneLine -match '取到帧=(\d+)') { $framesOk = ([int]$Matches[1] -gt 0) }
+
+    Write-Host ("取证钩子接管:DupOutput=" + $traceOk + " 取帧统计=" + $statOk + " 模拟端: " + $doneLine)
+    if ($traceOk) {
+        $result.Add('PASS  DXGI 取证钩子接住了 DuplicateOutput（只计数、不改行为）')
+    } else {
+        $result.Add('FAIL  DXGI 取证钩子没接住 DuplicateOutput（现场就判不了监视是否走这条链）')
+    }
+    if ($statOk -and $framesOk) {
+        $result.Add('PASS  DXGI 取证钩子统计到取帧调用，且模拟端确实取到了帧')
+    } else {
+        $result.Add('FAIL  DXGI 取帧统计缺失，或模拟端一帧都没取到')
+    }
+}
+finally {
+    if ($sim16Proc -and -not $sim16Proc.HasExited) { Stop-Process -Id $sim16Proc.Id -Force -ErrorAction SilentlyContinue }
+    Start-Sleep -Milliseconds 500
+    if ($app16Proc -and -not $app16Proc.HasExited) { Stop-Process -Id $app16Proc.Id -Force -ErrorAction SilentlyContinue }
 }
 
 Write-Host '==== 测试结果 ===='

@@ -13,6 +13,8 @@
 //     用于验证“教师端远程执行审计”能在学生进程里记录到 CreateProcess
 //
 #include <windows.h>
+#include <d3d11.h>
+#include <dxgi1_2.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -31,6 +33,9 @@ bool  g_execRequested = false;
    主动拔钩的重试（NativeUnhookTick）会不会真的再试一次。模块名必须与被查的名字
    一致（例如把 ExdHooks.dll 复制出来单独放）。 */
 std::wstring g_lateLoadDll;
+/* --dup [帧数]：真的建一次 DXGI 桌面复制并取若干帧（用于验证 YZHook 的 DXGI 取证钩子）。
+   只为取证而用，所以 dxgi/d3d11 一律动态加载，不给模拟目标增加静态依赖。 */
+int          g_dupFrames = 0;
 /* --hook / --hook-thread / --hook-message：像厂商那样"自己装钩子 + 把 NULL 当生死判据"（回归替身） */
 bool g_hookMode        = false;
 bool g_hookThreadMode  = false;
@@ -206,6 +211,98 @@ void LoadLateDllOnce()
                           reinterpret_cast<void*>(mod), mod ? 0u : GetLastError()));
 }
 
+/* --dup：真的建一次桌面复制并取 N 帧，把结果写进 sim_log.txt。
+   用途：让回归能证明"YZHook 的 DXGI 取证钩子确实接管了厂商侧的 DuplicateOutput 与
+   AcquireNextFrame"——模拟目标在这里扮演厂商那个采集线程。 */
+void RunDupProbe()
+{
+    const std::wstring logPath = yz::JoinPath(g_exeDir, L"sim_log.txt");
+    HMODULE d3d11 = LoadLibraryW(L"d3d11.dll");
+    HMODULE dxgi  = GetModuleHandleW(L"dxgi.dll");
+    if (dxgi == nullptr)
+        dxgi = LoadLibraryW(L"dxgi.dll");
+    if (d3d11 == nullptr || dxgi == nullptr)
+    {
+        AppendFile(logPath, yz::Format(L"dup: 加载 d3d11/dxgi 失败 err=%u", GetLastError()));
+        return;
+    }
+
+    typedef HRESULT (WINAPI *PFN_D3D11CreateDevice)(void*, UINT, void*, UINT, const void*, UINT, UINT,
+                                                    void**, UINT*, void**);
+    PFN_D3D11CreateDevice createDevice =
+        reinterpret_cast<PFN_D3D11CreateDevice>(GetProcAddress(d3d11, "D3D11CreateDevice"));
+    if (createDevice == nullptr)
+    {
+        AppendFile(logPath, L"dup: 取 D3D11CreateDevice 失败");
+        return;
+    }
+
+    ID3D11Device*        dev = nullptr;
+    ID3D11DeviceContext* ctx = nullptr;
+    UINT level = 0;
+    HRESULT hr = createDevice(nullptr, 1 /*D3D_DRIVER_TYPE_HARDWARE*/, nullptr, 0, nullptr, 0,
+                              7 /*D3D11_SDK_VERSION*/, reinterpret_cast<void**>(&dev), &level,
+                              reinterpret_cast<void**>(&ctx));
+    if (FAILED(hr) || dev == nullptr)
+    {
+        AppendFile(logPath, yz::Format(L"dup: D3D11CreateDevice hr=0x%08X", static_cast<unsigned>(hr)));
+        return;
+    }
+
+    IDXGIDevice* dxgiDev = nullptr;
+    IDXGIAdapter* adapter = nullptr;
+    IDXGIOutput*  output  = nullptr;
+    IDXGIOutput1* output1 = nullptr;
+    IDXGIOutputDuplication* dup = nullptr;
+    int frames = 0, timeouts = 0;
+
+    hr = dev->QueryInterface(__uuidof(IDXGIDevice), reinterpret_cast<void**>(&dxgiDev));
+    if (SUCCEEDED(hr)) hr = dxgiDev->GetAdapter(&adapter);
+    if (SUCCEEDED(hr)) hr = adapter->EnumOutputs(0, &output);
+    if (SUCCEEDED(hr)) hr = output->QueryInterface(__uuidof(IDXGIOutput1), reinterpret_cast<void**>(&output1));
+    if (SUCCEEDED(hr)) hr = output1->DuplicateOutput(dev, &dup);
+
+    if (SUCCEEDED(hr) && dup != nullptr)
+    {
+        for (int i = 0; i < g_dupFrames; ++i)
+        {
+            DXGI_OUTDUPL_FRAME_INFO info;
+            ZeroMemory(&info, sizeof(info));
+            IDXGIResource* res = nullptr;
+            const HRESULT fhr = dup->AcquireNextFrame(50, &info, &res);
+            if (fhr == DXGI_ERROR_WAIT_TIMEOUT)
+            {
+                ++timeouts;
+                continue;
+            }
+            if (FAILED(fhr))
+            {
+                AppendFile(logPath, yz::Format(L"dup: AcquireNextFrame 失败 hr=0x%08X（第 %d 次）",
+                                               static_cast<unsigned>(fhr), i));
+                break;
+            }
+            ++frames;
+            if (res != nullptr)
+                res->Release();
+            dup->ReleaseFrame();
+        }
+        AppendFile(logPath, yz::Format(L"dup: 完成 取到帧=%d 超时=%d（请求 %d）", frames, timeouts, g_dupFrames));
+        dup->Release();
+    }
+    else
+    {
+        AppendFile(logPath, yz::Format(L"dup: 没能建立桌面复制 hr=0x%08X（0x887A0022=已被别的客户端占用）",
+                                       static_cast<unsigned>(hr)));
+    }
+
+    if (output1 != nullptr) output1->Release();
+    if (output  != nullptr) output->Release();
+    if (adapter != nullptr) adapter->Release();
+    if (dxgiDev != nullptr) dxgiDev->Release();
+    if (ctx != nullptr) ctx->Release();
+    if (dev != nullptr) dev->Release();
+}
+
 /* WH_GETMESSAGE / WH_CALLWNDPROC 这类"消息层"钩子用的空过程。
    注意不能拿 KeyHookProc 顶替：消息钩子的 lParam 是 MSG*，KeyHookProc 会把它当
    KBDLLHOOKSTRUCT 读，然后几乎每条消息都 return 1（消息被丢掉），模拟目标自己就废了。 */
@@ -323,6 +420,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         {
             DumpState(L"timer-state");
         }
+
         else if (wParam == 5)
         {
             KillTimer(hwnd, 5);
@@ -338,6 +436,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             /* --fight：200ms 一次把无边框全屏抢回来，复现"客户端响应我们的改动、
                外部纠正怎么改都马上被顶回去"的横跳场景（验证反横跳闸门）。 */
             MakeFullscreen();
+        }
+        else if (wParam == 9)
+        {
+            /* --dup：延迟 3 秒跑一次桌面复制取证（定时器 8 已被 --hook 的延迟安装占用） */
+            KillTimer(hwnd, 9);
+            RunDupProbe();
         }
         else if (wParam == 8)
         {
@@ -397,6 +501,19 @@ int WINAPI wWinMain(HINSTANCE hinst, HINSTANCE, LPWSTR cmdLine, int)
     g_exeDir = yz::GetExeDir();
     g_examRequested = (cmdLine != nullptr) && (wcsstr(cmdLine, L"--exam") != nullptr);
     g_execRequested = (cmdLine != nullptr) && (wcsstr(cmdLine, L"--exec") != nullptr);
+    if (cmdLine != nullptr)
+    {
+        const wchar_t* dupArg = wcsstr(cmdLine, L"--dup");
+        if (dupArg != nullptr)
+        {
+            g_dupFrames = 20;                       /* 默认取 20 帧 */
+            const wchar_t* p = dupArg + 5;
+            while (*p == L' ') ++p;
+            const int n = _wtoi(p);
+            if (n > 0 && n <= 1000)
+                g_dupFrames = n;
+        }
+    }
 
     WNDCLASSEXW wc;
     ZeroMemory(&wc, sizeof(wc));
@@ -425,6 +542,10 @@ int WINAPI wWinMain(HINSTANCE hinst, HINSTANCE, LPWSTR cmdLine, int)
     SetTimer(g_main, 4, 1000, nullptr);   /* 状态落盘 */
     if (g_execRequested)
         SetTimer(g_main, 5, 4000, nullptr);   /* 一次性：模拟教师端远程执行 */
+
+    /* 一次性：3 秒后跑一次 --dup 的桌面复制取证（此时注入与配置都已就绪） */
+    if (g_dupFrames > 0)
+        SetTimer(g_main, 9, 8000, nullptr);   /* 8 秒后再取证：确保注入与配置都已就绪 */
 
     /* 一次性：4 秒后加载 --load 指定的 DLL（模拟"钩子模块晚于注入出现"） */
     if (cmdLine != nullptr)

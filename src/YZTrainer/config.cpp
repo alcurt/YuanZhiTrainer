@@ -40,6 +40,16 @@ void SyncBlockMessageHooksBit(AppConfig& cfg)
     else
         cfg.flags &= ~YZ_CFG_BLOCK_MESSAGE_HOOKS;
 }
+
+/* 与 SyncBlockMessageHooksBit 同理：控制位必须单独同步进 flags，而且**必须在读到 ini 之后**再调
+   （v0.6.13 的坑：先同步后读值 → ini 改成 0 不生效，回归阶段九抓出来的）。 */
+void SyncTraceDuplicationBit(AppConfig& cfg)
+{
+    if (cfg.traceDesktopDuplication)
+        cfg.flags |= YZ_CFG_TRACE_DUPLICATION;
+    else
+        cfg.flags &= ~YZ_CFG_TRACE_DUPLICATION;
+}
 } /* namespace */
 
 std::wstring ConfigPath()
@@ -60,8 +70,10 @@ void ConfigApplyDefaults(AppConfig& cfg)
     cfg.autoExportOnExit = true;
     cfg.autoExportOnCapture = true;
     cfg.blockMessageHooks = true;
+    cfg.traceDesktopDuplication = false;      /* 取证默认关：开了也只计数，不影响任何行为 */
     SyncExamGuardBit(cfg);
     SyncBlockMessageHooksBit(cfg);
+    SyncTraceDuplicationBit(cfg);
     cfg.processNames.clear();
     /* 客户端进程名单。网管版多一个守卫进程 Nmdeputy.exe，但它由注入器显式排除
        （IsGuardProcess），这里不放进来；需要时可在 INI 里自行添加。 */
@@ -98,7 +110,9 @@ void ConfigLoad(AppConfig& cfg, const std::wstring& iniPath)
     cfg.autoExportOnExit = ReadInt(iniPath, L"AutoExportOnExit", cfg.autoExportOnExit ? 1 : 0) != 0;
     cfg.autoExportOnCapture = ReadInt(iniPath, L"AutoExportOnCapture", cfg.autoExportOnCapture ? 1 : 0) != 0;
     cfg.blockMessageHooks = ReadInt(iniPath, L"BlockMessageHooks", cfg.blockMessageHooks ? 1 : 0) != 0;
+    cfg.traceDesktopDuplication = ReadInt(iniPath, L"TraceDesktopDuplication", cfg.traceDesktopDuplication ? 1 : 0) != 0;
     SyncBlockMessageHooksBit(cfg);
+    SyncTraceDuplicationBit(cfg);
 
     wchar_t buf[1024] = {0};
     GetPrivateProfileStringW(kSection, L"TargetDir", L"", buf, 1024, iniPath.c_str());
@@ -134,6 +148,7 @@ void ConfigSave(const AppConfig& cfg, const std::wstring& iniPath)
     WriteInt(iniPath, L"AutoExportOnExit", cfg.autoExportOnExit ? 1 : 0);
     WriteInt(iniPath, L"AutoExportOnCapture", cfg.autoExportOnCapture ? 1 : 0);
     WriteInt(iniPath, L"BlockMessageHooks", cfg.blockMessageHooks ? 1 : 0);
+    WriteInt(iniPath, L"TraceDesktopDuplication", cfg.traceDesktopDuplication ? 1 : 0);
     WritePrivateProfileStringW(kSection, L"TargetDir", cfg.targetDir.c_str(), iniPath.c_str());
     WritePrivateProfileStringW(kSection, L"HookDllPath", cfg.hookDllPath.c_str(), iniPath.c_str());
 

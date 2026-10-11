@@ -3,6 +3,7 @@
 #include "exam.h"
 #include "hookmgr.h"
 #include "hooks_capture.h"
+#include "hooks_duptrace.h"
 #include "hooks_exec.h"
 #include "hooks_input.h"
 #include "hooks_window.h"
@@ -19,6 +20,8 @@ namespace yzhook
 {
 volatile LONG g_flags           = 0;
 volatile LONG g_blockMessageHooks = 1;   /* 默认拦消息层钩子，与 v0.6.11 之前一致 */
+/* DXGI 桌面复制取证：默认关，开了也只计数（现场判"监视/广播是否走 DXGI"，见 hooks_duptrace.cpp） */
+volatile LONG g_traceDuplication = 0;
 volatile LONG g_examMode        = 0;
 DWORD         g_windowPercent   = 60;
 volatile LONG g_windowizeCount  = 0;
@@ -590,6 +593,13 @@ void EngineApplyConfig(const YZ_CONFIG& cfg)
     /* 控制位单独存一份：g_flags 只保留功能位，控制位得另找地方放（见 yz_hook_state.h） */
     InterlockedExchange(&g_blockMessageHooks,
                        ((cfg.flags & YZ_CFG_BLOCK_MESSAGE_HOOKS) != 0) ? 1 : 0);
+
+    /* DXGI 取证（默认关）：只有打开时才装钩子——关闭时本模块一行代码都不跑，
+       也不会把 dxgi.dll 拖进目标进程（LoadLibrary 在安装函数里才发生）。 */
+    const bool wantTrace = (cfg.flags & YZ_CFG_TRACE_DUPLICATION) != 0;
+    InterlockedExchange(&g_traceDuplication, wantTrace ? 1 : 0);
+    if (wantTrace)
+        yzhook::DupTraceInstall(true);
 
     bool guard = (cfg.flags & YZ_CFG_EXAM_GUARD) != 0;
     if (!guard && g_examGuard)

@@ -21,6 +21,9 @@ extern volatile LONG  g_flags;
    （回归阶段九第一次跑就抓出来了，见 开发记录.md §20）。 */
 extern volatile LONG  g_blockMessageHooks;
 extern volatile LONG  g_examMode;
+/* DXGI 桌面复制取证开关（ini 项 TraceDesktopDuplication / 控制位 YZ_CFG_TRACE_DUPLICATION）。
+   默认 0；同样不能读 g_flags（控制位被掩码剔除）。只计数，不改变任何行为。 */
+extern volatile LONG  g_traceDuplication;
 extern DWORD          g_windowPercent;
 extern volatile LONG  g_windowizeCount;
 extern volatile LONG  g_hooksInstalled;
