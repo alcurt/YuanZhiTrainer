@@ -129,6 +129,25 @@
          触发落盘并命中采集组件——它和一次性扫描是两条代码路径（常驻轮询 + 触发判定 + 落盘）
      43. 那份 watch 报告里该 pid 的"图形采集栈"行判为"采集层=DXGI"（跨架构下判词也成立）
 
+    阶段二十（InjectMethod=1 消息钩子注入，v0.6.25）断言 3 条：
+     44. `InjectMethod=1` 时日志出现"已通过消息钩子注入 HHOOK=…"（拿到合法句柄）
+     45. 窗口化照常生效（目标状态 fullscreen=0）——说明引擎真的被映射进目标并跑起来了
+     46. 该阶段里**没有**"已注入目标进程 pid="（=1 时不该再去尝试远程线程注入）
+         注意这条路的固有副作用（README 已写明）：WH_GETMESSAGE + dwThreadId=0 是会话级全局钩子，
+         DLL 会被映射进本会话所有取消息的 GUI 进程（非目标进程里引擎自检后放弃）。
+
+    ── 断言写法约定（血泪换来的，新加阶段请照做）────────────────────────────
+    * 日志里的句柄/地址用 %p 打印，**不带 0x 前缀**（"HHOOK=002A0E26"）。凡是要匹配它们，
+      一律写成 `(?:0x)?0*[1-9A-Fa-f]`——v0.6.13 阶段八与 v0.6.25 阶段二十各栽过一次。
+    * 只看**本阶段新增**的日志段：用 Get-LogLength 记起点 + Read-LogTail 读增量，
+      不要 grep 整个 yzt.log（它是追加写的、跨次运行共用，会被旧行满足）。
+      v0.6.25 起这两个助手也认 <日志>-1.log：产品在 yzt.log 超过 2MB 后会改用 yzt-1.log，
+      一次完整回归必然越过这条线，只读主日志会让后续阶段读到"空的新增日志"而误报失败。
+    * 环境形状必须与产品判据一致：要不要放到"路径含 GZYZ"的目录里（IsYuanzhiInstallPath）、
+      进程什么时候被杀、产品把日志写到哪个文件（UiAppendLog 只进界面、不落文件；
+      以 SYSTEM 启动的主程序日志在 C:\Windows\Temp\YZTrainer\）。
+      这三点各导致过一次"红的是测试、不是产品"。
+
     运行前请关闭其它 YZTrainer 实例（含改名副本）：主程序用全局互斥体防重入，
     别的实例在跑时本脚本启动的那份会静默退出，测试结果会变成假失败。
 
@@ -195,22 +214,60 @@ $result  = New-Object System.Collections.Generic.List[string]
 # 断言只看"本阶段新产生的日志行"：yzt.log 是追加写的，跨阶段、跨次运行共用同一个文件，
 # 直接对整个文件 Select-String 会被上一次运行的旧行骗过（v0.6.13 的负向 A/B 就踩到了）。
 # 用法：阶段开始前 $mark = Get-LogLength $appLog，断言处用 Read-LogTail $appLog $mark。
-function Get-LogLength([string]$Path) {
-    if ([string]::IsNullOrEmpty($Path)) { return 0 }
-    if (Test-Path -LiteralPath $Path) { return (Get-Item -LiteralPath $Path).Length }
-    return 0
-}
-function Read-LogTail([string]$Path, [long]$From) {
-    if ([string]::IsNullOrEmpty($Path)) { return '' }
-    if (-not (Test-Path -LiteralPath $Path)) { return '' }
-    $fs = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open,
-                                 [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
-    try {
-        [void]$fs.Seek($From, [System.IO.SeekOrigin]::Begin)
-        $sr = New-Object System.IO.StreamReader($fs)
-        return $sr.ReadToEnd()
+# 日志轮转感知（v0.6.25）：产品在 yzt.log 超过 2MB 后改用 yzt-1.log（README 有写），
+# 而回归跑到中后段必然会超过 2MB——只读 yzt.log 的话，之后的阶段会读到"空的新增日志"，
+# 断言误报失败（第一次暴露：阶段二十，功能其实是通的）。所以：
+#   Get-LogLength 返回一个"各文件长度快照"字符串（调用方只把它原样传回 Read-LogTail）；
+#   Read-LogTail 对主日志与轮转日志各读自己新增的那一段，并把"文件被重建/变短"当作从头读。
+function Get-RelatedLogPaths([string]$Path) {
+    if ([string]::IsNullOrEmpty($Path)) { return @() }
+    $pairs = New-Object System.Collections.Generic.List[string]
+    $pairs.Add($Path)
+    # 轮转文件：<base>-1.log（产品按这个命名）
+    $dir  = [System.IO.Path]::GetDirectoryName($Path)
+    $base = [System.IO.Path]::GetFileNameWithoutExtension($Path)
+    $ext  = [System.IO.Path]::GetExtension($Path)
+    if (-not [string]::IsNullOrEmpty($dir)) {
+        $pairs.Add((Join-Path $dir ("{0}-1{1}" -f $base, $ext)))
     }
-    finally { $fs.Dispose() }
+    return $pairs
+}
+function Get-LogLength([string]$Path) {
+    $snap = @()
+    foreach ($f in (Get-RelatedLogPaths $Path)) {
+        $len = -1
+        if (Test-Path -LiteralPath $f) { $len = (Get-Item -LiteralPath $f).Length }
+        $snap += ("{0}={1}" -f $f, $len)
+    }
+    return ($snap -join ';')
+}
+function Read-LogTail([string]$Path, [string]$Mark) {
+    if ([string]::IsNullOrEmpty($Path)) { return '' }
+    # 兼容旧调用（传字节数）与不含 '=' 的 mark
+    $marks = @{}
+    if (-not [string]::IsNullOrEmpty($Mark) -and $Mark.Contains('=')) {
+        foreach ($part in ($Mark -split ';')) {
+            $kv = $part -split '=', 2
+            if ($kv.Count -eq 2) { $marks[$kv[0]] = [long]$kv[1] }
+        }
+    }
+    $out = New-Object System.Text.StringBuilder
+    foreach ($f in (Get-RelatedLogPaths $Path)) {
+        if (-not (Test-Path -LiteralPath $f)) { continue }
+        $len = (Get-Item -LiteralPath $f).Length
+        $from = 0
+        if ($marks.ContainsKey($f) -and $marks[$f] -ge 0 -and $marks[$f] -le $len) { $from = $marks[$f] }
+        if ($len -le $from) { continue }
+        $fs = [System.IO.File]::Open($f, [System.IO.FileMode]::Open,
+                                     [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        try {
+            [void]$fs.Seek($from, [System.IO.SeekOrigin]::Begin)
+            $sr = New-Object System.IO.StreamReader($fs)
+            [void]$out.Append($sr.ReadToEnd())
+        }
+        finally { $fs.Dispose() }
+    }
+    return $out.ToString()
 }
 
 try {
@@ -1552,6 +1609,80 @@ else {
     } else {
         $result.Add('FAIL  x64 --watch 报告里缺少正确的图形采集栈判词')
     }
+}
+
+# ---------------------------------------------------------------------------
+# 阶段二十：InjectMethod=1（消息钩子注入）这条配置路径（v0.6.25）
+# 为什么补：README 把它写成"远程线程注入失败时的兜底办法"（第 121 行的现场指引就是
+# "把 InjectMethod 改成 1 再试"），但我们此前只测过默认的 0（远程线程）与**运行期自动回退**，
+# 从没测过"ini 里直接指定 1"。这条路径若坏了，现场按 README 操作会直接卡死。
+# 注意它的固有副作用（README 第 338 行已写明）：WH_GETMESSAGE + dwThreadId=0 是**会话级**全局钩子，
+# 我们的 DLL 会被映射进本会话所有会取消息的 GUI 进程；非目标进程里引擎会自检后放弃
+# （日志"宿主进程不是远志学生端/模拟目标，Hook 不启用"），所以断言只认目标进程那条线。
+# 断言：
+#   44. 日志出现"已通过消息钩子注入 HHOOK=…"（走的是消息钩子路径，且拿到合法句柄）
+#   45. 窗口化照常生效（模拟目标状态 fullscreen=0）——说明引擎真的在目标进程里跑起来了
+#   46. 该阶段日志段里**没有**"已注入目标进程 pid="（injectMethod=1 时不应再尝试远程线程注入）
+# ---------------------------------------------------------------------------
+Write-Host ''
+Write-Host '==== 阶段二十：InjectMethod=1 消息钩子注入 ===='
+
+foreach ($f in @($stateFile, $capFile)) {
+    if (Test-Path $f) { Move-Item -LiteralPath $f -Destination "$f.bak20-$stamp" -Force }
+}
+
+$phase20Ini = @(
+    '[General]',
+    'Flags=5',
+    'WindowPercent=60',
+    'LogLevel=3',
+    'AutoInject=1',
+    'InjectMethod=1',
+    'EnableExamGuard=1',
+    'ExternalWindowFix=0',
+    'ProcessNames=Yistart.exe;TEACHCMD.exe;PlayerGUI.exe;ExdPaintHelper.exe;YZSimTarget.exe'
+)
+Set-Content -LiteralPath $iniFile -Value $phase20Ini -Encoding utf8
+
+$sim20Proc = $null
+$app20Proc = $null
+$state20   = ''
+
+try {
+    $sim20Proc = Start-Process -FilePath $sim -PassThru
+    Start-Sleep -Seconds 3
+    $mark20 = Get-LogLength $appLog
+    $app20Proc = Start-Process -FilePath $trainer -PassThru
+
+    # 消息钩子要等目标线程取一次消息才会把 DLL 映射进去，这里多等一会儿
+    for ($i = 0; $i -lt 24; $i++) {
+        Start-Sleep -Milliseconds 700
+        $state20 = Get-Content -LiteralPath $stateFile -ErrorAction SilentlyContinue
+        if (($state20 -join ' ') -match 'fullscreen=0') { break }
+    }
+    $seg20 = Read-LogTail $appLog $mark20
+}
+finally {
+    if ($sim20Proc -and -not $sim20Proc.HasExited) { Stop-Process -Id $sim20Proc.Id -Force -ErrorAction SilentlyContinue }
+    Start-Sleep -Milliseconds 500
+    if ($app20Proc -and -not $app20Proc.HasExited) { Stop-Process -Id $app20Proc.Id -Force -ErrorAction SilentlyContinue }
+}
+
+$hookInj   = $seg20 -match '已通过消息钩子注入 HHOOK=(?:0x)?0*[1-9A-Fa-f]'
+$windowized20 = ($state20 -join ' ') -match 'fullscreen=0'
+$noRemote  = -not ($seg20 -match '已注入目标进程 pid=')
+
+Write-Host ("消息钩子注入=" + $hookInj + " 已窗口化=" + $windowized20 + " 未走远程线程=" + $noRemote)
+Write-Host ("  状态: " + ($state20 -join ' '))
+if ($hookInj -and $windowized20) {
+    $result.Add('PASS  InjectMethod=1 时消息钩子注入成功，且引擎在目标进程里真的生效（窗口化）')
+} else {
+    $result.Add('FAIL  InjectMethod=1 的消息钩子注入没走通或没生效（现场按 README 兜底会卡死）')
+}
+if ($noRemote) {
+    $result.Add('PASS  InjectMethod=1 时没有再去尝试远程线程注入（配置被正确尊重）')
+} else {
+    $result.Add('FAIL  InjectMethod=1 时仍然尝试了远程线程注入（配置没被尊重）')
 }
 
 Write-Host '==== 测试结果 ===='
