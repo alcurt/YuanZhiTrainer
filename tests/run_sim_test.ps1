@@ -152,6 +152,13 @@
          收进托盘，**冻结期间托盘菜单是唯一的图形开关入口**（复选框看不见、热键未必记得住）
      51. 冻结收起主界面后，托盘"显示主界面"能恢复界面**且不解开冻结**（哈希仍停住）
 
+    阶段二十三（ini 边界项，v0.6.28）断言 3 条：
+     52. `WindowPercent=5` 被钳制成 20%（窗口宽/显示器宽落在 0.15..0.28）——现场若填了很小的值，
+         不该得到一个几乎看不见的窗口
+     53. `WindowPercent=200` 被钳制成 100%（比值 ≥ 0.95）
+     54. 三个 `AutoExportOn*` 全关时，阶段期间**不新增** diag-*-auto 目录（关掉就得真关掉，
+         不能偷偷往磁盘写）
+
     ── 断言写法约定（血泪换来的，新加阶段请照做）────────────────────────────
     * 日志里的句柄/地址用 %p 打印，**不带 0x 前缀**（"HHOOK=002A0E26"）。凡是要匹配它们，
       一律写成 `(?:0x)?0*[1-9A-Fa-f]`——v0.6.13 阶段八与 v0.6.25 阶段二十各栽过一次。
@@ -1987,6 +1994,111 @@ if ($hidByFreeze -and $showBack) {
     $result.Add('PASS  冻结收起主界面后，托盘"显示主界面"能恢复界面且不解开冻结')
 } else {
     $result.Add('FAIL  冻结收起主界面后托盘恢复异常（或恢复界面时把冻结也解开了）')
+}
+
+# ---------------------------------------------------------------------------
+# 阶段二十三：两个 ini 边界项（v0.6.28）
+# ① WindowPercent 的钳制：产品在两处都把百分比夹在 20..100（config.cpp 读值后、hooks_window.cpp
+#    应用时各夹一次）。现场若填 5 会得到一个几乎看不见的窗口、填 200 则应当等于 100。
+#    做法：分别用 5 与 200 起一轮，从模拟目标的状态文件里量"窗口宽 / 显示器宽"的比值。
+# ② AutoExportOn* 全关：关掉后**不该**再往磁盘写诊断包（现场可能为了不落文件而关掉它）。
+#    做法：记下阶段前后 dist 里的 diag-*-auto 目录集合，差值必须是 0。
+# 断言：
+#   52. WindowPercent=5 → 实际按 20% 钳制（比值落在 0.15..0.28）
+#   53. WindowPercent=200 → 实际按 100% 钳制（比值 ≥ 0.95）
+#   54. 三个 AutoExport 全关时，阶段期间没有新增 diag-*-auto 目录
+# ---------------------------------------------------------------------------
+Write-Host ''
+Write-Host '==== 阶段二十三：ini 边界项（WindowPercent 钳制 / 自动导出关闭）===='
+
+function Invoke-PercentPhase([int]$percent) {
+    $iniLines = @(
+        '[General]',
+        'Flags=1',
+        "WindowPercent=$percent",
+        'LogLevel=3',
+        'AutoInject=1',
+        'InjectMethod=0',
+        'EnableExamGuard=1',
+        'ExternalWindowFix=0',
+        'AutoExportOnBroadcast=0',
+        'AutoExportOnExit=0',
+        'AutoExportOnCapture=0',
+        'ProcessNames=Yistart.exe;TEACHCMD.exe;PlayerGUI.exe;ExdPaintHelper.exe;YZSimTarget.exe'
+    )
+    Set-Content -LiteralPath $iniFile -Value $iniLines -Encoding utf8
+
+    $s = $null
+    $a = $null
+    $ratio = -1.0
+    $style = 0
+    try {
+        $s = Start-Process -FilePath $sim -PassThru
+        Start-Sleep -Seconds 3
+        $a = Start-Process -FilePath $trainer -PassThru
+        for ($i = 0; $i -lt 20; $i++) {
+            Start-Sleep -Milliseconds 700
+            $st = Get-Content -LiteralPath $stateFile -ErrorAction SilentlyContinue
+            $txt = $st -join ' '
+            # 注意：一次 -match 才能保住分组——连用两次 -match 会让 $Matches 被后一次覆盖
+            # （v0.6.28 第一版就是这么错的：rect 的分组全成 0，比值恒为 -1）。
+            # 只按几何判断即可：模拟目标的 fullscreen 标志只看矩形是否铺满显示器，
+            # 100% 的窗口化（带标题栏）也会被它记成 fullscreen=1，所以不能拿那个字段当条件。
+            if ($txt -match 'style=0x([0-9A-Fa-f]{8}).*rect=(-?\d+),(-?\d+),(-?\d+),(-?\d+).*monitor=(\d+)x(\d+)') {
+                $style = [Convert]::ToUInt32($Matches[1], 16)
+                $w = [int]$Matches[4] - [int]$Matches[2]
+                $monW = [int]$Matches[6]
+                # 只采**带标题栏**的状态：模拟目标启动时本身就是无边框全屏（矩形也铺满显示器），
+                # 一上来就命中它的话，5% 那轮会量到比值 1、完全测不到钳制（v0.6.28 第三次跑就是这样）。
+                # 有标题栏才算"被窗口化"，这也正是阶段一/三一直在用的口径。
+                $hasCaption = (($style -band 0x00C00000) -ne 0)
+                if ($hasCaption -and $monW -gt 0 -and $w -gt 0) {
+                    $ratio = [double]$w / [double]$monW
+                    break
+                }
+            }
+        }
+    }
+    finally {
+        if ($s -and -not $s.HasExited) { Stop-Process -Id $s.Id -Force -ErrorAction SilentlyContinue }
+        Start-Sleep -Milliseconds 500
+        if ($a -and -not $a.HasExited) { Stop-Process -Id $a.Id -Force -ErrorAction SilentlyContinue }
+    }
+    return [pscustomobject]@{ Ratio = $ratio; Style = $style }
+}
+
+$diagBefore = @(Get-ChildItem -LiteralPath $DistDir -Directory -Filter 'diag-*-auto' -ErrorAction SilentlyContinue |
+                Select-Object -ExpandProperty Name)
+
+$r5   = Invoke-PercentPhase 5
+$r200 = Invoke-PercentPhase 200
+$ratio5   = $r5.Ratio
+$ratio200 = $r200.Ratio
+$caption200 = (($r200.Style -band 0x00C00000) -ne 0)      # WS_CAPTION：有标题栏=真窗口化
+
+$diagAfter = @(Get-ChildItem -LiteralPath $DistDir -Directory -Filter 'diag-*-auto' -ErrorAction SilentlyContinue |
+               Select-Object -ExpandProperty Name)
+$newDiag = @($diagAfter | Where-Object { $diagBefore -notcontains $_ })
+
+Write-Host ("WindowPercent=5 → 窗口/显示器宽=" + [Math]::Round($ratio5, 3) +
+            " ；=200 → " + [Math]::Round($ratio200, 3) + "（样式=0x" + ('{0:X8}' -f $r200.Style) +
+            " 有标题栏=" + $caption200 + "） 自动导出关闭时新增诊断包=" + $newDiag.Count)
+
+if ($ratio5 -ge 0.15 -and $ratio5 -le 0.28) {
+    $result.Add('PASS  WindowPercent=5 被钳制成 20%（不会出现几乎看不见的窗口）')
+} else {
+    $result.Add('FAIL  WindowPercent 下限钳制失效（实际比值 ' + [Math]::Round($ratio5, 3) + '）')
+}
+if ($ratio200 -ge 0.95 -and $caption200) {
+    $result.Add('PASS  WindowPercent=200 被钳制成 100% 且仍是带标题栏的窗口（不是无边框全屏）')
+} else {
+    $result.Add('FAIL  WindowPercent 上限钳制失效（比值 ' + [Math]::Round($ratio200, 3) +
+                '，有标题栏=' + $caption200 + '）')
+}
+if ($newDiag.Count -eq 0) {
+    $result.Add('PASS  三个 AutoExport 全关时不再往磁盘写诊断包')
+} else {
+    $result.Add('FAIL  AutoExport 关掉后仍然写了诊断包（' + ($newDiag -join ', ') + '）')
 }
 
 Write-Host '==== 测试结果 ===='
