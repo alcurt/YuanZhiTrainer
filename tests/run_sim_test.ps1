@@ -94,6 +94,16 @@
          ——这两条就是 09-23 误判 / 09-29 判决的本地复现：0x5 是 UIPI 一致性检查，
          不是"驱动剥夺"，同级完整性就放行。
 
+    阶段十五（冻结开启时"别把自己拍进去"，v0.6.20）断言 2 条：
+     34. 防监视开启时主界面自动收进托盘：进程的 MainWindowHandle 归 0，
+         且日志出现"防监视已开启：主界面已收入托盘并从屏幕捕获中排除"
+     35. 主窗口的显示亲和性确实是 WDA_EXCLUDEFROMCAPTURE（0x11）：断言查主程序**进程内**
+         读回并写进日志的那行（`进程内读回=0x11`），并要求它确实冻了画面（日志有"已冻结画面"）。
+         注意 GetWindowDisplayAffinity **跨进程读回来总是 0**（2026-10-11 实测），所以脚本里
+         的进程外枚举只作诊断输出、不作断言。
+         本机实测（2026-10-11）：该亲和性在 GDI BitBlt 与 DXGI 桌面复制两条抓屏路径上
+         都会排除窗口，露出的是窗口后面的桌面内容而不是黑块；见 开发记录.md §26。
+
     运行前请关闭其它 YZTrainer 实例（含改名副本）：主程序用全局互斥体防重入，
     别的实例在跑时本脚本启动的那份会静默退出，测试结果会变成假失败。
 
@@ -1160,6 +1170,103 @@ else {
     Stop-Process -Id $srAppB.Id -Force -ErrorAction SilentlyContinue
     Stop-Process -Id $srSimB.Id -Force -ErrorAction SilentlyContinue
 }
+# ---------------------------------------------------------------------------
+# 阶段十五：冻结开启时"别把自己拍进去"（v0.6.20）
+# 背景：冻结帧是目标进程里 GetDC(NULL)+BitBlt 抓的整屏 DIB；用户手动勾上防监视的那一刻
+# 主界面正好开着，于是主界面被冻进教师会看到的那张图——教师点开"监视/远程桌面"一眼就露馅。
+# 两层措施：① 主界面收进托盘（顺序必须是"先隐藏再下发冻结位"，否则第一帧还是脏的）；
+#           ② 主窗口设 WDA_EXCLUDEFROMCAPTURE。
+# 本机实测（2026-10-11，见 开发记录.md §26）：亲和性对 GDI BitBlt 与 DXGI 桌面复制**都生效**，
+# 被排除处露出的是窗口后面的桌面内容（不是黑块）；对照点确认抓屏本身是成功的。
+# 断言：
+#   34. 冻结期间进程没有可见主窗口（MainWindowHandle=0），日志有那行"已收入托盘"
+#   35. 从进程外读回该进程顶层窗口的显示亲和性 = 0x11（WDA_EXCLUDEFROMCAPTURE）
+# ---------------------------------------------------------------------------
+Write-Host ''
+Write-Host '==== 阶段十五：冻结开启时把自己从画面里摘出去 ===='
+
+if (-not ('WdaCheck' -as [type])) {
+    $wdaSrc = @(
+        'using System;',
+        'using System.Collections.Generic;',
+        'using System.Runtime.InteropServices;',
+        'public class WdaCheck {',
+        '    [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr lp);',
+        '    [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);',
+        '    [DllImport("user32.dll")] public static extern bool GetWindowDisplayAffinity(IntPtr h, out uint aff);',
+        '    public delegate bool EnumProc(IntPtr h, IntPtr lp);',
+        '    public static uint[] AffinitiesOf(uint targetPid) {',
+        '        var list = new List<uint>();',
+        '        EnumWindows(delegate(IntPtr h, IntPtr lp) {',
+        '            uint pid; GetWindowThreadProcessId(h, out pid);',
+        '            if (pid == targetPid) {',
+        '                uint aff;',
+        '                if (GetWindowDisplayAffinity(h, out aff)) list.Add(aff);',
+        '                else list.Add(0xFFFFFFFF);',
+        '            }',
+        '            return true;',
+        '        }, IntPtr.Zero);',
+        '        return list.ToArray();',
+        '    }',
+        '}'
+    )
+    Add-Type -TypeDefinition ($wdaSrc -join "`r`n")
+}
+
+$phase15Ini = @(
+    '[General]',
+    'Flags=13',
+    'WindowPercent=60',
+    'LogLevel=3',
+    'AutoInject=1',
+    'InjectMethod=0',
+    'EnableExamGuard=1',
+    'ExternalWindowFix=0',
+    'ProcessNames=Yistart.exe;TEACHCMD.exe;PlayerGUI.exe;ExdPaintHelper.exe;YZSimTarget.exe'
+)
+Set-Content -LiteralPath $iniFile -Value $phase15Ini -Encoding utf8
+
+$sim15Proc = $null
+$app15Proc = $null
+
+try {
+    $sim15Proc = Start-Process -FilePath $sim -PassThru
+    Start-Sleep -Seconds 3
+    $mark15 = Get-LogLength $appLog
+    $app15Proc = Start-Process -FilePath $trainer -PassThru
+    Start-Sleep -Seconds 12
+
+    $seg15 = Read-LogTail $appLog $mark15
+    $app15Proc.Refresh()
+    $mainHwnd  = $app15Proc.MainWindowHandle        # 窗口隐藏后枚举不到可见顶层窗口 → 0
+    $hidden    = ($mainHwnd -eq 0) -and (-not $app15Proc.HasExited)
+    $logArm    = $seg15 -match '冻结画面：主窗口已设 WDA_EXCLUDEFROMCAPTURE'
+    $logFroze  = $seg15 -match '已冻结画面'
+    # "亲和性设上了没有"只能由**本进程**自证：2026-10-11 实测 GetWindowDisplayAffinity
+    # 跨进程读回来总是 0（设的时候成功、抓屏也确实排除了），所以断言查主程序自己写下的读回值。
+    $logAff    = $seg15 -match '主窗口已设 WDA_EXCLUDEFROMCAPTURE（进程内读回=0x11'
+    # 进程外枚举只作诊断输出（预期全是 0，见上面的说明，不要把它改成断言）
+    $affs      = [WdaCheck]::AffinitiesOf([uint32]$app15Proc.Id)
+
+    Write-Host ("主界面已隐藏=" + $hidden + " 日志有设亲和性=" + $logArm + " 日志有冻结=" + $logFroze +
+                " 日志读回0x11=" + $logAff + " 进程外枚举=[" + ($affs -join ',') + "]（预期全 0）")
+    if ($hidden -and $logArm) {
+        $result.Add('PASS  冻结开启时主界面自动收进托盘（进程无可见主窗口，日志记录已处理）')
+    } else {
+        $result.Add('FAIL  冻结开启时主界面没有收进托盘（会被冻进教师看到的那张图）')
+    }
+    if ($logAff -and $logFroze) {
+        $result.Add('PASS  主窗口亲和性为 WDA_EXCLUDEFROMCAPTURE（进程内读回 0x11）且冻结已生效')
+    } else {
+        $result.Add('FAIL  主窗口没设上 WDA_EXCLUDEFROMCAPTURE，或冻结根本没生效')
+    }
+}
+finally {
+    if ($sim15Proc -and -not $sim15Proc.HasExited) { Stop-Process -Id $sim15Proc.Id -Force -ErrorAction SilentlyContinue }
+    Start-Sleep -Milliseconds 500
+    if ($app15Proc -and -not $app15Proc.HasExited) { Stop-Process -Id $app15Proc.Id -Force -ErrorAction SilentlyContinue }
+}
+
 Write-Host '==== 测试结果 ===='
 $result | ForEach-Object { Write-Host $_ }
 $failCount = @($result | Where-Object { $_ -like 'FAIL*' }).Count

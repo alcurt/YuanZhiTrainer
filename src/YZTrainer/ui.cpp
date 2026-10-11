@@ -704,6 +704,13 @@ void UiNotifyExam(bool exam)
 
 void CmdSetFlag(DWORD flag, bool on)
 {
+    /* 冻结画面（防监视）开启时，先把自己的窗口从画面里摘出去**再**下发冻结位：
+       冻结帧是在目标进程里 GetDC(NULL)+BitBlt 抓的，顺序反了就会把主界面冻进那张图——
+       教师在"监视/远程桌面"里点开学生机，一眼就能看见学生在用某个工具。
+       FreezePrepareMainWindow() 内部会隐藏主界面并等一小会儿让桌面重绘。 */
+    if (flag == YZ_FLAG_ANTI_MONITOR)
+        FreezePrepareMainWindow(on);
+
     if (on)
         g_app.cfg.flags |= flag;
     else
@@ -728,6 +735,77 @@ void CmdSetFlag(DWORD flag, bool on)
 void CmdToggleFlag(DWORD flag)
 {
     CmdSetFlag(flag, !CmdGetFlag(flag));
+}
+
+/* 冻结画面期间的"别把自己拍进去"（v0.6.20）。
+   背景：冻结帧是**目标进程**里 GetDC(NULL)+BitBlt 抓的整屏 DIB，屏幕上有什么就冻什么；
+   而我们默认不开防监视，用户手动勾上的那一刻主界面正好开着 → 主界面被冻进教师会看到的那张图。
+   两层措施（2026-10-11 本机实测，见 开发记录.md §26）：
+     ① 主界面收进托盘：不依赖任何抓屏路径，是硬保证；顺序上必须"先隐藏再下发冻结位"；
+     ② WDA_EXCLUDEFROMCAPTURE：本机实测 GDI BitBlt 与 DXGI 桌面复制**两条路径都会排除它**，
+        而且被排除后露出的是窗口后面的桌面内容（不是黑块）——留给将来 DXGI 冻结路径的兜底。
+   代价：①会让主界面消失（托盘图标与 Ctrl+Alt+F12 还能唤回来），②在 Win10 2004 之前会失败，
+   失败时记 WARN 说明只剩①这一层。 */
+void FreezePrepareMainWindow(bool arming)
+{
+    const DWORD kWdaExcludeFromCapture = 0x00000011u;   /* WDA_EXCLUDEFROMCAPTURE（Win10 2004+） */
+
+    if (g_app.hwndMain == nullptr)
+        return;
+
+    if (arming)
+    {
+        if (g_app.freezeWindowPrepared)
+            return;                                     /* 幂等：已经处理过就别重复隐藏 */
+
+        g_app.freezeWindowWasVisible = IsWindowVisible(g_app.hwndMain) != FALSE;
+        g_app.freezeAffinityOk = SetWindowDisplayAffinity(g_app.hwndMain, kWdaExcludeFromCapture) != FALSE;
+        /* 进程内读回一次再写日志：GetWindowDisplayAffinity **跨进程读回来总是 0**
+           （2026-10-11 实测：设的时候成功、抓屏也确实排除了，但别的进程读是 0），
+           所以"设上了没有"这件事只能由本进程自证，测试也据此断言。 */
+        DWORD affinityReadBack = 0;
+        const BOOL affinityReadOk = GetWindowDisplayAffinity(g_app.hwndMain, &affinityReadBack);
+        if (g_app.freezeAffinityOk)
+        {
+            YZLOGI(L"冻结画面：主窗口已设 WDA_EXCLUDEFROMCAPTURE（进程内读回=0x%X ok=%d；"
+                   L"本机实测 GDI 与 DXGI 两条抓屏路径都会排除它）",
+                   affinityReadBack, affinityReadOk);
+        }
+        else
+        {
+            const DWORD err = GetLastError();
+            YZLOGW(L"冻结画面：SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE) 失败 err=%u（Win10 2004 之前不支持）；"
+                   L"改由\u201c隐藏主界面\u201d兜底，但 DWM 系捕获可能仍能看到本窗口",
+                   err);
+        }
+
+        if (g_app.freezeWindowWasVisible)
+        {
+            ShowWindow(g_app.hwndMain, SW_HIDE);        /* 收进托盘 */
+            Balloon(L"YZTrainer 提示",
+                    L"防监视已开启：主界面已收入托盘（托盘图标或 Ctrl+Alt+F12 可再打开）");
+            /* 让桌面把"窗口消失"重绘完再让钩子抓冻结帧。200ms 对一次手动开关可以接受；
+               嫌卡可以改成一次性定时器延迟下发，但顺序不能反。 */
+            Sleep(220);
+        }
+        g_app.freezeWindowPrepared = true;
+        UiAppendLog(yz::kLogInfo, L"防监视已开启：主界面已收入托盘并从屏幕捕获中排除");
+    }
+    else
+    {
+        if (!g_app.freezeWindowPrepared)
+            return;
+
+        SetWindowDisplayAffinity(g_app.hwndMain, 0 /*WDA_NONE*/);
+        /* 只在"开启冻结时它是可见的、而现在它是隐藏的"情况下显示回来：
+           用户在冻结期间用 Ctrl+Alt+F12 自己拨过窗口状态时，不要强行覆盖他的选择。 */
+        if (g_app.freezeWindowWasVisible && !IsWindowVisible(g_app.hwndMain))
+            ShowWindow(g_app.hwndMain, SW_SHOW);
+        g_app.freezeWindowPrepared   = false;
+        g_app.freezeWindowWasVisible = false;
+        YZLOGI(L"冻结画面关闭：主窗口亲和性已复位、主界面已按原样恢复");
+        UiAppendLog(yz::kLogInfo, L"防监视已关闭：主界面恢复显示、捕获排除已复位");
+    }
 }
 
 bool CmdGetFlag(DWORD flag)

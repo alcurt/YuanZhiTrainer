@@ -77,6 +77,12 @@ struct AppRuntime
     bool             autoHookFallback;
     bool             autoExportedBroadcast;   /* "首次识别到广播窗口"那份是否已导过 */
     bool             autoExportedCapture;     /* "首次发现采集组件"那份是否已导过 */
+    /* 冻结画面（防监视）期间把自己的窗口从画面里摘出去（v0.6.20）：
+       冻结帧是目标进程里 GetDC(NULL)+BitBlt 抓的，主界面若可见就会被冻进去，
+       教师在"监视/远程桌面"里一眼就能看见学生在用某个工具。下面两个字段只用于诊断与还原。 */
+    bool             freezeWindowPrepared;    /* 已经做过"隐藏 + 亲和性"处理 */
+    bool             freezeWindowWasVisible;  /* 处理前主界面是否可见（关闭冻结时按原样恢复） */
+    bool             freezeAffinityOk;        /* WDA_EXCLUDEFROMCAPTURE 是否设置成功 */
 };
 
 extern AppRuntime g_app;
@@ -119,6 +125,13 @@ void CmdShowServicePanel();
 void CmdExportDiag();
 void CmdOpenLogFolder();
 void CmdShowAbout();
+
+/* ---- 冻结画面期间的"别把自己拍进去"（ui.cpp 实现，v0.6.20） ----
+   arming=true ：若主界面可见就收进托盘，并给主窗口设 WDA_EXCLUDEFROMCAPTURE，
+                 然后等一小会儿让桌面重绘——**必须在下发冻结位之前调用**（见 CmdSetFlag 的注释）；
+   arming=false：亲和性复位；处理前可见的话把主界面显示回来。
+   两个字段（freezeWindowPrepared / freezeWindowWasVisible）只用于幂等与还原。 */
+void FreezePrepareMainWindow(bool arming);
 
 /* ---- servicepanel.cpp ---- */
 void ServicePanelShow(HWND owner);

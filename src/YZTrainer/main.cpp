@@ -100,6 +100,11 @@ int WINAPI wWinMain(HINSTANCE hinst, HINSTANCE, LPWSTR, int)
 
     UiAppendLog(yz::kLogInfo, StartupSummary());
 
+    /* 出厂 ini 里防监视是关的，但调试配置（Flags=13）会带着它启动；那种情况下主界面一开
+       就会被冻进教师看到的那张图，所以在开始干活前先做一次同样的"别把自己拍进去"。 */
+    if ((g_app.cfg.flags & YZ_FLAG_ANTI_MONITOR) != 0)
+        FreezePrepareMainWindow(true);
+
     g_watchdogStop   = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     g_watchdogThread = CreateThread(nullptr, 0, WatchdogEntry, nullptr, 0, nullptr);
 
