@@ -95,6 +95,12 @@ bool FileExists(const std::wstring& path)
     return attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY) == 0;
 }
 
+bool DirectoryExists(const std::wstring& path)
+{
+    DWORD attr = GetFileAttributesW(path.c_str());
+    return attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY) != 0;
+}
+
 bool IsUnderDir(const std::wstring& path, const std::wstring& dir)
 {
     if (path.empty() || dir.empty())

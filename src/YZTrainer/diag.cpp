@@ -183,6 +183,66 @@ void CopyIfExists(const std::wstring& src, const std::wstring& dstDir, std::wstr
         }
     }
 }
+
+/* 同上，但允许改目标文件名（给"另一处日志目录"的日志加来源后缀用） */
+void CopyAsIfExists(const std::wstring& src, const std::wstring& dstDir, const std::wstring& dstName,
+                    std::wstring* failures)
+{
+    if (!yz::FileExists(src))
+        return;
+    const std::wstring dst = yz::JoinPath(dstDir, dstName);
+    if (!CopyFileW(src.c_str(), dst.c_str(), FALSE))
+    {
+        const std::wstring msg = yz::Format(L"%s (err=%u)", dstName.c_str(), GetLastError());
+        YZLOGW(L"诊断包复制失败: %s", msg.c_str());
+        if (failures != nullptr)
+        {
+            if (!failures->empty())
+                *failures += L"; ";
+            *failures += msg;
+        }
+    }
+}
+
+/* 在扩展名前插入来源后缀：yzt-1.log + "-sys" → yzt-1-sys.log */
+std::wstring WithSuffix(const std::wstring& name, const std::wstring& suffix)
+{
+    if (suffix.empty())
+        return name;
+    const size_t dot = name.find_last_of(L'.');
+    if (dot == std::wstring::npos)
+        return name + suffix;
+    return name.substr(0, dot) + suffix + name.substr(dot);
+}
+
+/* 把某个日志目录里的 yzt*.log 与 remote-exec*.log 全部收进诊断包。
+   v0.6.29 起不再只认 -1/-2 两个固定名字（轮转更多次就漏），而是按通配枚举；
+   并且会把**其它来源**（SYSTEM 的 temp、各用户 profile 下的 temp）的日志也带上，
+   用后缀标出来源——一趟上机里用户身份与 SYSTEM 身份都可能跑过，
+   只带自己那一份，恰恰就是"时间匆忙时漏采"的来源。 */
+void CollectLogsFrom(const std::wstring& logDir, const std::wstring& dstDir,
+                     const std::wstring& suffix, std::wstring* failures)
+{
+    if (logDir.empty() || !yz::DirectoryExists(logDir))
+        return;
+
+    const wchar_t* patterns[] = { L"yzt*.log", L"remote-exec*.log" };
+    for (const wchar_t* pattern : patterns)
+    {
+        WIN32_FIND_DATAW fd;
+        HANDLE find = FindFirstFileW(yz::JoinPath(logDir, pattern).c_str(), &fd);
+        if (find == INVALID_HANDLE_VALUE)
+            continue;
+        do
+        {
+            if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0)
+                continue;
+            CopyAsIfExists(yz::JoinPath(logDir, fd.cFileName), dstDir,
+                           WithSuffix(fd.cFileName, suffix), failures);
+        } while (FindNextFileW(find, &fd));
+        FindClose(find);
+    }
+}
 } /* namespace */
 
 /* 真正干活的：建目录 + 收日志/探针报告 + 生成快照。不做 UI（不弹窗、不开资源管理器），
@@ -192,14 +252,55 @@ static bool BuildDiagnostics(const std::wstring& dir, const wchar_t* reason)
     if (!yz::EnsureDirectory(dir))
         return false;
 
-    /* 日志 */
+    /* 日志：自己的那一份用原名；**其它来源**（SYSTEM 的 temp、各用户 profile 下的 temp）
+       带上来源后缀一起进包（v0.6.29）——一趟上机里两个身份都可能跑过，只带自己那份
+       就是"时间匆忙时漏采"的最大来源。 */
     std::wstring copyFailures;
-    CopyIfExists(yz::LogFilePath(), dir, &copyFailures);
-    CopyIfExists(yz::JoinPath(yz::LogDir(), L"yzt-1.log"), dir, &copyFailures);
-    CopyIfExists(yz::JoinPath(yz::LogDir(), L"yzt-2.log"), dir, &copyFailures);
-    /* 远程执行审计（每份都带，避免回来看不到教师端下发的动作） */
-    CopyIfExists(yz::JoinPath(yz::LogDir(), L"remote-exec.log"), dir, &copyFailures);
-    CopyIfExists(yz::JoinPath(yz::LogDir(), L"remote-exec-1.log"), dir, &copyFailures);
+    std::wstring logSources;
+    const std::wstring myLogDir = yz::LogDir();
+    CollectLogsFrom(myLogDir, dir, L"", &copyFailures);
+    logSources += L"own=" + myLogDir;
+
+    /* SYSTEM 的 temp（我们自己就是 SYSTEM 时与 myLogDir 相同，CollectLogsFrom 会自己跳过不存在） */
+    const std::wstring sysLogDir = yz::JoinPath(L"C:\\Windows\\Temp", L"YZTrainer");
+    if (_wcsicmp(sysLogDir.c_str(), myLogDir.c_str()) != 0)
+    {
+        CollectLogsFrom(sysLogDir, dir, L"-sys", &copyFailures);
+        if (yz::DirectoryExists(sysLogDir))
+            logSources += L"; sys=" + sysLogDir;
+    }
+
+    /* 各用户的 temp：C:\Users\<name>\AppData\Local\Temp\YZTrainer（最多取 10 个，避免异常环境里扫太久） */
+    {
+        WIN32_FIND_DATAW fd;
+        HANDLE find = FindFirstFileW(L"C:\\Users\\*", &fd);
+        int users = 0;
+        if (find != INVALID_HANDLE_VALUE)
+        {
+            do
+            {
+                if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0 || users >= 10)
+                    continue;
+                if (fd.cFileName[0] == L'.')
+                    continue;
+                const std::wstring userLogDir = yz::JoinPath(
+                    yz::JoinPath(yz::JoinPath(yz::JoinPath(L"C:\\Users", fd.cFileName),
+                                             L"AppData"), L"Local"), L"Temp\\YZTrainer");
+                if (_wcsicmp(userLogDir.c_str(), myLogDir.c_str()) != 0 &&
+                    _wcsicmp(userLogDir.c_str(), sysLogDir.c_str()) != 0)
+                {
+                    CollectLogsFrom(userLogDir, dir, std::wstring(L"-") + fd.cFileName, &copyFailures);
+                    if (yz::DirectoryExists(userLogDir))
+                    {
+                        logSources += std::wstring(L"; user=") + fd.cFileName;
+                        ++users;
+                    }
+                }
+            } while (FindNextFileW(find, &fd));
+            FindClose(find);
+        }
+    }
+    /* 远程执行审计同样由 CollectLogsFrom 一并收了（它按 remote-exec*.log 通配，不再只认两个名字） */
 
     /* 上次探针报告 */
     WIN32_FIND_DATAW fd;
@@ -219,6 +320,8 @@ static bool BuildDiagnostics(const std::wstring& dir, const wchar_t* reason)
     snapshot += yz::Format(L"导出方式: %s\r\n\r\n", (reason != nullptr) ? reason : L"未知");
     if (!copyFailures.empty())
         snapshot += L"**复制失败（这份诊断包不完整）**: " + copyFailures + L"\r\n\r\n";
+    snapshot += L"== 日志来源 ==\r\n" + logSources + L"\r\n（own=本进程日志目录；-sys 后缀=SYSTEM 的 temp；"
+                L"-<用户名> 后缀=该用户 profile 下的 temp；只有存在过的来源才会列在这里）\r\n\r\n";
     snapshot += yz::Format(L"== 配置 ==\r\nFlags=0x%08X WindowPercent=%u AutoInject=%d EnableExamGuard=%d "
                            L"InjectMethod=%d ExternalWindowFix=%d\r\n"
                            L"假全屏=%d（优先于窗口化）\r\n"
@@ -280,10 +383,30 @@ void ExportDiagnostics(HWND owner)
 void AutoExportDiagnostics(const wchar_t* reason)
 {
     /* 名字带 -auto 便于一眼区分；NowStampEx 带毫秒，避免同一秒内两次导出撞名 */
-    const std::wstring dir = yz::JoinPath(g_app.exeDir, L"diag-" + yz::NowStampEx() + L"-auto");
+    std::wstring dir = yz::JoinPath(g_app.exeDir, L"diag-" + yz::NowStampEx() + L"-auto");
+    bool fellBack = false;
     if (!BuildDiagnostics(dir, reason))
     {
-        YZLOGW(L"自动导出诊断包失败（%s）：目录不可写？", (reason != nullptr) ? reason : L"未知");
+        /* v0.6.29：exeDir 不可写（只读介质、受限 ACL 等）时**回落到日志目录**再试一次。
+           以前这种情况只记一条 WARN，日志就只剩 temp 里那份——现场匆忙时最容易漏。 */
+        const std::wstring alt = yz::JoinPath(yz::LogDir(), L"diag-" + yz::NowStampEx() + L"-auto");
+        if (BuildDiagnostics(alt, reason))
+        {
+            YZLOGW(L"诊断包无法写入程序目录（%s），已改写到日志目录: %s", g_app.exeDir.c_str(), alt.c_str());
+            UiAppendLog(yz::kLogWarn,
+                        yz::Format(L"诊断包已改写到日志目录（程序目录不可写）: %s", alt.c_str()));
+            dir = alt;
+            fellBack = true;
+        }
+        else
+        {
+            YZLOGW(L"自动导出诊断包失败（%s）：程序目录与日志目录都不可写", (reason != nullptr) ? reason : L"未知");
+            return;
+        }
+    }
+    if (fellBack)
+    {
+        YZLOGI(L"自动导出诊断包（%s，已回落）: %s", (reason != nullptr) ? reason : L"未知", dir.c_str());
         return;
     }
     YZLOGI(L"自动导出诊断包（%s）: %s", (reason != nullptr) ? reason : L"未知", dir.c_str());

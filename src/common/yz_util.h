@@ -18,6 +18,8 @@ std::wstring FileNameOf(const std::wstring& path);
 std::wstring DirNameOf(const std::wstring& path);
 bool         EnsureDirectory(const std::wstring& dir);
 bool         FileExists(const std::wstring& path);
+/* 目录是否存在（v0.6.29）：诊断包要把"另一处日志目录"里的日志一起收进来，得先判断它在不在 */
+bool         DirectoryExists(const std::wstring& path);
 bool         IsUnderDir(const std::wstring& path, const std::wstring& dir);
 
 /* 路径是否属于远志安装目录。同时兼容普通版与网管版：

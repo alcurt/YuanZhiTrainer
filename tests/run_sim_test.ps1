@@ -159,6 +159,12 @@
      54. 三个 `AutoExportOn*` 全关时，阶段期间**不新增** diag-*-auto 目录（关掉就得真关掉，
          不能偷偷往磁盘写）
 
+    阶段二十四（诊断包自带各来源日志，v0.6.29）断言 2 条：
+     55. 自动导出的诊断包里带 SYSTEM 侧日志（`yzt-sys.log`），且 `snapshot.txt` 的
+         "== 日志来源 ==" 列出了 `sys=` —— 现场匆忙时最容易漏的就是"另一处"那份日志
+     56. 日志目录里现存的每个 `yzt*.log` / `remote-exec*.log` 都在包里有副本（own 侧一个不漏；
+         以前只认 `-1/-2` 两个固定名字，轮转更多次就漏）
+
     ── 断言写法约定（血泪换来的，新加阶段请照做）────────────────────────────
     * 日志里的句柄/地址用 %p 打印，**不带 0x 前缀**（"HHOOK=002A0E26"）。凡是要匹配它们，
       一律写成 `(?:0x)?0*[1-9A-Fa-f]`——v0.6.13 阶段八与 v0.6.25 阶段二十各栽过一次。
@@ -2099,6 +2105,96 @@ if ($newDiag.Count -eq 0) {
     $result.Add('PASS  三个 AutoExport 全关时不再往磁盘写诊断包')
 } else {
     $result.Add('FAIL  AutoExport 关掉后仍然写了诊断包（' + ($newDiag -join ', ') + '）')
+}
+
+# ---------------------------------------------------------------------------
+# 阶段二十四：诊断包"一包搞定"（自带各来源日志，v0.6.29）
+# 背景（用户提出）：现场匆忙时最容易漏的就是"另一处"的日志——用 YZSysRun 以 SYSTEM 跑时日志在
+# C:\Windows\Temp\YZTrainer，用普通身份跑时在用户 temp，只看一处就会漏掉另一半证据。
+# v0.6.29 起 BuildDiagnostics 会把**所有来源**的日志都收进包：
+#   own 用原名；SYSTEM 的 temp 带 -sys 后缀；其它用户 profile 的 temp 带 -<用户名> 后缀；
+#   并且按 yzt*.log / remote-exec*.log 通配枚举（不再只认 -1/-2 两个固定名字）。
+#   snapshot.txt 里新增"== 日志来源 =="把来源列清楚。
+# 断言：
+#   55. 自动导出的诊断包里带 SYSTEM 侧日志（yzt-sys.log），且 snapshot 里列出了 sys 来源
+#   56. 日志目录里现存的每一个 yzt*.log / remote-exec*.log 都在包里有一份（own 侧一个不漏）
+# ---------------------------------------------------------------------------
+Write-Host ''
+Write-Host '==== 阶段二十四：诊断包自带各来源日志 ===='
+
+$phase24Ini = @(
+    '[General]',
+    'Flags=1',
+    'WindowPercent=60',
+    'LogLevel=3',
+    'AutoInject=1',
+    'InjectMethod=0',
+    'EnableExamGuard=1',
+    'ExternalWindowFix=0',
+    'AutoExportOnBroadcast=1',
+    'AutoExportOnExit=0',
+    'AutoExportOnCapture=0',
+    'ProcessNames=Yistart.exe;TEACHCMD.exe;PlayerGUI.exe;ExdPaintHelper.exe;YZSimTarget.exe'
+)
+Set-Content -LiteralPath $iniFile -Value $phase24Ini -Encoding utf8
+
+$diagBefore24 = @(Get-ChildItem -LiteralPath $DistDir -Directory -Filter 'diag-*' -ErrorAction SilentlyContinue |
+                  Select-Object -ExpandProperty Name)
+
+$sim24Proc = $null
+$app24Proc = $null
+$packDir   = $null
+
+try {
+    $sim24Proc = Start-Process -FilePath $sim -PassThru
+    Start-Sleep -Seconds 3
+    $app24Proc = Start-Process -FilePath $trainer -PassThru
+    for ($i = 0; $i -lt 24; $i++) {
+        Start-Sleep -Milliseconds 800
+        $now = @(Get-ChildItem -LiteralPath $DistDir -Directory -Filter 'diag-*' -ErrorAction SilentlyContinue |
+                 Select-Object -ExpandProperty Name)
+        $new = @($now | Where-Object { $diagBefore24 -notcontains $_ })
+        if ($new.Count -gt 0) { $packDir = Join-Path $DistDir $new[0]; break }
+    }
+}
+finally {
+    if ($sim24Proc -and -not $sim24Proc.HasExited) { Stop-Process -Id $sim24Proc.Id -Force -ErrorAction SilentlyContinue }
+    Start-Sleep -Milliseconds 500
+    if ($app24Proc -and -not $app24Proc.HasExited) { Stop-Process -Id $app24Proc.Id -Force -ErrorAction SilentlyContinue }
+}
+
+$sysPacked = $false
+$sysInSnap = $false
+$ownMissing = @()
+if ($packDir -and (Test-Path $packDir)) {
+    $sysPacked = Test-Path (Join-Path $packDir 'yzt-sys.log')
+    $snapPath  = Join-Path $packDir 'snapshot.txt'
+    if (Test-Path $snapPath) {
+        $snapTxt = Get-Content -LiteralPath $snapPath -Raw
+        $sysInSnap = ($snapTxt -match '== 日志来源 ==') -and ($snapTxt -match 'sys=')
+    }
+    # own 侧：日志目录里现存的每个 yzt*.log / remote-exec*.log 都应在包里
+    $logDir = Join-Path (Join-Path $env:TEMP 'YZTrainer') ''
+    foreach ($pat in @('yzt*.log', 'remote-exec*.log')) {
+        foreach ($f in @(Get-ChildItem -LiteralPath $logDir -Filter $pat -File -ErrorAction SilentlyContinue)) {
+            if (-not (Test-Path (Join-Path $packDir $f.Name))) { $ownMissing += $f.Name }
+        }
+    }
+}
+
+Write-Host ("诊断包=" + $(if ($packDir) { Split-Path -Leaf $packDir } else { '(无)' }) +
+            " 含 SYSTEM 侧日志=" + $sysPacked + " snapshot 写了来源=" + $sysInSnap +
+            " own 侧缺=" + $(if ($ownMissing.Count -eq 0) { '无' } else { $ownMissing -join ',' }))
+
+if ($packDir -and $sysPacked -and $sysInSnap) {
+    $result.Add('PASS  诊断包自带 SYSTEM 侧的日志（yzt-sys.log）并在 snapshot 里写明来源')
+} else {
+    $result.Add('FAIL  诊断包没把 SYSTEM 侧日志收进来（现场只拿一个包仍会漏一半证据）')
+}
+if ($packDir -and $ownMissing.Count -eq 0) {
+    $result.Add('PASS  日志目录里现存的每个 yzt*.log / remote-exec*.log 都在包里有副本')
+} else {
+    $result.Add('FAIL  诊断包漏了本进程的日志：' + ($ownMissing -join ', '))
 }
 
 Write-Host '==== 测试结果 ===='
