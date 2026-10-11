@@ -111,6 +111,12 @@
          这条钩子默认关闭，是给机房判"教师监视/广播到底有没有走桌面复制"用的；
          尤其要看清学生机上的 DuplicateOutput 会不会也被"接收广播"用到。
 
+    阶段十七（探针跨架构枚举，v0.6.22）断言 2 条：
+     38. **x64** 探针能在 32 位目标上枚举模块并判出"采集层=DXGI"（依赖 TH32CS_SNAPMODULE32）；
+         漏了那个标志不会报错、报告照样生成，只是模块列表为空——现场会误判"没有采集组件"，
+         整趟数据作废，所以必须钉住。
+     39. x64 探针的"全进程采集组件扫描"也命中该 32 位目标（另一处枚举代码）。
+
     运行前请关闭其它 YZTrainer 实例（含改名副本）：主程序用全局互斥体防重入，
     别的实例在跑时本脚本启动的那份会静默退出，测试结果会变成假失败。
 
@@ -1344,6 +1350,74 @@ finally {
     if ($sim16Proc -and -not $sim16Proc.HasExited) { Stop-Process -Id $sim16Proc.Id -Force -ErrorAction SilentlyContinue }
     Start-Sleep -Milliseconds 500
     if ($app16Proc -and -not $app16Proc.HasExited) { Stop-Process -Id $app16Proc.Id -Force -ErrorAction SilentlyContinue }
+}
+
+# ---------------------------------------------------------------------------
+# 阶段十七：探针的跨架构枚举（v0.6.22）
+# 动机：U 盘上带的是 **x64** 的 YZProbe.exe（见 工作顺序.txt【1】），而学生端是 **32 位**进程——
+# 64 位进程枚举 WOW64 目标的模块必须带 TH32CS_SNAPMODULE32，漏了这一步不会报错、
+# 报告照样生成，只是模块列表为空：现场会以为"没有采集组件"，整趟数据作废。
+# 探针的模块枚举（probe.cpp 四处 CreateToolhelp32Snapshot）目前都带了 SNAPMODULE32，
+# 但此前从没验证过，所以这里用"32 位模拟目标加载改名成 ExdDtDup.dll 的 32 位替身"钉住：
+# 断言 38/39 都只看 **x64** 探针在 32 位目标上的输出。
+# ---------------------------------------------------------------------------
+Write-Host ''
+Write-Host '==== 阶段十七：探针跨架构枚举（x64 探针看 32 位目标）===='
+
+$distDir64  = Join-Path (Split-Path -Parent $DistDir) 'x64'
+$probeExe64 = Join-Path $distDir64 'YZProbe.exe'
+
+if (-not (Test-Path $probeExe64)) {
+    $result.Add('WARN  找不到 dist\x64\YZProbe.exe，跳过阶段十七')
+}
+else {
+    $archOut = Join-Path $env:TEMP 'yzt-probe-arch'
+    New-Item -ItemType Directory -Force -Path $archOut | Out-Null
+    New-Item -ItemType Directory -Force -Path $ddStubDir | Out-Null
+    Copy-Item -LiteralPath $ddStubSrc -Destination $ddStub -Force      # 32 位替身（与 $DistDir 同位数）
+
+    $archSim = $null
+    try {
+        # 32 位目标要放在**路径含 GZYZ** 的目录里：探针只对"远志路径形状"的进程输出
+        # "图形采集栈"行（第一版直接从 dist\Win32\ 起，那行根本不出现，断言 38 误报失败）。
+        New-Item -ItemType Directory -Force -Path $gzyzDir | Out-Null
+        Copy-Item -LiteralPath $sim -Destination $gzyzSim -Force
+        $archSim = Start-Process -FilePath $gzyzSim -ArgumentList '--load', $ddStub -PassThru
+        Start-Sleep -Seconds 6
+        $archProbe = Start-Process -FilePath $probeExe64 -PassThru -WindowStyle Hidden `
+            -ArgumentList '-o', $archOut, '--no-pause'
+        $archProbe.WaitForExit()
+        Start-Sleep -Seconds 1
+
+        $archReport = Get-ChildItem -LiteralPath $archOut -Filter 'YZProbe-report-*.md' -ErrorAction SilentlyContinue |
+                      Sort-Object LastWriteTime | Select-Object -Last 1
+        $archTxt = ''
+        if ($archReport) { $archTxt = Get-Content -LiteralPath $archReport.FullName -Raw }
+
+        # 38：该 pid 的"图形采集栈"行必须命中 ExdDtDup.dll，且判词落到 DXGI
+        $stackLine  = ([regex]::Match($archTxt, "图形采集栈 PID=$($archSim.Id) [^\r\n]*")).Value
+        $stackOk    = ($stackLine -match 'ExdDtDup\.dll=是') -and ($stackLine -match '采集层=DXGI')
+        # 39：全进程扫描那条口径也要带上该 pid（另一处枚举代码）
+        $scanLine   = ([regex]::Match($archTxt, "采集组件扫描命中：PID=$($archSim.Id) [^\r\n]*")).Value
+        $scanOk     = ($scanLine -match 'ExdDtDup\.dll')
+
+        Write-Host ("x64 探针报告=" + $(if ($archReport) { $archReport.Name } else { '(无)' }))
+        Write-Host ("  图形采集栈行: " + $stackLine)
+        Write-Host ("  扫描命中行: " + $scanLine)
+        if ($stackOk) {
+            $result.Add('PASS  x64 探针能枚举 32 位目标的模块并判定采集层=DXGI（SNAPMODULE32 有效）')
+        } else {
+            $result.Add('FAIL  x64 探针看不到 32 位目标的模块（现场会误判"没有采集组件"，整趟白跑）')
+        }
+        if ($scanOk) {
+            $result.Add('PASS  x64 探针的全进程采集组件扫描也命中该 32 位目标')
+        } else {
+            $result.Add('FAIL  x64 探针的全进程扫描漏掉了 32 位目标')
+        }
+    }
+    finally {
+        if ($archSim -and -not $archSim.HasExited) { Stop-Process -Id $archSim.Id -Force -ErrorAction SilentlyContinue }
+    }
 }
 
 Write-Host '==== 测试结果 ===='
