@@ -4,12 +4,13 @@
 
     请以管理员身份运行（YZTrainer.exe 需要提权；自动测试时不希望弹 UAC）。
 
-    阶段一（注入路径，ExternalWindowFix=0，只看进程内 Hook）断言 6 条：
+    阶段一（注入路径，ExternalWindowFix=0，只看进程内 Hook）断言 7 条：
       1. 模拟目标启动后处于全屏置顶状态
       2. YZTrainer 启动后模拟窗口被窗口化（不再是全屏）
       3. 窗口样式已包含 WS_CAPTION（真的变成普通窗口）
       4. 开启防监视后，模拟端连续抓帧哈希保持不变（画面被冻结）
       5. 不受保护的目标走的仍是远程线程注入（v0.6.14：日志出现"已注入目标进程"）
+      7. 托盘图标注册结果有明确记录（v0.6.31：优先固定 GUID，回落 uID 或失败都会写明原因）
       6. 注入预检没有误判（v0.6.14：日志**不**出现"缺 PROCESS_VM_OPERATION"）
          ——守的是 VmOperationStripped()：它一旦误报，所有机器都会被无谓地降级到消息钩子
 
@@ -351,6 +352,17 @@ try {
 
     if ($seg1 -notmatch '缺 PROCESS_VM_OPERATION') { $result.Add('PASS  注入预检没有误判不受保护的目标') }
     else { $result.Add('FAIL  注入预检把不受保护的目标判成了“句柄权限被削”') }
+
+    # v0.6.31：托盘图标优先用固定 GUID 身份（被杀/重启后复用同一槽位，不堆死图标）。
+    # 断言"结果必须有明确记录"：GUID 成功 / 回落 uID / 两次都失败，三条路都要在日志里留痕——
+    # 静默失败最坏（用户只会看到"托盘图标没了"，日志里毫无线索）。
+    $trayLine = ([regex]::Match($seg1, '托盘图标: [^\r\n]*')).Value
+    Write-Host ("托盘图标注册: " + $(if ($trayLine) { $trayLine } else { '(日志里没有)' }))
+    if ($trayLine) {
+        $result.Add('PASS  托盘图标注册结果有明确记录（GUID 优先，失败会写明原因）')
+    } else {
+        $result.Add('FAIL  托盘图标注册没有任何日志（静默失败：现场无法判断是没注册上还是没显示）')
+    }
 
     if (Test-Path $capFile) {
         $lines  = Get-Content -LiteralPath $capFile | Select-Object -Last 6

@@ -211,18 +211,50 @@ void ShowTrayMenu(HWND hwnd)
     DestroyMenu(menu);
 }
 
+/* 托盘图标身份（v0.6.31）：改用**固定 GUID**（NIF_GUID）而不是 uID=1 的按进程身份。
+   为什么：主程序可能被强杀或崩溃（现场在任务管理器里结束它、我们自己的回归也用 Stop-Process），
+   那种情况下 NIM_DELETE 永远不会执行，Explorer 就把图标当"死图标"留着——用户实测一轮回归下来
+   4K 175% 缩放的任务栏上堆了几十个同样的图标。用 GUID 身份后，新实例的 NIM_ADD 会复用同一个
+   槽位，不再逐个累积。老 shell 或 GUID 注册失败时回落到 uID 方式（见下面两级尝试）。 */
+const GUID kTrayGuid =
+    { 0x8f3c1a52, 0x9d47, 0x4b6e, { 0xa1, 0x2c, 0x77, 0x5e, 0x11, 0x9b, 0x44, 0xd0 } };
+
 void AddTrayIcon(HWND hwnd)
 {
     ZeroMemory(&g_nid, sizeof(g_nid));
     g_nid.cbSize           = sizeof(g_nid);
     g_nid.hWnd             = hwnd;
-    g_nid.uID              = 1;
-    g_nid.uFlags           = NIF_ICON | NIF_MESSAGE | NIF_TIP;
     g_nid.uCallbackMessage = WM_YZ_TRAY;
     g_nid.hIcon            = g_icon;
     wcsncpy_s(g_nid.szTip, sizeof(g_nid.szTip) / sizeof(wchar_t), kAppTitle, _TRUNCATE);
+
+    /* 一级：固定 GUID 身份（被杀/重启后复用同一槽位，不再堆死图标） */
+    g_nid.uFlags   = NIF_ICON | NIF_MESSAGE | NIF_TIP | NIF_GUID;
+    g_nid.guidItem = kTrayGuid;
     if (Shell_NotifyIconW(NIM_ADD, &g_nid))
+    {
         g_trayAdded = true;
+        YZLOGI(L"托盘图标: 以固定 GUID 注册成功（被强杀/重启后复用同一槽位，不会在任务栏堆死图标）");
+        return;
+    }
+
+    /* 二级：回落 uID 方式（老 shell 不认 NIF_GUID） */
+    g_nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
+    g_nid.uID    = 1;
+    if (Shell_NotifyIconW(NIM_ADD, &g_nid))
+    {
+        g_trayAdded = true;
+        YZLOGW(L"托盘图标: GUID 方式失败（err=%u），已回落 uID 方式——被强杀时任务栏可能留下死图标",
+               GetLastError());
+    }
+    else
+    {
+        /* 两次都失败也要说出来（v0.6.31）：静默失败最坏——用户会以为"托盘图标没了"是程序坏了，
+           而日志里一条线索都没有。常见原因是通知区域被大量"死图标"占满（被杀进程留下的）。 */
+        const DWORD err = GetLastError();
+        YZLOGW(L"托盘图标: GUID 与 uID 两种方式都失败（err=%u）——通知区域可能已满或 Explorer 异常；"
+               L"主界面与热键仍可用", err);
+    }
 }
 
 void RemoveTrayIcon()
@@ -239,7 +271,8 @@ void Balloon(const wchar_t* title, const wchar_t* text)
     if (!g_trayAdded)
         return;
     NOTIFYICONDATAW nid = g_nid;
-    nid.uFlags     = NIF_INFO;
+    /* 气球提示也必须带上 GUID（否则按 uID 找不到这个图标，提示就丢了） */
+    nid.uFlags     = NIF_INFO | ((g_nid.uFlags & NIF_GUID) ? NIF_GUID : 0);
     nid.dwInfoFlags = NIIF_INFO;
     wcsncpy_s(nid.szInfoTitle, sizeof(nid.szInfoTitle) / sizeof(wchar_t), title, _TRUNCATE);
     wcsncpy_s(nid.szInfo, sizeof(nid.szInfo) / sizeof(wchar_t), text, _TRUNCATE);
