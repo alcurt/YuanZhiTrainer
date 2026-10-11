@@ -532,8 +532,18 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         case ID_HOTKEY_ANTIMON:   CmdToggleFlag(YZ_FLAG_ANTI_MONITOR); break;
         case ID_HOTKEY_FAKEFULL:  CmdToggleFlag(YZ_FLAG_FAKE_FULLSCREEN); break;
         case ID_HOTKEY_SHOWUI:
-            ShowWindow(hwnd, SW_SHOW);
-            SetForegroundWindow(hwnd);
+            /* README 热键表写的是"显示/隐藏主界面"，但这里原来只 ShowWindow(SW_SHOW)——
+               界面已经可见时按 F12 毫无反应（v0.6.26 补测试时发现）。改成真正的切换。 */
+            if (IsWindowVisible(hwnd))
+            {
+                ShowWindow(hwnd, SW_HIDE);
+                NotifyHiddenToTray();
+            }
+            else
+            {
+                ShowWindow(hwnd, SW_SHOW);
+                SetForegroundWindow(hwnd);
+            }
             break;
         default:
             break;
@@ -640,11 +650,30 @@ HWND UiInit(HINSTANCE hinst)
     g_app.hwndMain = hwnd;
     AddTrayIcon(hwnd);
 
-    RegisterHotKey(hwnd, ID_HOTKEY_WINDOWIZE, MOD_CONTROL | MOD_ALT, VK_F9);
-    RegisterHotKey(hwnd, ID_HOTKEY_UNLOCK,    MOD_CONTROL | MOD_ALT, VK_F10);
-    RegisterHotKey(hwnd, ID_HOTKEY_ANTIMON,   MOD_CONTROL | MOD_ALT, VK_F11);
-    RegisterHotKey(hwnd, ID_HOTKEY_SHOWUI,    MOD_CONTROL | MOD_ALT, VK_F12);
-    RegisterHotKey(hwnd, ID_HOTKEY_FAKEFULL,  MOD_CONTROL | MOD_ALT, VK_F8);
+    /* 注册失败**不再静默**（v0.6.26）：这些是全局热键，机房机器上可能已被别的程序占用，
+       而用户按了没反应会以为是程序坏了。失败就记一条 WARN（带 GetLastError），
+       界面日志里也能看到，便于现场判读。 */
+    struct HotKeyDef { int id; UINT vk; const wchar_t* name; };
+    const HotKeyDef hotkeys[] = {
+        { ID_HOTKEY_WINDOWIZE, VK_F9,  L"Ctrl+Alt+F9 切换窗口化" },
+        { ID_HOTKEY_UNLOCK,    VK_F10, L"Ctrl+Alt+F10 切换键鼠解锁" },
+        { ID_HOTKEY_ANTIMON,   VK_F11, L"Ctrl+Alt+F11 切换防监视（冻结画面）" },
+        { ID_HOTKEY_SHOWUI,    VK_F12, L"Ctrl+Alt+F12 显示/隐藏主界面" },
+        { ID_HOTKEY_FAKEFULL,  VK_F8,  L"Ctrl+Alt+F8 切换假全屏" },
+    };
+    for (const HotKeyDef& hk : hotkeys)
+    {
+        SetLastError(0);
+        if (!RegisterHotKey(hwnd, hk.id, MOD_CONTROL | MOD_ALT, hk.vk))
+        {
+            const DWORD err = GetLastError();
+            YZLOGW(L"注册全局热键失败: %s err=%u（%s）——该热键多半已被别的程序占用，"
+                   L"用界面复选框或托盘菜单仍可切换",
+                   hk.name, err, yz::Win32ErrorMessage(err).c_str());
+            UiAppendLog(yz::kLogWarn, yz::Format(L"全局热键注册失败：%s（err=%u，可能被别的程序占用）",
+                                                 hk.name, err));
+        }
+    }
 
     ShowWindow(hwnd, SW_SHOW);
     UpdateWindow(hwnd);

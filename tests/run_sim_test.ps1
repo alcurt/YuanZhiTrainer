@@ -136,6 +136,17 @@
          注意这条路的固有副作用（README 已写明）：WH_GETMESSAGE + dwThreadId=0 是会话级全局钩子，
          DLL 会被映射进本会话所有取消息的 GUI 进程（非目标进程里引擎自检后放弃）。
 
+    阶段二十一（界面/热键那条开关链，v0.6.26）断言 3 条：
+     47/48. `CmdSetFlag` 对四个功能位是**只发 `YZ_CMD_SET_*` opcode、不发整份配置**，
+         所以用户勾复选框 / 按热键走的是钩子侧 `EngineSetFlag` 那条链，此前从没被测过。
+         这里用**确定性驱动**：复选框走 `WM_COMMAND` + `BM_SETCHECK`（与鼠标点击同一条代码路径），
+         热键走直接投递 `WM_HOTKEY`（与系统投递同一个处理器）——不依赖输入队列。
+         断言：勾选后抓帧哈希停住且 ini 出现防监视位；取消后哈希又变化。
+     49. `WM_HOTKEY(F12)` 真的能隐藏主界面、再发一次恢复显示，
+         钉住 v0.6.26 修的"F12 原来只显示、不隐藏"那个 bug。
+     另：本机实测 Ctrl+Alt+F9 已被别的程序占用、RegisterHotKey 直接失败（err=1409），
+         而老代码静默——v0.6.26 起注册失败会记 WARN（产品改动）。
+
     ── 断言写法约定（血泪换来的，新加阶段请照做）────────────────────────────
     * 日志里的句柄/地址用 %p 打印，**不带 0x 前缀**（"HHOOK=002A0E26"）。凡是要匹配它们，
       一律写成 `(?:0x)?0*[1-9A-Fa-f]`——v0.6.13 阶段八与 v0.6.25 阶段二十各栽过一次。
@@ -1683,6 +1694,168 @@ if ($noRemote) {
     $result.Add('PASS  InjectMethod=1 时没有再去尝试远程线程注入（配置被正确尊重）')
 } else {
     $result.Add('FAIL  InjectMethod=1 时仍然尝试了远程线程注入（配置没被尊重）')
+}
+
+# ---------------------------------------------------------------------------
+# 阶段二十一：界面/热键那条开关链（v0.6.26）
+# 为什么补：CmdSetFlag 对四个功能位（窗口化/键鼠解锁/防监视/拦遥控）是**只发 YZ_CMD_SET_* opcode、
+# 不发整份配置**（ui.cpp：if (opcode != 0) IpcSendFlagCommand(...) else IpcSendConfig()），
+# 也就是用户勾复选框、按热键时走的是钩子侧 EngineSetFlag 那条链；回归此前只写 ini，从没碰过它。
+#
+# 本轮踩到的两件事（都记进 开发记录 §33）：
+#   ① 本机 Ctrl+Alt+F9 已被别的程序占用，RegisterHotKey 直接失败（err=1409），而老代码静默——
+#      现在注册失败会记 WARN（产品改动）。
+#   ② 用 keybd_event 合成组合键在"只有主程序时"能触发热键（实测 ini Flags 5→13），
+#      但在"模拟目标在场"时没能触发——属测试环境的输入注入问题，不值得让回归依赖它。
+#      所以这里改成**确定性驱动**：复选框走 WM_COMMAND + BM_SETCHECK（与鼠标点击同一条代码路径），
+#      热键走直接投递 WM_HOTKEY（与系统投递同一个处理器）。链路覆盖不变，且不依赖输入队列。
+# 断言：
+#   47. 勾上"防监视"复选框（WM_COMMAND）后：ini 出现防监视位、且抓帧哈希停止变化
+#   48. 再取消勾选后：抓帧哈希又开始变化（这条链两个方向都通）
+#   49. WM_HOTKEY(F12) 真的能隐藏主界面、再发一次又恢复显示
+#      —— 钉住 v0.6.26 修的"F12 原来只显示、不隐藏"那个 bug
+# ---------------------------------------------------------------------------
+Write-Host ''
+Write-Host '==== 阶段二十一：界面/热键开关链（YZ_CMD_SET_*）===='
+
+if (-not ('UiDrive' -as [type])) {
+    $uiSrc = @(
+        'using System;',
+        'using System.Runtime.InteropServices;',
+        'public class UiDrive {',
+        '    [DllImport("user32.dll")] public static extern IntPtr GetDlgItem(IntPtr h, int id);',
+        '    [DllImport("user32.dll")] public static extern IntPtr SendMessage(IntPtr h, uint msg, IntPtr wp, IntPtr lp);',
+        '    const uint BM_SETCHECK = 0x00F1;',
+        '    const uint WM_COMMAND  = 0x0111;',
+        '    const uint WM_HOTKEY   = 0x0312;',
+        '    const int  BST_UNCHECKED = 0;',
+        '    const int  BST_CHECKED   = 1;',
+        '    /* 与鼠标点击同一条代码路径：先把复选框设成目标状态，再发 WM_COMMAND 通知 */',
+        '    public static bool ClickCheckbox(IntPtr main, int ctrlId, bool wantChecked) {',
+        '        IntPtr ctl = GetDlgItem(main, ctrlId);',
+        '        if (ctl == IntPtr.Zero) return false;',
+        '        SendMessage(ctl, BM_SETCHECK, (IntPtr)(wantChecked ? BST_CHECKED : BST_UNCHECKED), IntPtr.Zero);',
+        '        SendMessage(main, WM_COMMAND, (IntPtr)ctrlId, ctl);',
+        '        return true;',
+        '    }',
+        '    public static void PostHotkey(IntPtr main, int hotkeyId) {',
+        '        SendMessage(main, WM_HOTKEY, (IntPtr)hotkeyId, IntPtr.Zero);',
+        '    }',
+        '}'
+    )
+    Add-Type -TypeDefinition ($uiSrc -join "`r`n")
+}
+
+function Get-CaptureHashes([int]$Take) {
+    if (-not (Test-Path -LiteralPath $capFile)) { return @() }
+    $l = Get-Content -LiteralPath $capFile | Select-Object -Last $Take
+    return @($l | ForEach-Object { ($_ -split ',')[1] } | Where-Object { $_ })
+}
+function Get-IniFlags {
+    $m = (Get-Content -LiteralPath $iniFile | Select-String '^Flags=')
+    if (-not $m) { return -1 }
+    return [int](($m -join '') -replace '^Flags=', '')
+}
+
+$IDC_CHK_ANTIMON = 2004
+$ID_HOTKEY_SHOWUI = 0x7104
+
+foreach ($f in @($stateFile, $capFile)) {
+    if (Test-Path $f) { Move-Item -LiteralPath $f -Destination "$f.bak21-$stamp" -Force }
+}
+
+$phase21Ini = @(
+    '[General]',
+    'Flags=5',
+    'WindowPercent=60',
+    'LogLevel=3',
+    'AutoInject=1',
+    'InjectMethod=0',
+    'EnableExamGuard=1',
+    'ExternalWindowFix=0',
+    'ProcessNames=Yistart.exe;TEACHCMD.exe;PlayerGUI.exe;ExdPaintHelper.exe;YZSimTarget.exe'
+)
+Set-Content -LiteralPath $iniFile -Value $phase21Ini -Encoding utf8
+
+$sim21Proc = $null
+$app21Proc = $null
+$state21   = ''
+$liveBefore = $false
+$frozenOn   = $false
+$frozenOff  = $false
+$flagsOn    = -1
+$hwndVisible = -1
+$hwndHidden  = -1
+$hwndBack    = -1
+$clickOk     = $false
+
+try {
+    $sim21Proc = Start-Process -FilePath $sim -PassThru
+    Start-Sleep -Seconds 3
+    $app21Proc = Start-Process -FilePath $trainer -PassThru
+
+    for ($i = 0; $i -lt 20; $i++) {
+        Start-Sleep -Milliseconds 700
+        $state21 = Get-Content -LiteralPath $stateFile -ErrorAction SilentlyContinue
+        if (($state21 -join ' ') -match 'fullscreen=0') { break }
+    }
+
+    # 基线：防监视没开时，哈希应当在变
+    Start-Sleep -Seconds 3
+    $h0 = Get-CaptureHashes 6
+    $liveBefore = (@($h0 | Select-Object -Unique).Count -gt 1)
+
+    # ① 勾上"防监视"复选框（界面路径 → YZ_CMD_SET_ANTI_MONITOR）
+    $app21Proc.Refresh()
+    $mainHwnd21 = $app21Proc.MainWindowHandle
+    $clickOk = [UiDrive]::ClickCheckbox([IntPtr]$mainHwnd21, $IDC_CHK_ANTIMON, $true)
+    Start-Sleep -Seconds 4
+    $flagsOn = Get-IniFlags
+    $h1 = Get-CaptureHashes 6
+    $frozenOn = ($h1.Count -ge 3) -and (@($h1 | Select-Object -Unique).Count -eq 1) -and (($flagsOn -band 8) -ne 0)
+
+    # ② 取消勾选
+    [void][UiDrive]::ClickCheckbox([IntPtr]$mainHwnd21, $IDC_CHK_ANTIMON, $false)
+    Start-Sleep -Seconds 4
+    $h2 = Get-CaptureHashes 6
+    $frozenOff = (@($h2 | Select-Object -Unique).Count -gt 1)
+
+    # ③ WM_HOTKEY(F12)：隐藏 → 再发一次恢复显示
+    $app21Proc.Refresh()
+    $hwndVisible = $app21Proc.MainWindowHandle
+    [UiDrive]::PostHotkey([IntPtr]$mainHwnd21, $ID_HOTKEY_SHOWUI)
+    Start-Sleep -Seconds 2
+    $app21Proc.Refresh()
+    $hwndHidden = $app21Proc.MainWindowHandle
+    [UiDrive]::PostHotkey([IntPtr]$mainHwnd21, $ID_HOTKEY_SHOWUI)
+    Start-Sleep -Seconds 2
+    $app21Proc.Refresh()
+    $hwndBack = $app21Proc.MainWindowHandle
+}
+finally {
+    if ($sim21Proc -and -not $sim21Proc.HasExited) { Stop-Process -Id $sim21Proc.Id -Force -ErrorAction SilentlyContinue }
+    Start-Sleep -Milliseconds 500
+    if ($app21Proc -and -not $app21Proc.HasExited) { Stop-Process -Id $app21Proc.Id -Force -ErrorAction SilentlyContinue }
+}
+
+Write-Host ("复选框命中=" + $clickOk + " 基线实时=" + $liveBefore + " 勾选后冻结=" + $frozenOn +
+            "（ini Flags=" + $flagsOn + "）取消后恢复实时=" + $frozenOff)
+Write-Host ("WM_HOTKEY(F12): 初始句柄=" + $hwndVisible + " 隐藏后=" + $hwndHidden + " 再发后=" + $hwndBack)
+
+if ($frozenOn) {
+    $result.Add('PASS  界面复选框（WM_COMMAND）能打开防监视：ini 出现防监视位且抓帧哈希停止变化')
+} else {
+    $result.Add('FAIL  界面复选框没能打开防监视（YZ_CMD_SET_* 那条链没生效）')
+}
+if ($frozenOff) {
+    $result.Add('PASS  取消勾选后恢复实时：抓帧哈希又开始变化（这条链两个方向都通）')
+} else {
+    $result.Add('FAIL  取消勾选后画面没有恢复实时')
+}
+if ($hwndVisible -ne 0 -and $hwndHidden -eq 0 -and $hwndBack -ne 0) {
+    $result.Add('PASS  Ctrl+Alt+F12 的处理器能显示/隐藏主界面（v0.6.26 修的"只显示不隐藏"）')
+} else {
+    $result.Add('FAIL  F12 的显示/隐藏没生效（或只有单向）')
 }
 
 Write-Host '==== 测试结果 ===='
