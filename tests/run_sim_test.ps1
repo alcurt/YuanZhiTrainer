@@ -28,32 +28,36 @@
 
     阶段五（主动拔钩的晚加载重试，v0.6.3）断言 1 条：
      14. 钩子模块在注入之后才被加载时，主程序会重试主动拔钩
-         （日志出现"NativeUnhook: 目标模块 ExdHooks.dll 已加载，开始尝试"）
 
     阶段六（反横跳闸门，v0.6.6）断言 1 条：
-     15. 客户端每 200ms 就把无边框全屏抢回来（YZSimTarget --fight）时，
-         外部纠正必须**认输停手**，而不是陪着一起高频横跳（日志出现"已对该窗口停手"）
+     15. 客户端每 200ms 就把无边框全屏抢回来时，外部纠正必须认输停手
 
     阶段七（采集栈监控 + 自动导出，v0.6.12）断言 2 条：
-     16. 某个进程加载了 ExdDtDup.dll（用改名的 version.dll 做替身）时，
-         主程序的常驻监控会发现并在日志里写明
-     17. 这次命中会触发一次静默自动导出，且诊断包 snapshot.txt 里含
-         "== 采集栈快照 ==" 与该命中记录
+     16. 主程序常驻监控发现"某进程加载了 ExdDtDup.dll"
+     17. 这次命中触发一次静默自动导出，且诊断包 snapshot.txt 含"== 采集栈快照 =="与该命中
 
-    阶段八（P0 空过程替换的回归闸门，v0.6.13）断言 2 条：
-     18. 远志自己装键盘钩子时被换成"空过程"且返回**合法 HHOOK**
-         （日志"已用空过程替换远志键盘/鼠标钩子… hhook=0x非零"）
-     19. 模拟客户端拿到合法句柄后**继续存活**——旧行为（返回 NULL）下它会像现场那样
-         8 毫秒内退出，本断言会红。做法：把模拟目标复制到路径含 GZYZ 的目录里，用
-         --hook 让它"自己装钩子 + 拿 NULL 就自杀"（不需要在生产代码里开后门）；
-         注意 --hook 是**启动 8 秒后**才装钩子：现场那次是"注入之后"才装的。
-         注意模拟目标用 %p 打印句柄（不带 0x 前缀），匹配两种写法才不会被格式坑到。
+    阶段八（P0 空过程替换的回归闸门，v0.6.13/v0.6.15）断言 4 条：
+     18. 远志自己装键盘钩子（hMod=自身模块）时被换成"空过程"且返回合法 HHOOK
+     19. 模拟客户端拿到合法句柄后**继续存活**（旧行为：返回 NULL → 8 毫秒内退出）
+     20. hMod=NULL 的**线程内**钩子同样被换成空过程（走"回调地址反查模块"那条判据，
+         v0.6.15 补：这条分支此前从未被任何测试走到过）
+     21. 该模式下模拟客户端也继续存活
+         做法：把模拟目标复制到路径含 GZYZ 的目录里（命中 IsYuanzhiInstallPath 的
+         子串判据，不需要在生产代码里开后门），用 --hook / --hook-thread 让它
+         "自己装钩子 + 拿 NULL 就自杀"；两个模式都是**启动 8 秒后**才装钩子
+         （现场那次是"注入之后"才装的）。注意模拟目标用 %p 打印句柄（不带 0x 前缀）。
 
     阶段九（消息层钩子开关 BlockMessageHooks，v0.6.14）断言 2 条：
-     20. BlockMessageHooks=1（默认）：键盘与消息层两类钩子**都被**换成空过程
-     21. BlockMessageHooks=0：键盘钩子照旧被换掉，消息层那条**放行**
-         ——守的是"case 标签不构成作用域"那类实现错误（开关为 0 时不能把键盘钩子一起
-         门控掉），同时证明这个开关真的能现场二分，而不只是从宏换了个位置。
+     22. BlockMessageHooks=1（默认）：键盘与消息层两类钩子**都被**换成空过程
+     23. BlockMessageHooks=0：键盘钩子照旧被换掉，消息层那条**放行**
+         ——守的是"case 标签不构成作用域"那类实现错误，以及"控制位/ini 值"这条下发链
+         （v0.6.13 那两处 bug 就是这一步抓出来的）。
+
+    阶段十（探针 --watch 的触发式采集，v0.6.15）断言 2 条：
+     24. 起一个常驻探针 + 让某个进程加载改名成 ExdDtDup.dll 的替身 →
+         探针必须落一份 -watch-capture 报告，且报告里命中那个进程
+     25. 探针按 --duration 正常退出（watch 日志里有"watch 结束：共落盘 N 份报告"）
+         ——现场"教师监视时谁在抓屏"的主力采集器就是它（阶段七只覆盖了主程序那一半）。
 
     运行前请关闭其它 YZTrainer 实例（含改名副本）：主程序用全局互斥体防重入，
     别的实例在跑时本脚本启动的那份会静默退出，测试结果会变成假失败。
@@ -624,12 +628,50 @@ try {
 
     if ($simAlive -and $simHookLine -match 'hhook=(?:0x)?0*[1-9A-Fa-f]') { $result.Add('PASS  模拟客户端拿到合法句柄后继续存活（不再十秒一跳）') }
     else { $result.Add('FAIL  模拟客户端没能存活/没拿到合法句柄——P0 修复被改回去了') }
+
 }
 finally {
     if ($sim8Proc -and -not $sim8Proc.HasExited) { Stop-Process -Id $sim8Proc.Id -Force -ErrorAction SilentlyContinue }
     Start-Sleep -Milliseconds 500
     if ($app8Proc -and -not $app8Proc.HasExited) { Stop-Process -Id $app8Proc.Id -Force -ErrorAction SilentlyContinue }
 }
+
+# ---------------------------------------------------------------------------
+# 阶段八（第二段）：--hook-thread —— hMod=NULL + 本线程 tid（v0.6.15）
+# 走的是 ShouldBlockHook 里"按回调地址反查所属模块"那条判据（此前从未被任何测试走到过）。
+# 必须**单独一段**：上一段的模拟目标与主程序要在这段开始前彻底清理掉。第一版把这段写在
+# 上面的 try 里，结果上一段的模拟目标一直活着，注入器反复选中那个"已注入过、管道已断"的
+# 旧进程（日志里 10 次重复注入同一个 pid），新目标永远等不到 YZHook —— 断言因此误报失败。
+# ---------------------------------------------------------------------------
+Write-Host ''
+Write-Host '==== 阶段八（第二段）：hMod=NULL 的线程内钩子 ===='
+
+$sim8b       = $null
+$app8b       = $null
+$threadRepl  = $false
+$threadAlive = $false
+
+try {
+    $sim8b = Start-Process -FilePath $gzyzSim -ArgumentList '--hook-thread' -PassThru
+    Start-Sleep -Seconds 4
+    $mark8b = Get-LogLength $appLog
+    $app8b = Start-Process -FilePath $trainer -PassThru
+    Start-Sleep -Seconds 14
+    $seg8b       = Read-LogTail $appLog $mark8b
+    $threadRepl  = $seg8b -match '已用空过程替换远志键盘/鼠标钩子\(W\)'
+    $threadAlive = ($sim8b -and (-not $sim8b.HasExited))
+}
+finally {
+    if ($sim8b -and -not $sim8b.HasExited) { Stop-Process -Id $sim8b.Id -Force -ErrorAction SilentlyContinue }
+    Start-Sleep -Milliseconds 500
+    if ($app8b -and -not $app8b.HasExited) { Stop-Process -Id $app8b.Id -Force -ErrorAction SilentlyContinue }
+}
+
+Write-Host ("hMod=NULL 线程内钩子: 替换(W)=" + $threadRepl + " 客户端存活=" + $threadAlive)
+if ($threadRepl) { $result.Add('PASS  hMod=NULL 的线程内钩子也被换成空过程（回调地址反查判据有效）') }
+else { $result.Add('FAIL  hMod=NULL 的线程内钩子没被处理（回调地址反查判据失效）') }
+if ($threadAlive) { $result.Add('PASS  --hook-thread 模式下模拟客户端继续存活') }
+else { $result.Add('FAIL  --hook-thread 模式下模拟客户端退出了') }
 
 # ---------------------------------------------------------------------------
 # 阶段九：消息层钩子开关（BlockMessageHooks，v0.6.14）
@@ -700,6 +742,65 @@ if ($offKey -and (-not $offMsg) -and $off.SimAlive) {
     $result.Add('PASS  BlockMessageHooks=0 时只放行消息层、键盘钩子照旧被换掉')
 } else {
     $result.Add('FAIL  BlockMessageHooks=0 的行为不对（要么消息层没放行，要么键盘钩子被一起关掉）')
+}
+# ---------------------------------------------------------------------------
+# 阶段十：探针 --watch 的触发式采集（v0.6.15）
+# 动机：现场"教师监视时谁在抓屏"有两条自动采集通道——主程序的常驻监控（阶段七已覆盖）
+# 与探针 --watch（此前只有手工验证）。探针是随身工具，它坏了现场会整趟白跑，所以钉住：
+# 起一个常驻探针 → 让模拟目标加载改名成 ExdDtDup.dll 的替身 → 断言触发落盘与内容。
+# 替身与加载器都用与 $DistDir 同位数的一组（x64 用 System32 的 version.dll）。
+# ---------------------------------------------------------------------------
+Write-Host ''
+Write-Host '==== 阶段十：探针 --watch 触发式采集 ===='
+
+$probeExe = Join-Path $DistDir 'YZProbe.exe'
+if (-not (Test-Path $probeExe)) {
+    $result.Add('WARN  找不到 YZProbe.exe，跳过阶段十')
+}
+else {
+    $watchOut = Join-Path $env:TEMP 'yzt-watch-regress'
+    New-Item -ItemType Directory -Force -Path $watchOut | Out-Null
+    New-Item -ItemType Directory -Force -Path $ddStubDir | Out-Null
+    Copy-Item -LiteralPath $ddStubSrc -Destination $ddStub -Force
+
+    $watchProc = $null
+    $loadProc  = $null
+    try {
+        $watchProc = Start-Process -FilePath $probeExe -PassThru -WindowStyle Hidden `
+            -ArgumentList '-o', $watchOut, '--watch', '--duration', '26', '--interval', '2', '--no-pause'
+        Start-Sleep -Seconds 4
+        $loadProc = Start-Process -FilePath $sim -ArgumentList '--load', $ddStub -PassThru
+        $watchProc.WaitForExit()
+        Start-Sleep -Seconds 1
+    }
+    finally {
+        if ($loadProc -and -not $loadProc.HasExited) { Stop-Process -Id $loadProc.Id -Force -ErrorAction SilentlyContinue }
+        if ($watchProc -and -not $watchProc.HasExited) { Stop-Process -Id $watchProc.Id -Force -ErrorAction SilentlyContinue }
+    }
+
+    $watchReports = @(Get-ChildItem -LiteralPath $watchOut -Filter 'YZProbe-report-*-watch-capture.md' -ErrorAction SilentlyContinue)
+    $watchLogFile = Get-ChildItem -LiteralPath $watchOut -Filter 'YZProbe-watch-*.log' -ErrorAction SilentlyContinue |
+                    Sort-Object LastWriteTime | Select-Object -Last 1
+    $watchHit = $false
+    if ($watchReports.Count -gt 0) {
+        $watchHit = (Select-String -LiteralPath $watchReports[0].FullName -Pattern 'ExdDtDup\.dll' -Quiet)
+    }
+    $logTxt = ''
+    if ($watchLogFile) { $logTxt = Get-Content -LiteralPath $watchLogFile.FullName -Raw }
+    Write-Host ("watch 报告数=" + $watchReports.Count + " 内容命中=" + $watchHit +
+                " 日志有触发行=" + ($logTxt -match '触发落盘\[capture\]'))
+
+    if ($watchReports.Count -gt 0 -and $watchHit) {
+        $result.Add('PASS  探针 --watch 触发落盘，且报告里命中加载了 ExdDtDup.dll 的进程')
+    } else {
+        $result.Add('FAIL  探针 --watch 没有落盘命中采集组件的报告')
+    }
+
+    if ($logTxt -match 'watch 结束：共落盘 \d+ 份报告') {
+        $result.Add('PASS  探针 --watch 按 --duration 正常退出（日志有结束行，不是崩溃/卡死）')
+    } else {
+        $result.Add('FAIL  探针 --watch 没有正常退出（watch 日志缺少结束行）')
+    }
 }
 Write-Host '==== 测试结果 ===='
 $result | ForEach-Object { Write-Host $_ }
