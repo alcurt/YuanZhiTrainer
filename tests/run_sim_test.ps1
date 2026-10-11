@@ -77,6 +77,13 @@
          它是现场部署的强制启动路径（学生端跑 SYSTEM，主程序必须同级完整性），
          此前没有任何断言覆盖。
 
+    阶段十三（免注入路径下的假全屏，v0.6.18）断言 2 条：
+     30. AutoInject=0 + ExternalWindowFix=1 + 假全屏（Flags=36）时，跨进程纠正也要能做出
+         假全屏：状态文件出现 fullscreen=1 且 topmost=0，日志出现"外部窗口纠正(假全屏)"
+     31. 该路径下不能给窗口加标题栏（外观仍是"全屏广播"的样子）
+         ——阶段三只覆盖了进程内假全屏、阶段二只覆盖了跨进程窗口化，这条组合是机房
+         "注入不进去"时的兜底手段，此前没有断言。
+
     运行前请关闭其它 YZTrainer 实例（含改名副本）：主程序用全局互斥体防重入，
     别的实例在跑时本脚本启动的那份会静默退出，测试结果会变成假失败。
 
@@ -956,6 +963,75 @@ else {
     } else {
         $result.Add('FAIL  YZSysRun 的子进程会话或完整性不对（Session 0 会让现场数据全部失真）')
     }
+}
+# ---------------------------------------------------------------------------
+# 阶段十三：免注入路径下的"假全屏"（v0.6.18）
+# 阶段三测的是进程内假全屏（AutoInject=1），阶段二测的是跨进程窗口化；而机房"客户端被剥句柄
+# 权限、注入不进去"时，唯一的窗口手段就是 ExternalWindowFix 这条跨进程路径——README 明确写了
+# 它同样支持假全屏，但此前没有断言。做法与阶段三一致，只是把注入关掉、外部纠正打开。
+# 断言：
+#   30. 状态文件出现 fullscreen=1 且 topmost=0，且日志有"外部窗口纠正(假全屏)"
+#   31. 该窗口没有被加标题栏（外观仍是全屏广播的样子）
+# ---------------------------------------------------------------------------
+Write-Host ''
+Write-Host '==== 阶段十三：免注入路径下的假全屏 ===='
+
+foreach ($f in @($stateFile, $capFile)) {
+    if (Test-Path $f) { Move-Item -LiteralPath $f -Destination "$f.bak13-$stamp" -Force }
+}
+
+$phase13Ini = @(
+    '[General]',
+    'Flags=36',
+    'WindowPercent=60',
+    'LogLevel=3',
+    'AutoInject=0',
+    'InjectMethod=0',
+    'EnableExamGuard=1',
+    'ExternalWindowFix=1',
+    'ProcessNames=Yistart.exe;TEACHCMD.exe;PlayerGUI.exe;ExdPaintHelper.exe;YZSimTarget.exe'
+)
+Set-Content -LiteralPath $iniFile -Value $phase13Ini -Encoding utf8
+
+$sim13Proc = $null
+$app13Proc = $null
+$state13   = ''
+$fake13    = $false
+
+try {
+    $sim13Proc = Start-Process -FilePath $sim -PassThru
+    Start-Sleep -Seconds 3
+    $mark13 = Get-LogLength $appLog
+    $app13Proc = Start-Process -FilePath $trainer -PassThru
+
+    for ($i = 0; $i -lt 22; $i++) {
+        Start-Sleep -Milliseconds 700
+        $state13 = Get-Content -LiteralPath $stateFile -ErrorAction SilentlyContinue
+        if ($state13 -match 'fullscreen=1' -and $state13 -match 'topmost=0') { $fake13 = $true; break }
+    }
+    $seg13 = Read-LogTail $appLog $mark13
+}
+finally {
+    if ($sim13Proc -and -not $sim13Proc.HasExited) { Stop-Process -Id $sim13Proc.Id -Force -ErrorAction SilentlyContinue }
+    Start-Sleep -Milliseconds 500
+    if ($app13Proc -and -not $app13Proc.HasExited) { Stop-Process -Id $app13Proc.Id -Force -ErrorAction SilentlyContinue }
+}
+
+$log13 = $seg13 -match '外部窗口纠正\(假全屏\)'
+Write-Host ("免注入假全屏状态: " + $state13)
+Write-Host ("命中 fullscreen=1+topmost=0: " + $fake13 + " ; 日志有外部假全屏记录: " + $log13)
+if ($fake13 -and $log13) {
+    $result.Add('PASS  免注入路径也能做假全屏（跨进程：保持全屏 + 取消置顶）')
+} else {
+    $result.Add('FAIL  免注入路径下假全屏没成立（跨进程纠正没做假全屏或没生效）')
+}
+
+if ($fake13 -and $state13 -match 'style=0x([0-9A-Fa-f]{8})') {
+    $style13 = [Convert]::ToUInt32($Matches[1], 16)
+    if (($style13 -band 0x00C00000) -ne 0x00C00000) { $result.Add('PASS  跨进程假全屏下没有加标题栏（外观仍是全屏广播）') }
+    else { $result.Add('FAIL  跨进程假全屏下被加了标题栏') }
+} else {
+    $result.Add('FAIL  免注入假全屏没成立，无法判断标题栏（见上一条）')
 }
 Write-Host '==== 测试结果 ===='
 $result | ForEach-Object { Write-Host $_ }
