@@ -124,6 +124,11 @@
          （v0.6.23 修的 bug：级别只在 isYuanzhi 时查，而晋级发生在之后，于是级别留在初值 0，
          而 0 在枚举里等于 WINTCB_LIGHT，现场会读成"这个抓屏进程受 PPL 保护"）
 
+    阶段十九（x64 探针 --watch 跨架构，v0.6.24）断言 2 条：
+     42. **x64** 探针的 `--watch`（现场采"教师监视时谁在抓屏"的主力通道）在 32 位目标上
+         触发落盘并命中采集组件——它和一次性扫描是两条代码路径（常驻轮询 + 触发判定 + 落盘）
+     43. 那份 watch 报告里该 pid 的"图形采集栈"行判为"采集层=DXGI"（跨架构下判词也成立）
+
     运行前请关闭其它 YZTrainer 实例（含改名副本）：主程序用全局互斥体防重入，
     别的实例在跑时本脚本启动的那份会静默退出，测试结果会变成假失败。
 
@@ -1484,6 +1489,69 @@ try {
 }
 finally {
     if ($protSim -and -not $protSim.HasExited) { Stop-Process -Id $protSim.Id -Force -ErrorAction SilentlyContinue }
+}
+
+# ---------------------------------------------------------------------------
+# 阶段十九：x64 探针的 --watch 在 32 位目标上的跨架构验证（v0.6.24）
+# 为什么单独一条：现场采"教师监视时谁在抓屏"的主力通道就是 **x64 探针的 --watch**
+# （一次性扫描在阶段十七已覆盖跨架构，但 --watch 是另一条代码路径：常驻轮询 + 触发判定 +
+# 报告落盘，见 probe.cpp 的 RunWatch）。它要是漏了 32 位目标的模块，现场照样白跑。
+# 做法与阶段十七同源：32 位模拟目标放 GZYZ 目录、加载改名成 ExdDtDup.dll 的替身；
+# 先挂 **x64** 探针 --watch，4 秒后再起目标，让它触发落盘。
+# 断言：
+#   42. 出现 -watch-capture 报告，且报告里含该 pid 的 ExdDtDup 命中
+#   43. 那份报告里该 pid 的"图形采集栈"行判为 DXGI（跨架构下 stack 判词也成立）
+# ---------------------------------------------------------------------------
+Write-Host ''
+Write-Host '==== 阶段十九：x64 探针 --watch 跨架构（32 位目标）===='
+
+if (-not (Test-Path $probeExe64)) {
+    $result.Add('WARN  找不到 dist\x64\YZProbe.exe，跳过阶段十九')
+}
+else {
+    $watchOut64 = Join-Path $env:TEMP 'yzt-watch-arch'
+    New-Item -ItemType Directory -Force -Path $watchOut64 | Out-Null
+    New-Item -ItemType Directory -Force -Path $gzyzDir | Out-Null
+    Copy-Item -LiteralPath $sim -Destination $gzyzSim -Force
+    New-Item -ItemType Directory -Force -Path $ddStubDir | Out-Null
+    Copy-Item -LiteralPath $ddStubSrc -Destination $ddStub -Force
+
+    $watch64 = $null
+    $load64  = $null
+    try {
+        $watch64 = Start-Process -FilePath $probeExe64 -PassThru -WindowStyle Hidden `
+            -ArgumentList '-o', $watchOut64, '--watch', '--duration', '22', '--interval', '2', '--no-pause'
+        Start-Sleep -Seconds 4
+        $load64 = Start-Process -FilePath $gzyzSim -ArgumentList '--load', $ddStub -PassThru
+        $watch64.WaitForExit()
+        Start-Sleep -Seconds 1
+    }
+    finally {
+        if ($load64  -and -not $load64.HasExited)  { Stop-Process -Id $load64.Id  -Force -ErrorAction SilentlyContinue }
+        if ($watch64 -and -not $watch64.HasExited) { Stop-Process -Id $watch64.Id -Force -ErrorAction SilentlyContinue }
+    }
+
+    $rep64 = Get-ChildItem -LiteralPath $watchOut64 -Filter 'YZProbe-report-*-watch-capture.md' -ErrorAction SilentlyContinue |
+             Sort-Object LastWriteTime | Select-Object -Last 1
+    $txt64 = ''
+    if ($rep64) { $txt64 = Get-Content -LiteralPath $rep64.FullName -Raw }
+    $pidHit  = ($txt64 -match "PID=$($load64.Id)") -and ($txt64 -match 'ExdDtDup')
+    $stack64 = ([regex]::Match($txt64, "图形采集栈 PID=$($load64.Id) [^\r\n]*")).Value
+    $stackOk = ($stack64 -match '采集层=DXGI')
+
+    Write-Host ("x64 --watch 报告=" + $(if ($rep64) { $rep64.Name } else { '(无)' }) +
+                " 命中该 pid=" + $pidHit)
+    Write-Host ("  图形采集栈行: " + $stack64)
+    if ($pidHit) {
+        $result.Add('PASS  x64 探针 --watch 在 32 位目标上触发落盘并命中采集组件')
+    } else {
+        $result.Add('FAIL  x64 探针 --watch 没在 32 位目标上触发（现场主力采集通道会白跑）')
+    }
+    if ($stackOk) {
+        $result.Add('PASS  x64 --watch 报告里的跨架构采集栈判词正确（采集层=DXGI）')
+    } else {
+        $result.Add('FAIL  x64 --watch 报告里缺少正确的图形采集栈判词')
+    }
 }
 
 Write-Host '==== 测试结果 ===='
