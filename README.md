@@ -1,6 +1,6 @@
 # YZTrainer
 
-> **v0.6.32** · 一款**远志多媒体教学管理软件 V9.0 网管版学生端**的解控软件 · 仅供**教育研究**与**技术学习**，禁止任何非法用途 · 与厂商无关联，使用者自行承担全部后果。
+> **v0.6.33** · 一款**远志多媒体教学管理软件 V9.0 网管版学生端**的解控软件 · 仅供**教育研究**与**技术学习**，禁止任何非法用途 · 与厂商无关联，使用者自行承担全部后果。
 
 > **部署硬要求（2026-09-29 机房实测）**：学生端以 SYSTEM 运行，而本程序默认是管理员（高完整性）。
 > 两者差一级完整性，`VirtualAllocEx` 注入、`SetWindowsHookEx` 消息钩子、跨进程改窗口**三样都会被 UIPI 挡住**
@@ -819,3 +819,30 @@ This disclaimer is subject to change with new versions. It does not exempt users
 
 本项目以 MIT 许可证发布，全文见 `LICENSE`。
 第三方组件：MinHook（BSD-2-Clause，见 `third_party/minhook/LICENSE.txt`）；实现思路参考 JiYuTrainer（MIT），未复制其代码。
+
+### 2026-10-12（第二十二轮）v0.6.33：冻结画面（DXGI 桌面复制）实现并验证
+
+机房数据把路线定死了：教师"监视/远程桌面"时**学生端自己**拉起
+`rundll32.exe "<...>\KsFiles\ExdDtDup.dll",RunCapture 0`，那条 **DXGI 桌面复制就在这个子进程里**——
+做在 `Yistart.exe` 里的冻结没用（这正是机房"开了防监视教师端仍看到实时画面"的原因）。
+v0.6.32 解决"识别 + 按 PID 注入"，本版补最后一步：**在那颗进程里把桌面复制冻住**。
+
+* `hooks_duptrace.cpp`：冻结期间 `AcquireNextFrame` 桩**不转发**，按调用方 timeout **诚实等待**
+  （`min(timeout,100)` 毫秒；timeout==0 给 8 毫秒）后返回 `DXGI_ERROR_WAIT_TIMEOUT`；不伪造帧、不排空
+  ——调用方拿不到新帧，画面停在最后一帧（§27 本机排练：忙等会打到 3.54M 次/秒，诚实等待 ~32 次/秒）。
+* `engine.cpp`：`ProcessLoadedCaptureComponent()` 查**本进程自己加载的模块**里有没有 ExdDtDup/ExdElite/
+  ExdPaint/ScreenRecoder；冻结条件 = **本进程是抓屏进程 且 防监视开着**。自检而不是靠宿主下标记，
+  是因为同一份配置广播给所有 Hook 实例，只有"你加载了采集组件"能把它们分开 ⇒ 客户端不会被误冻，
+  "接收广播"结构性安全。
+* 冻结开关与判定**镜像回宿主日志**：现场看 `DXGI 冻结: 已开启/已关闭` 与
+  `[DXGI 判定] captureProc=… wantFreeze=… flags=0x…` 即可判断"为什么没冻上"。
+
+**本机实测（免提权，`build\logs\verify-freeze-dxgi-v0633.log`）**：
+
+```
+【对照】Flags=1  → captureProc=1 wantFreeze=0 flags=0x00030001 → 取到帧=60 超时=0（请求 60）
+【冻结】Flags=45 → captureProc=1 wantFreeze=1 flags=0x0003002D → 取到帧=0  超时=60（请求 60）
+```
+
+（`Flags=45` 即机房现场那套；`YZ_FLAG_ANTI_MONITOR=0x8`。替身必须叫 `YZSimTarget.exe`——钩子的宿主
+身份自检只认远志学生端/模拟目标名，改名会让整个 Hook 静默不启用。）

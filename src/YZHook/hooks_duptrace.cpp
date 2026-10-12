@@ -23,6 +23,8 @@
 
 namespace yzhook
 {
+/* 冻结开关（v0.6.33）：变量放最前，AcquireNextFrame 桩与引擎侧共用 */
+volatile LONG g_freezeDup = 0;
 namespace
 {
 /* ---- 真函数指针（从真 vtable 里取） ---- */
@@ -132,6 +134,8 @@ HRESULT STDMETHODCALLTYPE TraceDuplicateOutput(IDXGIOutput1* self, IUnknown* dev
     return hr;
 }
 
+
+
 HRESULT STDMETHODCALLTYPE TraceAcquireNextFrame(IDXGIOutputDuplication* self, UINT timeout,
                                                 DXGI_OUTDUPL_FRAME_INFO* info, IDXGIResource** res)
 {
@@ -140,6 +144,20 @@ HRESULT STDMETHODCALLTYPE TraceAcquireNextFrame(IDXGIOutputDuplication* self, UI
 
     if (!TryEnterHook())
         return g_realAcquire(self, timeout, info, res);
+
+    if (InterlockedCompareExchange(&g_freezeDup, 0, 0) != 0)
+    {
+        /* 冻结中：**诚实等待**再回 WAIT_TIMEOUT（不伪造帧、不排空）。等待长度按调用方 timeout 取，
+           0 时给 8 毫秒——不然调用方会变成忙等（§27 实测 3.54M 次/秒）。 */
+        DWORD waitMs = (timeout == 0) ? 8 : timeout;
+        if (waitMs > 100)
+            waitMs = 100;
+        Sleep(waitMs);
+        InterlockedIncrement(&g_acquireCalls);
+        InterlockedIncrement(&g_acquireTimeouts);
+        LeaveHook();
+        return DXGI_ERROR_WAIT_TIMEOUT;
+    }
 
     InterlockedIncrement(&g_acquireCalls);
     const HRESULT hr = g_realAcquire(self, timeout, info, res);   /* 原样转发，返回值绝不改 */
@@ -249,4 +267,15 @@ void DupTraceShutdown()
                InterlockedCompareExchange(&g_releaseCalls, 0, 0));
     }
 }
+/* 冻结开关（v0.6.33）：定义放在匿名命名空间之外，否则引擎侧链接不到 */
+
+void DupTraceSetFreeze(bool on)
+{
+    InterlockedExchange(&g_freezeDup, on ? 1 : 0);
+    YZLOGI(L"DXGI 冻结: %s", on ? L"已开启（该进程内的桌面复制将取不到新帧）" : L"已关闭（恢复转发）");
+    /* 镜像回宿主（v0.6.33）：现场在 yzt.log 里就能一眼看到冻结何时开、何时关，
+       不必再去目标进程的日志目录里翻。 */
+    yzhook::SendLogToHost(YZ_LOG_INFO, yz::Format(L"DXGI 冻结: %s", on ? L"已开启" : L"已关闭").c_str());
+}
+
 } /* namespace yzhook */

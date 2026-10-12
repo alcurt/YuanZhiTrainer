@@ -219,6 +219,7 @@ void LoadLateDllOnce()
    （--dup 模式）并让命令行带上同一个模块路径标记，好让 YZHook 的抓屏子进程识别命中
    （模拟目标自己就是被注入的那个"学生端"）。*/
 static bool g_spawnCaptureChild = false;
+static DWORD g_dupDelayMs = 8000;   /* --dup-delay <秒>：探针推后（v0.6.33 验证用） */
 
 void SpawnCaptureChildOnce()
 {
@@ -554,6 +555,20 @@ int WINAPI wWinMain(HINSTANCE hinst, HINSTANCE, LPWSTR cmdLine, int)
        给一个尾部空格的假参数，解析自然落回默认帧数（v0.6.32，否则空指针崩 0xC0000005）。 */
     if (dupArg == nullptr && g_spawnCaptureChild)
         dupArg = L"--dup ";
+    /* --dup-delay <秒>（v0.6.33 验证用）：把桌面复制探针推迟到指定秒数再跑。
+       为什么需要：验证"冻结画面"时，注入→配置→自检→武装这条链要 ~9~10 秒，而探针默认
+       8 秒就跑，两者赛跑会让结果介于"全取到"和"全超时"之间（实测 31/29）。用这个参数
+       把探针推到武装之后，才能拿到 0/60 这种干净对照。 */
+    /* 结果写进文件作用域的 g_dupDelayMs（定时器设置在另一个作用域里） */
+    {
+        const wchar_t* d = wcsstr(cmdLine, L"--dup-delay ");
+        if (d != nullptr)
+        {
+            const int sec = _wtoi(d + 12);
+            if (sec > 0 && sec <= 600)
+                g_dupDelayMs = static_cast<DWORD>(sec) * 1000;
+        }
+    }
         if (dupArg != nullptr || g_spawnCaptureChild)
         {
             g_dupFrames = 20;                       /* 默认取 20 帧 */
@@ -595,7 +610,7 @@ int WINAPI wWinMain(HINSTANCE hinst, HINSTANCE, LPWSTR cmdLine, int)
 
     /* 一次性：3 秒后跑一次 --dup 的桌面复制取证（此时注入与配置都已就绪） */
     if (g_dupFrames > 0)
-        SetTimer(g_main, 9, 8000, nullptr);   /* 8 秒后再取证：确保注入与配置都已就绪 */
+        SetTimer(g_main, 9, g_dupDelayMs, nullptr);   /* 默认 8 秒；--dup-delay 可推后（见上） */
 
     /* 一次性：4 秒后加载 --load 指定的 DLL（模拟"钩子模块晚于注入出现"） */
     if (cmdLine != nullptr)

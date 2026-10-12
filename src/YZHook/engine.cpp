@@ -2,6 +2,8 @@
 
 #include "exam.h"
 #include "hookmgr.h"
+#include <tlhelp32.h>
+#include <wctype.h>
 #include "hooks_capture.h"
 #include "hooks_duptrace.h"
 #include "hooks_exec.h"
@@ -587,6 +589,42 @@ bool EngineIsTargetHost()
     return false;
 }
 
+/* 本进程是不是"抓屏进程"：看自己加载的模块里有没有采集组件（不缓存否定结果——子进程可能稍后
+   才加载 ExdDtDup.dll，而我们收到配置的时机说不定更早）。 */
+bool ProcessLoadedCaptureComponent()
+{
+    static const wchar_t* kMarks[] = { L"ExdDtDup", L"ExdElite", L"ExdPaint", L"ScreenRecoder" };
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, GetCurrentProcessId());
+    if (snap == INVALID_HANDLE_VALUE)
+        return false;
+    bool found = false;
+    MODULEENTRY32W me;
+    ZeroMemory(&me, sizeof(me));
+    me.dwSize = sizeof(me);
+    if (Module32FirstW(snap, &me))
+    {
+        do
+        {
+            for (const wchar_t* m : kMarks)
+            {
+                std::wstring name = me.szModule;
+                std::wstring mark = m;
+                for (size_t k = 0; k < name.size(); ++k) name[k] = static_cast<wchar_t>(towlower(name[k]));
+                for (size_t k = 0; k < mark.size(); ++k) mark[k] = static_cast<wchar_t>(towlower(mark[k]));
+                if (name.find(mark) != std::wstring::npos)
+                {
+                    found = true;
+                    break;
+                }
+            }
+            if (found)
+                break;
+        } while (Module32NextW(snap, &me));
+    }
+    CloseHandle(snap);
+    return found;
+}
+
 void EngineApplyConfig(const YZ_CONFIG& cfg)
 {
     g_configFlags = cfg.flags;
@@ -597,8 +635,12 @@ void EngineApplyConfig(const YZ_CONFIG& cfg)
     /* DXGI 取证（默认关）：只有打开时才装钩子——关闭时本模块一行代码都不跑，
        也不会把 dxgi.dll 拖进目标进程（LoadLibrary 在安装函数里才发生）。 */
     const bool wantTrace = (cfg.flags & YZ_CFG_TRACE_DUPLICATION) != 0;
+    const bool captureProc = ProcessLoadedCaptureComponent();   /* 本进程是不是抓屏进程（v0.6.33） */
+    const bool wantFreeze  = captureProc && (cfg.flags & YZ_FLAG_ANTI_MONITOR) != 0;
     InterlockedExchange(&g_traceDuplication, wantTrace ? 1 : 0);
-    if (wantTrace)
+    yzhook::DupTraceSetFreeze(wantFreeze);
+    /* v0.6.33 诊断：四个判定值镜像回宿主，冻结没生效时一眼看出哪个条件挂 */     yzhook::SendLogToHost(YZ_LOG_INFO,         yz::Format(L"[DXGI 判定] captureProc=%d wantTrace=%d wantFreeze=%d flags=0x%08X",                   captureProc ? 1 : 0, wantTrace ? 1 : 0, wantFreeze ? 1 : 0,                   cfg.flags).c_str());
+    if (wantTrace || wantFreeze)
         yzhook::DupTraceInstall(true);
 
     bool guard = (cfg.flags & YZ_CFG_EXAM_GUARD) != 0;
@@ -711,4 +753,3 @@ void EngineStop()
     g_running = false;
 }
 } /* namespace yzhook */
-
