@@ -178,6 +178,23 @@ void AuditEvent(const wchar_t* kind, const std::wstring& exe, const std::wstring
 }
 } /* namespace */
 
+/* 抓屏子进程识别（v0.6.32）。现场实测（2026-10-12 机房）：教师"监视/远程桌面"时，
+   学生端亲手拉起 rundll32.exe "<...>\KsFiles\ExdDtDup.dll",RunCapture 0，那条 DXGI
+   桌面复制就在这个子进程里——**冻结画面必须进那个进程做**（做在 Yststart.exe 里没用，
+   这正是机房防监视失效的原因）。这里只在原函数返回后看一眼命令行把它标出来：
+   不改写调用、不拦截，硬边界不变。 */
+bool IsCaptureChildCommandLine(const std::wstring& cmdLine)
+{
+    if (cmdLine.empty())
+        return false;
+    static const wchar_t* kMarks[] = { L"ExdDtDup.dll", L"ExdElite", L"ExdPaint", L"ScreenRecoder.exe" };
+    for (const wchar_t* m : kMarks)
+    {
+        if (yz::ContainsNoCase(cmdLine, m))
+            return true;
+    }
+    return false;
+}
 BOOL WINAPI Hook_CreateProcessW(LPCWSTR appName, LPWSTR cmdLine, LPSECURITY_ATTRIBUTES procAttr,
                                 LPSECURITY_ATTRIBUTES threadAttr, BOOL inherit, DWORD flags,
                                 LPVOID env, LPCWSTR cwd, LPSTARTUPINFOW si, LPPROCESS_INFORMATION pi)
@@ -188,9 +205,11 @@ BOOL WINAPI Hook_CreateProcessW(LPCWSTR appName, LPWSTR cmdLine, LPSECURITY_ATTR
     const BOOL result = g_realCreateProcessW(appName, cmdLine, procAttr, threadAttr, inherit, flags,
                                              env, cwd, si, pi);
     std::wstring exe = (appName != nullptr) ? std::wstring(appName) : ExeFromCommandLine(cmdLine != nullptr ? cmdLine : L"");
-    AuditEvent(L"CreateProcessW", exe, cmdLine != nullptr ? cmdLine : L"",
-               result ? (pi != nullptr ? yz::Format(L"ok pid=%u", pi->dwProcessId) : L"ok")
-                      : yz::Format(L"失败 err=%u", GetLastError()));
+    std::wstring verdict = result ? (pi != nullptr ? yz::Format(L"ok pid=%u", pi->dwProcessId) : L"ok")
+                                  : yz::Format(L"失败 err=%u", GetLastError());
+    if (result && pi != nullptr && IsCaptureChildCommandLine(cmdLine != nullptr ? cmdLine : L""))
+        verdict += yz::Format(L" [抓屏子进程 pid=%u]", pi->dwProcessId);
+    AuditEvent(L"CreateProcessW", exe, cmdLine != nullptr ? cmdLine : L"", verdict);
 
     yzhook::LeaveHook();
     return result;
@@ -206,9 +225,11 @@ BOOL WINAPI Hook_CreateProcessA(LPCSTR appName, LPSTR cmdLine, LPSECURITY_ATTRIB
     const BOOL result = g_realCreateProcessA(appName, cmdLine, procAttr, threadAttr, inherit, flags,
                                              env, cwd, si, pi);
     std::wstring exe = (appName != nullptr) ? FromAnsi(appName) : ExeFromCommandLine(FromAnsi(cmdLine));
-    AuditEvent(L"CreateProcessA", exe, FromAnsi(cmdLine),
-               result ? (pi != nullptr ? yz::Format(L"ok pid=%u", pi->dwProcessId) : L"ok")
-                      : yz::Format(L"失败 err=%u", GetLastError()));
+    std::wstring verdictA = result ? (pi != nullptr ? yz::Format(L"ok pid=%u", pi->dwProcessId) : L"ok")
+                                   : yz::Format(L"失败 err=%u", GetLastError());
+    if (result && pi != nullptr && IsCaptureChildCommandLine(FromAnsi(cmdLine)))
+        verdictA += yz::Format(L" [抓屏子进程 pid=%u]", pi->dwProcessId);
+    AuditEvent(L"CreateProcessA", exe, FromAnsi(cmdLine), verdictA);
 
     yzhook::LeaveHook();
     return result;

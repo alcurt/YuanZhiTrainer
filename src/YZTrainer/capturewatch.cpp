@@ -203,7 +203,17 @@ void ScanOnce(bool fullSweep, std::vector<std::wstring>* logLines)
             (modulePath.empty() ? p.path.c_str() : modulePath.c_str()),
             ModuleRoute(module));
         YZLOGI(L"%s", line.c_str());
+        /* v0.6.32 第二触发点：采集栈监控命中即触发"按 PID 注入"（与 CreateProcessW 那条并行，
+           机房实测这条与厂商用哪条 API 拉起抓屏进程无关；重复注入幂等）。 */
+        if (g_app.cfg.injectCaptureChild)
         UiAppendLog(yz::kLogInfo, line);
+        /* v0.6.32 第二触发点：**采集栈监控命中**也要触发"按 PID 注入"。
+           为什么要有这第二条：机房实测（2026-10-12）这个监控 4 次都准确抓到了
+           rundll32.exe + ExdDtDup.dll，它与"厂商用哪条 API 拉起抓屏进程"无关；
+           而第一条（CreateProcessW 钩子识别 spawn）依赖那次调用经过我们的钩子——
+           本机验证时它就没生效过。两条都留，谁先命中谁动手（重复注入是幂等的）。 */
+        if (g_app.cfg.injectCaptureChild)
+            OnCaptureChildSeen(p.pid, line);
         if (logLines != nullptr)
             logLines->push_back(line);
         firstAutoExport = true;
@@ -327,3 +337,4 @@ void capturewatch::Reset()
     g_firstSeen.clear();
     g_hits.clear();
 }
+

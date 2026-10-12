@@ -16,7 +16,9 @@
 param(
     [ValidateSet('Win32', 'x64')] [string]$Platform = 'Win32',
     [ValidateSet('Debug', 'Release')] [string]$Configuration = 'Release',
-    [switch]$Both
+    [switch]$Both,
+    # v0.6.32：本机集成测试用——产出 asInvoker 的主程序、且只写到 build\noelev\（绝不碰 dist 交付目录）
+    [switch]$NoElevate
 )
 
 $ErrorActionPreference = 'Stop'
@@ -42,7 +44,12 @@ $platforms = if ($Both) { @('Win32', 'x64') } else { @($Platform) }
 
 foreach ($p in $platforms) {
     Write-Host "==== 生成 $Configuration | $p ===="
-    & $msbuild $sln /m /nologo /v:m /p:Configuration=$Configuration /p:Platform=$p
+        $extra = @()
+    if ($NoElevate) {
+        $extra = @('/p:YzUacLevel=asInvoker', "/p:OutDir=$(Join-Path $PSScriptRoot 'build\noelev')$([IO.Path]::DirectorySeparatorChar)")
+        Write-Host '模式   : 免提权测试构建（asInvoker，产物只写 build\noelev\）'
+    }
+    & $msbuild $sln /m /nologo /v:m /p:Configuration=$Configuration /p:Platform=$p @extra
     if ($LASTEXITCODE -ne 0) {
         throw "构建失败: $Configuration|$p (exit=$LASTEXITCODE)"
     }

@@ -70,7 +70,8 @@ void ConfigApplyDefaults(AppConfig& cfg)
     cfg.autoExportOnExit = true;
     cfg.autoExportOnCapture = true;
     cfg.blockMessageHooks = true;
-    cfg.traceDesktopDuplication = false;      /* 取证默认关：开了也只计数，不影响任何行为 */
+    cfg.traceDesktopDuplication = false;      /* 取证默认关：开了也只计数，不影响任何行为 */
+    cfg.injectCaptureChild = true;   /* 抓屏子进程自动注入（v0.6.32，默认开）：教师监视/缩略图时
     SyncExamGuardBit(cfg);
     SyncBlockMessageHooksBit(cfg);
     SyncTraceDuplicationBit(cfg);
@@ -110,7 +111,8 @@ void ConfigLoad(AppConfig& cfg, const std::wstring& iniPath)
     cfg.autoExportOnExit = ReadInt(iniPath, L"AutoExportOnExit", cfg.autoExportOnExit ? 1 : 0) != 0;
     cfg.autoExportOnCapture = ReadInt(iniPath, L"AutoExportOnCapture", cfg.autoExportOnCapture ? 1 : 0) != 0;
     cfg.blockMessageHooks = ReadInt(iniPath, L"BlockMessageHooks", cfg.blockMessageHooks ? 1 : 0) != 0;
-    cfg.traceDesktopDuplication = ReadInt(iniPath, L"TraceDesktopDuplication", cfg.traceDesktopDuplication ? 1 : 0) != 0;
+    cfg.traceDesktopDuplication = ReadInt(iniPath, L"TraceDesktopDuplication", cfg.traceDesktopDuplication ? 1 : 0) != 0;
+    cfg.injectCaptureChild = ReadInt(iniPath, L"InjectCaptureChild", cfg.injectCaptureChild ? 1 : 0) != 0;
     SyncBlockMessageHooksBit(cfg);
     SyncTraceDuplicationBit(cfg);
 
@@ -148,7 +150,8 @@ void ConfigSave(const AppConfig& cfg, const std::wstring& iniPath)
     WriteInt(iniPath, L"AutoExportOnExit", cfg.autoExportOnExit ? 1 : 0);
     WriteInt(iniPath, L"AutoExportOnCapture", cfg.autoExportOnCapture ? 1 : 0);
     WriteInt(iniPath, L"BlockMessageHooks", cfg.blockMessageHooks ? 1 : 0);
-    WriteInt(iniPath, L"TraceDesktopDuplication", cfg.traceDesktopDuplication ? 1 : 0);
+    WriteInt(iniPath, L"TraceDesktopDuplication", cfg.traceDesktopDuplication ? 1 : 0);
+    WriteInt(iniPath, L"InjectCaptureChild", cfg.injectCaptureChild ? 1 : 0);
     WritePrivateProfileStringW(kSection, L"TargetDir", cfg.targetDir.c_str(), iniPath.c_str());
     WritePrivateProfileStringW(kSection, L"HookDllPath", cfg.hookDllPath.c_str(), iniPath.c_str());
 

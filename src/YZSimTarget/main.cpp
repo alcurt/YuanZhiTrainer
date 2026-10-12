@@ -214,6 +214,44 @@ void LoadLateDllOnce()
 /* --dup：真的建一次桌面复制并取 N 帧，把结果写进 sim_log.txt。
    用途：让回归能证明"YZHook 的 DXGI 取证钩子确实接管了厂商侧的 DuplicateOutput 与
    AcquireNextFrame"——模拟目标在这里扮演厂商那个采集线程。 */
+/* 抓屏子进程替身（v0.6.32）：机房实测厂商是"学生端亲手拉起
+   rundll32.exe <...>\KsFiles\ExdDtDup.dll,RunCapture 0"。这里照抄这个形状：拉起自己
+   （--dup 模式）并让命令行带上同一个模块路径标记，好让 YZHook 的抓屏子进程识别命中
+   （模拟目标自己就是被注入的那个"学生端"）。*/
+static bool g_spawnCaptureChild = false;
+
+void SpawnCaptureChildOnce()
+{
+    wchar_t self[MAX_PATH] = { 0 };
+    GetModuleFileNameW(nullptr, self, MAX_PATH);
+    std::wstring child = yz::Format(L"\"%s\" --dup 60 \"C:\\Program Files (x86)\\GZYZ\\"
+                                    L"YZinfo Multimedia teaching softwareV9.0 Student\\"
+                                    L"KsFiles\\ExdDtDup.dll\",RunCapture 0", self);
+    STARTUPINFOW si;
+    ZeroMemory(&si, sizeof(si));
+    si.cb = sizeof(si);
+    PROCESS_INFORMATION pi;
+    ZeroMemory(&pi, sizeof(pi));
+    /* v0.6.32 本机验证用：让子进程额外加载一个**文件名就叫 ExdDtDup.dll** 的模块，
+       这样"采集栈监控"这条**身份无关**的触发路径能在本机响（第一条 CreateProcessW 触发
+       本机测不出来：仓库路径里带 Yuanzhi/Teaching，会被判成 self 因而不镜像到宿主）。 */
+    {
+        wchar_t envDll[512] = { 0 };
+        if (GetEnvironmentVariableW(L"YZ_TEST_LOAD_DLL", envDll, 512) > 0)
+            child += yz::Format(L" --load \"%s\"", envDll);
+    }
+    const BOOL ok = CreateProcessW(nullptr, &child[0], nullptr, nullptr, FALSE, 0,
+                                   nullptr, nullptr, &si, &pi);
+    AppendFile(yz::JoinPath(g_exeDir, L"sim_log.txt"),
+               yz::Format(L"spawn-child: 已拉起抓屏子进程替身 ok=%d pid=%u",
+                          ok ? 1 : 0, ok ? pi.dwProcessId : 0));
+    if (ok)
+    {
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+    }
+}
+
 void RunDupProbe()
 {
     const std::wstring logPath = yz::JoinPath(g_exeDir, L"sim_log.txt");
@@ -442,6 +480,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             /* --dup：延迟 3 秒跑一次桌面复制取证（定时器 8 已被 --hook 的延迟安装占用） */
             KillTimer(hwnd, 9);
             RunDupProbe();
+    if (g_spawnCaptureChild)
+        SpawnCaptureChildOnce();
         }
         else if (wParam == 8)
         {
@@ -503,8 +543,18 @@ int WINAPI wWinMain(HINSTANCE hinst, HINSTANCE, LPWSTR cmdLine, int)
     g_execRequested = (cmdLine != nullptr) && (wcsstr(cmdLine, L"--exec") != nullptr);
     if (cmdLine != nullptr)
     {
-        const wchar_t* dupArg = wcsstr(cmdLine, L"--dup");
-        if (dupArg != nullptr)
+        /* --spawn-child（v0.6.32）：本机替身，见 SpawnCaptureChildOnce()。
+       注意**不在这里立刻拉起**：现场那次 spawn 发生在主程序注入之后，而我们本机要保证
+       钩子已经装好、经过的是我们钩住的那次 CreateProcessW——所以挂到 3 秒定时器上。 */
+    if (wcsstr(cmdLine, L"--spawn-child") != nullptr && wcsstr(cmdLine, L"--dup") == nullptr)
+        g_spawnCaptureChild = true;
+
+    const wchar_t* dupArg = wcsstr(cmdLine, L"--dup");
+    /* --spawn-child 时没有 --dup，但下面"解析帧数"那段会 dupArg+5 后取值：
+       给一个尾部空格的假参数，解析自然落回默认帧数（v0.6.32，否则空指针崩 0xC0000005）。 */
+    if (dupArg == nullptr && g_spawnCaptureChild)
+        dupArg = L"--dup ";
+        if (dupArg != nullptr || g_spawnCaptureChild)
         {
             g_dupFrames = 20;                       /* 默认取 20 帧 */
             const wchar_t* p = dupArg + 5;

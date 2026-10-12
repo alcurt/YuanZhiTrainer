@@ -1,4 +1,5 @@
 #include "app.h"
+#include "capturechild.h"
 
 #include "yz_log.h"
 #include "yz_util.h"
@@ -76,6 +77,16 @@ void HandleEvent(DWORD opcode, const std::vector<BYTE>& payload)
             const YZ_LOG_EVENT* ev = reinterpret_cast<const YZ_LOG_EVENT*>(payload.data());
             std::wstring text(ev->text);
             YZLOGI(L"[Hook pid=%u] %s", ev->pid, text.c_str());
+
+            /* 抓屏子进程（v0.6.32）：钩子侧在审计行里打了 [抓屏子进程 pid=N] 标记，
+               这里认出来交给注入器按 PID 注入——冻结画面要在那个进程里做。
+               解析抽成了纯函数（capturechild.h），好在 tests\unit 里直接跑单元测试。
+               走日志通道而不是新开协议事件，是为了避免从任意线程直接往管道发帧。 */
+            {
+                DWORD childPid = 0;
+                if (yzcap::ParseCaptureChildMarker(text, &childPid))
+                    OnCaptureChildSeen(childPid, text);
+            }
 
             /* 客户端 Hook 上报"广播窗口已窗口化/已假全屏"= 广播确实开始了：
                立刻静默导出一份诊断包（每进程一次）。广播常常没预告、一节课只有一次，

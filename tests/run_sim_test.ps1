@@ -169,6 +169,12 @@
          探针产物也从"只认 report"放宽到 `YZProbe-*.*`，`--watch` 留下的
          `YZProbe-watch-<时间戳>.log` 现在也进包（前提是探针用 `-o` 指向该目录）
 
+    阶段二十五（抓屏子进程识别与按 PID 注入，v0.6.32）断言 2 条：
+     58. 钩子认出厂商拉起的抓屏子进程（机房实测：教师监视/缩略图时**学生端自己**拉起
+         `rundll32.exe "<...>\KsFiles\ExdDtDup.dll",RunCapture 0`，DXGI 桌面复制在子进程里）
+     59. 主程序按 PID 注入并给出结论（"已注入"或"注入失败+原因"）——现场要判的第一件事就是
+         "能不能进这个进程"（客户端上 PROCESS_VM_OPERATION 被内核剥夺，子进程尚未验证）
+
     ── 断言写法约定（血泪换来的，新加阶段请照做）────────────────────────────
     * 日志里的句柄/地址用 %p 打印，**不带 0x 前缀**（"HHOOK=002A0E26"）。凡是要匹配它们，
       一律写成 `(?:0x)?0*[1-9A-Fa-f]`——v0.6.13 阶段八与 v0.6.25 阶段二十各栽过一次。
@@ -2236,6 +2242,90 @@ if ($manifestOk) {
 }
 
 $script:sw.Stop()
+# ---------------------------------------------------------------------------
+# 阶段二十五：抓屏子进程识别与按 PID 注入（v0.6.32）
+# 现场依据（2026-10-12 机房实测，见 开发记录 §39）：
+#   教师"监视/远程桌面"时，**学生端自己**拉起
+#     C:\Windows\SysWOW64\rundll32.exe "<...>\KsFiles\ExdDtDup.dll",RunCapture 0
+#   （审计日志 origin=remote，会话结束由 tskill <pid> 收尾；5 次会话 5 个新进程）。
+#   那条 DXGI 桌面复制就在这个子进程里——做在 Yistart.exe 里的冻结没用（机房防监视失效的原因）。
+# 本阶段用 YZSimTarget --spawn-child 当替身（它照抄机房那个命令行形状），验证整条链：
+#   父进程（模拟目标，已被注入）拉起子进程 → 钩子在 CreateProcessW 后认出并打标记
+#   → 主程序从镜像日志里认领 → 按 PID 注入 → 日志里给出结果判词。
+# 断言：
+#   58. 钩子认出了抓屏子进程（宿主日志出现"抓屏子进程出现: pid="）
+#   59. 主程序按 PID 注入并给出结论（"已注入"或"注入失败"+原因，不能静默）
+# ---------------------------------------------------------------------------
+Write-Host ''
+Write-Host '==== 阶段二十五：抓屏子进程识别与按 PID 注入 ===='
+
+$phase25Ini = @(
+    '[General]',
+    'Flags=1',
+    'WindowPercent=60',
+    'LogLevel=3',
+    'AutoInject=1',
+    'InjectMethod=0',
+    'EnableExamGuard=1',
+    'ExternalWindowFix=0',
+    'InjectCaptureChild=1',
+    'AutoExportOnBroadcast=0',
+    'AutoExportOnExit=0',
+    'AutoExportOnCapture=0',
+    'ProcessNames=Yistart.exe;TEACHCMD.exe;PlayerGUI.exe;ExdPaintHelper.exe;YZSimTarget.exe'
+)
+Set-Content -LiteralPath $iniFile -Value $phase25Ini -Encoding utf8
+
+foreach ($f in @($stateFile, $capFile)) {
+    if (Test-Path $f) { Move-Item -LiteralPath $f -Destination "$f.bak25-$stamp" -Force }
+}
+$mark25 = Get-LogLength $appLog
+
+$sim25Proc = $null
+$app25Proc = $null
+$seenChild = $false
+$injectVerdict = ''
+
+try {
+    # 替身：8 秒后自己拉起"抓屏子进程"（等注入与配置就绪）
+    $sim25Proc = Start-Process -FilePath $sim -ArgumentList '--spawn-child' -PassThru
+    Start-Sleep -Seconds 1
+    $app25Proc = Start-Process -FilePath $trainer -PassThru
+
+    for ($i = 0; $i -lt 30; $i++) {
+        Start-Sleep -Milliseconds 700
+        $seg25 = Read-LogTail $appLog $mark25
+        if (-not $seenChild) {
+            if ($seg25 -match '抓屏子进程出现[:：]\s*pid=(\d+)') {
+                $seenChild = $true
+            }
+        }
+        if ($seg25 -match '抓屏子进程 pid=(\d+)[:：]\s*(已注入[^\r\n]*|注入失败[^\r\n]*)') {
+            $injectVerdict = $Matches[0].Trim()
+            break
+        }
+    }
+}
+finally {
+    if ($sim25Proc -and -not $sim25Proc.HasExited) { Stop-Process -Id $sim25Proc.Id -Force -ErrorAction SilentlyContinue }
+    Get-Process -Name YZSimTarget -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Milliseconds 500
+    if ($app25Proc -and -not $app25Proc.HasExited) { Stop-Process -Id $app25Proc.Id -Force -ErrorAction SilentlyContinue }
+}
+
+Write-Host ("认出抓屏子进程=" + $seenChild + " 注入结论=" + $(if ($injectVerdict) { $injectVerdict } else { '(无)' }))
+
+if ($seenChild) {
+    $result.Add('PASS  钩子认出了厂商拉起的抓屏子进程（教师监视/缩略图时由学生端自己 spawn）')
+} else {
+    $result.Add('FAIL  没认出抓屏子进程——冻结画面就没有落点（重点查 CreateProcessW 钩子与命令行匹配）')
+}
+if ($injectVerdict) {
+    $result.Add('PASS  主程序按 PID 注入并给出结论（已注入 / 注入失败+原因，不会静默）')
+} else {
+    $result.Add('FAIL  识别到抓屏子进程但注入环节没有任何结论（现场将无法判断能不能进）')
+}
+
 Write-Host ("==== 测试结果（总用时 " + [Math]::Round($script:sw.Elapsed.TotalSeconds, 1) + " 秒）====")
 $result | ForEach-Object { Write-Host $_ }
 $failCount = @($result | Where-Object { $_ -like 'FAIL*' }).Count

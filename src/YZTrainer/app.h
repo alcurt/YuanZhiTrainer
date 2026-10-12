@@ -43,6 +43,10 @@ struct AppConfig
     /* DXGI 桌面复制取证（默认关）：只计数、不改变行为。现场用来判断"教师监视/广播
        到底有没有走桌面复制这条链"，也用来确认冻结 DXGI 不会误伤"接收广播"。 */
     bool         traceDesktopDuplication;
+    /* 抓屏子进程自动注入（v0.6.32，默认开）：教师"监视/远程桌面"时学生端会拉起
+       rundll32.exe + ExdDtDup.dll 做 DXGI 桌面复制，冻结必须在那个进程里做。
+       设 0 时只识别、不注入（用于只想取证、不想动手的场合）。 */
+    bool         injectCaptureChild;
     std::wstring targetDir;        /* 远志安装目录，空=按进程路径自动判定 */
     std::wstring hookDllPath;      /* 空=用内嵌资源；填路径则强制使用该文件 */
     std::vector<std::wstring> processNames;
@@ -99,6 +103,8 @@ void ConfigApplyDefaults(AppConfig& cfg);
 /* ---- injector.cpp ---- */
 DWORD FindTargetProcess(const AppConfig& cfg);
 bool  InjectHookDll(DWORD pid, const std::wstring& dllPath, std::wstring* err);
+/* 抓屏子进程出现时的处理（v0.6.32，实现在 injector.cpp）：记日志 + 按 PID 注入 */
+void  OnCaptureChildSeen(DWORD pid, const std::wstring& line);
 void  WatchdogTick();
 std::wstring ResolveHookDllPath();
 

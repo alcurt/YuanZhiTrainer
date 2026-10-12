@@ -770,3 +770,42 @@ void WatchdogTick()
 }
 
 
+
+/* 抓屏子进程出现（v0.6.32）：先记清楚，再按配置决定是否按 PID 注入。
+   现场要判的第一件事就是"能不能进这个进程"——InjectHookDll 自己会把**句柄实得权限**
+   写进日志（缺 PROCESS_VM_OPERATION 就直接改走消息钩子），所以哪怕注入失败，
+   这一趟现场也能拿到结论，不至于盲写一套冻结。 */
+static DWORD WINAPI CaptureChildInjectThread(LPVOID param)
+{
+    const DWORD pid = static_cast<DWORD>(reinterpret_cast<ULONG_PTR>(param));
+    const std::wstring dll = ResolveHookDllPath();
+    if (dll.empty())
+    {
+        YZLOGW(L"抓屏子进程 pid=%u：拿不到 Hook DLL 路径，跳过注入", pid);
+        return 0;
+    }
+    std::wstring err;
+    if (InjectHookDll(pid, dll, &err))
+        YZLOGI(L"抓屏子进程 pid=%u：已注入（冻结画面将在这个进程里做）", pid);
+    else
+        YZLOGW(L"抓屏子进程 pid=%u：注入失败: %s", pid, err.c_str());
+    return 0;
+}
+
+void OnCaptureChildSeen(DWORD pid, const std::wstring& line)
+{
+    YZLOGI(L"抓屏子进程出现: pid=%u —— 厂商的 DXGI 桌面复制在它里面（%s）", pid, line.c_str());
+    UiAppendLog(yz::kLogInfo,
+                yz::Format(L"识别到抓屏子进程 pid=%u（教师监视/缩略图时由学生端自己拉起）", pid));
+    if (!g_app.cfg.injectCaptureChild)
+    {
+        YZLOGI(L"抓屏子进程: 按配置不注入（InjectCaptureChild=0，只识别不干预）");
+        return;
+    }
+    HANDLE th = CreateThread(nullptr, 0, CaptureChildInjectThread,
+                             reinterpret_cast<LPVOID>(static_cast<ULONG_PTR>(pid)), 0, nullptr);
+    if (th != nullptr)
+        CloseHandle(th);
+    else
+        YZLOGW(L"抓屏子进程 pid=%u：起注入线程失败 err=%u", pid, GetLastError());
+}
