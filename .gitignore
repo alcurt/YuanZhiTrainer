@@ -37,3 +37,8 @@ diag-*/
 
 # 发布 session 的推送/发布手记：同上，只留本地
 /发布会话手记.md
+
+# v0.6.32：单元测试产物（本地跑，不入库）
+tests/unit/*.exe
+tests/unit/*.obj
+tests/unit/*.pdb
