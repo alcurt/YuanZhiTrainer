@@ -639,7 +639,12 @@ void EngineApplyConfig(const YZ_CONFIG& cfg)
     const bool wantFreeze  = captureProc && (cfg.flags & YZ_FLAG_ANTI_MONITOR) != 0;
     InterlockedExchange(&g_traceDuplication, wantTrace ? 1 : 0);
     yzhook::DupTraceSetFreeze(wantFreeze);
-    /* v0.6.33 诊断：四个判定值镜像回宿主，冻结没生效时一眼看出哪个条件挂 */     yzhook::SendLogToHost(YZ_LOG_INFO,         yz::Format(L"[DXGI 判定] captureProc=%d wantTrace=%d wantFreeze=%d flags=0x%08X",                   captureProc ? 1 : 0, wantTrace ? 1 : 0, wantFreeze ? 1 : 0,                   cfg.flags).c_str());
+    /* v0.6.33 诊断：四个判定值镜像回宿主——冻结没生效时一眼看出是哪个条件挂的。
+       本机就是靠它定位了"替身改名导致钩子不启用"和"防监视位记成 0x20（实际 0x8）"两个问题。 */
+    yzhook::SendLogToHost(YZ_LOG_INFO,
+        yz::Format(L"[DXGI 判定] captureProc=%d wantTrace=%d wantFreeze=%d flags=0x%08X",
+                   captureProc ? 1 : 0, wantTrace ? 1 : 0, wantFreeze ? 1 : 0,
+                   cfg.flags).c_str());
     if (wantTrace || wantFreeze)
         yzhook::DupTraceInstall(true);
 
