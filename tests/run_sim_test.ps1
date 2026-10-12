@@ -160,7 +160,7 @@
      54. 三个 `AutoExportOn*` 全关时，阶段期间**不新增** diag-*-auto 目录（关掉就得真关掉，
          不能偷偷往磁盘写）
 
-    阶段二十四（诊断包自带各来源日志，v0.6.29 / v0.6.30）断言 3 条：
+    阶段二十四（诊断包自带各来源日志 + 优雅退出，v0.6.29 / v0.6.34）断言 5 条：
      55. 自动导出的诊断包里带 SYSTEM 侧日志（`yzt-sys.log`），且 `snapshot.txt` 的
          "== 日志来源 ==" 列出了 `sys=` —— 现场匆忙时最容易漏的就是"另一处"那份日志
      56. 日志目录里现存的每个 `yzt*.log` / `remote-exec*.log` 都在包里有副本（own 侧一个不漏；
@@ -170,10 +170,12 @@
          `YZProbe-watch-<时间戳>.log` 现在也进包（前提是探针用 `-o` 指向该目录）
 
     阶段二十五（抓屏子进程识别与按 PID 注入，v0.6.32）断言 2 条：
-     58. 钩子认出厂商拉起的抓屏子进程（机房实测：教师监视/缩略图时**学生端自己**拉起
+     58. 主程序认出厂商拉起的抓屏子进程（机房实测：教师监视/缩略图时**学生端自己**拉起
          `rundll32.exe "<...>\KsFiles\ExdDtDup.dll",RunCapture 0`，DXGI 桌面复制在子进程里）
      59. 主程序按 PID 注入并给出结论（"已注入"或"注入失败+原因"）——现场要判的第一件事就是
          "能不能进这个进程"（客户端上 PROCESS_VM_OPERATION 被内核剥夺，子进程尚未验证）
+     走**第二触发**（采集栈监控，身份无关）：第一条 CreateProcessW 标记依赖审计行镜像，而镜像只发
+     `!selfCall` 的行，本仓库路径含 Yuanzhi/Teaching 会被判成 self ⇒ 本机永远不镜像（机房是 remote，可用）。
 
     ── 断言写法约定（血泪换来的，新加阶段请照做）────────────────────────────
     * 日志里的句柄/地址用 %p 打印，**不带 0x 前缀**（"HHOOK=002A0E26"）。凡是要匹配它们，
@@ -249,6 +251,7 @@ foreach ($f in @($stateFile, $capFile, $iniFile)) {
 # 测试配置：窗口化 + 键鼠解锁 + 防监视（Flags = 1 | 4 | 8 = 13）
 $iniLines = @(
     '[General]',
+    'AutoExportOnExit=0',   # v0.6.34：优雅退出时不导包，免得每次退出都拖慢回归
     'Flags=13',
     'WindowPercent=60',
     'LogLevel=3',
@@ -272,16 +275,94 @@ $result  = New-Object System.Collections.Generic.List[string]
 # 断言误报失败（第一次暴露：阶段二十，功能其实是通的）。所以：
 #   Get-LogLength 返回一个"各文件长度快照"字符串（调用方只把它原样传回 Read-LogTail）；
 #   Read-LogTail 对主日志与轮转日志各读自己新增的那一段，并把"文件被重建/变短"当作从头读。
+# 优雅退出一颗主程序（v0.6.34）：给它主窗口发一条 WM_COMMAND id=3002（托盘菜单"退出"），
+# 等它走正常退出路径（会执行 RemoveTrayIcon→NIM_DELETE，任务栏不留死图标；AutoExportOnExit=1
+# 时还会导出退出诊断包）。等不到就强杀兜底，绝不把进程留在那儿。
+# 为什么值得这么麻烦：被 Stop-Process 强杀的进程永远不会调 NIM_DELETE，一轮回归下来能在
+# 4K 175% 缩放的任务栏上堆出几十个同样的死图标（用户实测截图），而且退出导出那条路径也测不到。
+function Close-TrainerGracefully($proc, [int]$WaitSec = 8) {
+    if ($null -eq $proc) { return $false }
+    $proc.Refresh()
+    if ($proc.HasExited) { return $true }
+    if (-not ('TrayExitSend' -as [type])) {
+        Add-Type -TypeDefinition @"
+using System; using System.Runtime.InteropServices;
+public class TrayExitSend {
+    [DllImport("user32.dll")] public static extern IntPtr SendMessage(IntPtr h, uint m, IntPtr w, IntPtr l);
+    public static void TrayExit(IntPtr hwnd) { SendMessage(hwnd, 0x0111 /*WM_COMMAND*/, (IntPtr)3002 /*IDM_TRAY_EXIT*/, IntPtr.Zero); }
+}
+"@
+    }
+    $hwnd = $proc.MainWindowHandle
+    if ($hwnd -eq 0) {
+        # 没有主窗口（已收托盘/尚未建窗）就没法发托盘退出命令，直接强杀，不白等 8 秒
+        Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+        return $false
+    }
+    [TrayExitSend]::TrayExit([IntPtr]$hwnd)
+    try { $ok = $proc.WaitForExit($WaitSec * 1000) } catch { $ok = $false }
+    if (-not $ok) {
+        Write-Host ("  优雅退出超时（{0} 秒），改强杀 pid={1}" -f $WaitSec, $proc.Id)
+        Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+        return $false
+    }
+    return $true
+}
+# 启动主程序并把"状态文件的当前时刻"记成基线（v0.6.34）。
+# 为什么要基线：把"起来之后固定等 14 秒"换成条件轮询能省一大截时间，但上一阶段遗留的状态文件
+# 常常已经写着 fullscreen=0 ⇒ 轮询会立刻满足、阶段在工具动手前就跑下去（第 16 轮激进版就是这么
+# 造出 15 项假红的）。现在要求"状态文件的写入时刻**晚于**启动主程序那一刻"，才允许判定条件成立。
+function Start-Trainer {
+    $script:stateBaseline = $null
+    if (Test-Path -LiteralPath $stateFile) {
+        $script:stateBaseline = (Get-Item -LiteralPath $stateFile).LastWriteTimeUtc
+    }
+    return (Start-Process -FilePath $trainer -PassThru)
+}
+
+# 轮询"工具已经动手"：窗口化（fullscreen=0）或假全屏（fullscreen=1 且 topmost=0），
+# 且状态文件确实在基线之后被重写过。超时按调用方给的秒数兜底（等于退回原来的固定等待）。
+function Wait-ToolActed([int]$TimeoutSec = 14) {
+    if ($TimeoutSec -le 0) { return $false }
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    # 必须看到"转变"才算工具动手了（v0.6.34 第二次修正）：
+    #   ① 先看到模拟目标自己进了全屏（fullscreen=1 且 topmost=1）——它建窗时可能先写出一条
+    #      fullscreen=0，只按"晚于基线 + fullscreen=0"判断会在工具动手前就满足（首跑 31 项假红就是这个）；
+    #   ② 再看它变成窗口化（fullscreen=0）或被取消置顶（fullscreen=1 且 topmost=0）。
+    # 看不到①就一直等到超时（等于退回原来的固定等待），宁可慢也不假过。
+    $sawSimFullscreen = $false
+    while ((Get-Date) -lt $deadline) {
+        if (Test-Path -LiteralPath $stateFile) {
+            $fresh = ($null -eq $script:stateBaseline) -or
+                     ((Get-Item -LiteralPath $stateFile).LastWriteTimeUtc -gt $script:stateBaseline)
+            if ($fresh) {
+                $txt = (Get-Content -LiteralPath $stateFile -ErrorAction SilentlyContinue) -join ' '
+                if (($txt -match 'fullscreen=1') -and ($txt -match 'topmost=1')) { $sawSimFullscreen = $true }
+                if ($sawSimFullscreen -and
+                    (($txt -match 'fullscreen=0') -or (($txt -match 'fullscreen=1') -and ($txt -match 'topmost=0')))) {
+                    return $true
+                }
+            }
+        }
+        Start-Sleep -Milliseconds 250
+    }
+    return $false
+}
 function Get-RelatedLogPaths([string]$Path) {
     if ([string]::IsNullOrEmpty($Path)) { return @() }
     $pairs = New-Object System.Collections.Generic.List[string]
     $pairs.Add($Path)
-    # 轮转文件：<base>-1.log（产品按这个命名）
+    # 轮转文件：<base>-1.log、-2.log …（产品每满 2MB 顺延一个编号，不删旧文件）。
+    # v0.6.34 修正：原来只认 -1，而当 yzt.log 与 yzt-1.log 都满了（本机跑多了必然如此），
+    # **当前活跃日志其实是 yzt-2.log** ⇒ 所有"读日志段"的断言都会读到空、整批假红。
+    # 本机实测：20 项红全是这一类（读文件的断言如状态/审计/诊断包则全过）。
     $dir  = [System.IO.Path]::GetDirectoryName($Path)
     $base = [System.IO.Path]::GetFileNameWithoutExtension($Path)
     $ext  = [System.IO.Path]::GetExtension($Path)
     if (-not [string]::IsNullOrEmpty($dir)) {
-        $pairs.Add((Join-Path $dir ("{0}-1{1}" -f $base, $ext)))
+        for ($i = 1; $i -le 9; $i++) {
+            $pairs.Add((Join-Path $dir ("{0}-{1}{2}" -f $base, $i, $ext)))
+        }
     }
     return $pairs
 }
@@ -335,7 +416,7 @@ try {
 
     Write-Host '启动 YZTrainer ...'
     $mark1 = Get-LogLength $appLog
-    $appProc = Start-Process -FilePath $trainer -PassThru
+    $appProc = Start-Trainer   # v0.6.34：启动并记录状态文件基线
     Start-Sleep -Seconds $StartupWaitSeconds
 
     $state2 = Get-Content -LiteralPath $stateFile -ErrorAction SilentlyContinue
@@ -384,7 +465,7 @@ try {
 finally {
     if ($simProc -and -not $simProc.HasExited) { Stop-Process -Id $simProc.Id -Force -ErrorAction SilentlyContinue }
     Start-Sleep -Milliseconds 500
-    if ($appProc -and -not $appProc.HasExited) { Stop-Process -Id $appProc.Id -Force -ErrorAction SilentlyContinue }
+    [void](Close-TrainerGracefully $appProc 8)   # v0.6.34：优雅退出（托盘 3002），不留死图标
 }
 
 # ---------------------------------------------------------------------------
@@ -401,6 +482,7 @@ foreach ($f in @($stateFile, $capFile)) {
 
 $phase2Ini = @(
     '[General]',
+    'AutoExportOnExit=0',   # v0.6.34：优雅退出时不导包，免得每次退出都拖慢回归
     'Flags=5',
     'WindowPercent=60',
     'LogLevel=3',
@@ -420,7 +502,7 @@ try {
     Start-Sleep -Seconds 3
 
     $mark2 = Get-LogLength $appLog
-    $app2Proc = Start-Process -FilePath $trainer -PassThru
+    $app2Proc = Start-Trainer   # v0.6.34：启动并记录状态文件基线
 
     $fixed = $false
     $state2 = ''
@@ -450,7 +532,7 @@ try {
 finally {
     if ($sim2Proc -and -not $sim2Proc.HasExited) { Stop-Process -Id $sim2Proc.Id -Force -ErrorAction SilentlyContinue }
     Start-Sleep -Milliseconds 500
-    if ($app2Proc -and -not $app2Proc.HasExited) { Stop-Process -Id $app2Proc.Id -Force -ErrorAction SilentlyContinue }
+    [void](Close-TrainerGracefully $app2Proc 8)   # v0.6.34：优雅退出（托盘 3002），不留死图标
 }
 
 # ---------------------------------------------------------------------------
@@ -467,6 +549,7 @@ foreach ($f in @($stateFile, $capFile)) {
 
 $phase3Ini = @(
     '[General]',
+    'AutoExportOnExit=0',   # v0.6.34：优雅退出时不导包，免得每次退出都拖慢回归
     'Flags=36',
     'WindowPercent=60',
     'LogLevel=3',
@@ -484,7 +567,7 @@ $app3Proc = $null
 try {
     $sim3Proc = Start-Process -FilePath $sim -PassThru
     Start-Sleep -Seconds 3
-    $app3Proc = Start-Process -FilePath $trainer -PassThru
+    $app3Proc = Start-Trainer   # v0.6.34：启动并记录状态文件基线
 
     $fakeOk = $false
     $state3 = ''
@@ -507,7 +590,7 @@ try {
 finally {
     if ($sim3Proc -and -not $sim3Proc.HasExited) { Stop-Process -Id $sim3Proc.Id -Force -ErrorAction SilentlyContinue }
     Start-Sleep -Milliseconds 500
-    if ($app3Proc -and -not $app3Proc.HasExited) { Stop-Process -Id $app3Proc.Id -Force -ErrorAction SilentlyContinue }
+    [void](Close-TrainerGracefully $app3Proc 8)   # v0.6.34：优雅退出（托盘 3002），不留死图标
 }
 
 # ---------------------------------------------------------------------------
@@ -521,6 +604,7 @@ if (Test-Path $auditFile) { Move-Item -LiteralPath $auditFile -Destination "$aud
 
 $phase4Ini = @(
     '[General]',
+    'AutoExportOnExit=0',   # v0.6.34：优雅退出时不导包，免得每次退出都拖慢回归
     'Flags=5',
     'WindowPercent=60',
     'LogLevel=3',
@@ -538,8 +622,8 @@ $app4Proc = $null
 try {
     $sim4Proc = Start-Process -FilePath $sim -ArgumentList '--exec' -PassThru
     Start-Sleep -Seconds 2
-    $app4Proc = Start-Process -FilePath $trainer -PassThru
-    Start-Sleep -Seconds 12
+    $app4Proc = Start-Trainer   # v0.6.34：启动并记录状态文件基线
+    Start-Sleep -Seconds 12   # v0.6.34：本阶段等的是'子进程被拉起/晚加载重试'，不是窗口化，故不用轮询
 
     $auditLines = if (Test-Path $auditFile) { Get-Content -LiteralPath $auditFile } else { @() }
     Write-Host ("审计文件行数: " + @($auditLines).Count)
@@ -560,7 +644,7 @@ try {
 finally {
     if ($sim4Proc -and -not $sim4Proc.HasExited) { Stop-Process -Id $sim4Proc.Id -Force -ErrorAction SilentlyContinue }
     Start-Sleep -Milliseconds 500
-    if ($app4Proc -and -not $app4Proc.HasExited) { Stop-Process -Id $app4Proc.Id -Force -ErrorAction SilentlyContinue }
+    [void](Close-TrainerGracefully $app4Proc 8)   # v0.6.34：优雅退出（托盘 3002），不留死图标
 }
 
 # ---------------------------------------------------------------------------
@@ -584,6 +668,7 @@ $stubSrc  = @(
 
 $phase5Ini = @(
     '[General]',
+    'AutoExportOnExit=0',   # v0.6.34：优雅退出时不导包，免得每次退出都拖慢回归
     'Flags=5',
     'WindowPercent=60',
     'LogLevel=3',
@@ -609,8 +694,8 @@ try {
         $sim5Proc = Start-Process -FilePath $sim -ArgumentList '--load', $stubDll -PassThru
         Start-Sleep -Seconds 2
         $mark5 = Get-LogLength $appLog
-        $app5Proc = Start-Process -FilePath $trainer -PassThru
-        Start-Sleep -Seconds 14
+        $app5Proc = Start-Trainer   # v0.6.34：启动并记录状态文件基线
+        Start-Sleep -Seconds 14   # v0.6.34：本阶段等的是'子进程被拉起/晚加载重试'，不是窗口化，故不用轮询
 
         $seg5     = Read-LogTail $appLog $mark5
         $retryHit = $seg5 -match 'NativeUnhook: 目标模块 ExdHooks\.dll 已加载，开始尝试'
@@ -624,7 +709,7 @@ try {
 finally {
     if ($sim5Proc -and -not $sim5Proc.HasExited) { Stop-Process -Id $sim5Proc.Id -Force -ErrorAction SilentlyContinue }
     Start-Sleep -Milliseconds 500
-    if ($app5Proc -and -not $app5Proc.HasExited) { Stop-Process -Id $app5Proc.Id -Force -ErrorAction SilentlyContinue }
+    [void](Close-TrainerGracefully $app5Proc 8)   # v0.6.34：优雅退出（托盘 3002），不留死图标
 }
 
 # ---------------------------------------------------------------------------
@@ -643,6 +728,7 @@ foreach ($f in @($stateFile, $capFile)) {
 
 $phase6Ini = @(
     '[General]',
+    'AutoExportOnExit=0',   # v0.6.34：优雅退出时不导包，免得每次退出都拖慢回归
     'Flags=5',
     'WindowPercent=60',
     'LogLevel=3',
@@ -661,8 +747,8 @@ try {
     $sim6Proc = Start-Process -FilePath $sim -ArgumentList '--fight' -PassThru
     Start-Sleep -Seconds 2
     $mark6 = Get-LogLength $appLog
-    $app6Proc = Start-Process -FilePath $trainer -PassThru
-    Start-Sleep -Seconds 12
+    $app6Proc = Start-Trainer   # v0.6.34：启动并记录状态文件基线
+    [void](Wait-ToolActed 12)   # v0.6.34：条件一到就走，超时按 12 秒兜底
 
     $gaveUp = (Read-LogTail $appLog $mark6) -match '已对该窗口停手'
     Write-Host ("认输停手日志命中: " + $gaveUp)
@@ -672,7 +758,7 @@ try {
 finally {
     if ($sim6Proc -and -not $sim6Proc.HasExited) { Stop-Process -Id $sim6Proc.Id -Force -ErrorAction SilentlyContinue }
     Start-Sleep -Milliseconds 500
-    if ($app6Proc -and -not $app6Proc.HasExited) { Stop-Process -Id $app6Proc.Id -Force -ErrorAction SilentlyContinue }
+    [void](Close-TrainerGracefully $app6Proc 8)   # v0.6.34：优雅退出（托盘 3002），不留死图标
 }
 
 Write-Host ''
@@ -698,6 +784,7 @@ if (-not (Test-Path $ddStubSrc)) { $ddStubSrc = Join-Path $env:WINDIR 'System32\
 
 $phase7Ini = @(
     '[General]',
+    'AutoExportOnExit=0',   # v0.6.34：优雅退出时不导包，免得每次退出都拖慢回归
     'Flags=5',
     'WindowPercent=60',
     'LogLevel=3',
@@ -725,8 +812,8 @@ try {
         $sim7Proc = Start-Process -FilePath $sim -ArgumentList '--load', $ddStub -PassThru
         Start-Sleep -Seconds 7
         $mark7 = Get-LogLength $appLog
-        $app7Proc = Start-Process -FilePath $trainer -PassThru
-        Start-Sleep -Seconds 10
+        $app7Proc = Start-Trainer   # v0.6.34：启动并记录状态文件基线
+        [void](Wait-ToolActed 10)   # v0.6.34：条件一到就走，超时按 10 秒兜底
 
         $capHit = (Read-LogTail $appLog $mark7) -match '采集栈监控: PID=\d+ .*ExdDtDup\.dll'
         Write-Host ("采集栈监控命中: " + $capHit)
@@ -749,7 +836,7 @@ try {
 finally {
     if ($sim7Proc -and -not $sim7Proc.HasExited) { Stop-Process -Id $sim7Proc.Id -Force -ErrorAction SilentlyContinue }
     Start-Sleep -Milliseconds 500
-    if ($app7Proc -and -not $app7Proc.HasExited) { Stop-Process -Id $app7Proc.Id -Force -ErrorAction SilentlyContinue }
+    [void](Close-TrainerGracefully $app7Proc 8)   # v0.6.34：优雅退出（托盘 3002），不留死图标
 }
 
 # ---------------------------------------------------------------------------
@@ -777,6 +864,7 @@ $gzyzHookLog = Join-Path $gzyzDir 'sim_log.txt'
 
 $phase8Ini = @(
     '[General]',
+    'AutoExportOnExit=0',   # v0.6.34：优雅退出时不导包，免得每次退出都拖慢回归
     'Flags=5',
     'WindowPercent=60',
     'LogLevel=3',
@@ -801,8 +889,8 @@ try {
     $sim8Proc = Start-Process -FilePath $gzyzSim -ArgumentList '--hook' -PassThru
     Start-Sleep -Seconds 4
     $mark8 = Get-LogLength $appLog
-    $app8Proc = Start-Process -FilePath $trainer -PassThru
-    Start-Sleep -Seconds 14
+    $app8Proc = Start-Trainer   # v0.6.34：启动并记录状态文件基线
+    [void](Wait-ToolActed 14)   # v0.6.34：条件一到就走，超时按 14 秒兜底
 
     $seg8      = Read-LogTail $appLog $mark8
     $replaced  = $seg8 -match '已用空过程替换远志键盘/鼠标钩子'
@@ -824,7 +912,7 @@ try {
 finally {
     if ($sim8Proc -and -not $sim8Proc.HasExited) { Stop-Process -Id $sim8Proc.Id -Force -ErrorAction SilentlyContinue }
     Start-Sleep -Milliseconds 500
-    if ($app8Proc -and -not $app8Proc.HasExited) { Stop-Process -Id $app8Proc.Id -Force -ErrorAction SilentlyContinue }
+    [void](Close-TrainerGracefully $app8Proc 8)   # v0.6.34：优雅退出（托盘 3002），不留死图标
 }
 
 # ---------------------------------------------------------------------------
@@ -846,8 +934,8 @@ try {
     $sim8b = Start-Process -FilePath $gzyzSim -ArgumentList '--hook-thread' -PassThru
     Start-Sleep -Seconds 4
     $mark8b = Get-LogLength $appLog
-    $app8b = Start-Process -FilePath $trainer -PassThru
-    Start-Sleep -Seconds 14
+    $app8b = Start-Trainer   # v0.6.34：启动并记录状态文件基线
+    [void](Wait-ToolActed 14)   # v0.6.34：条件一到就走，超时按 14 秒兜底
     $seg8b       = Read-LogTail $appLog $mark8b
     $threadRepl  = $seg8b -match '已用空过程替换远志键盘/鼠标钩子\(W\)'
     $threadAlive = ($sim8b -and (-not $sim8b.HasExited))
@@ -855,7 +943,7 @@ try {
 finally {
     if ($sim8b -and -not $sim8b.HasExited) { Stop-Process -Id $sim8b.Id -Force -ErrorAction SilentlyContinue }
     Start-Sleep -Milliseconds 500
-    if ($app8b -and -not $app8b.HasExited) { Stop-Process -Id $app8b.Id -Force -ErrorAction SilentlyContinue }
+    [void](Close-TrainerGracefully $app8b 8)   # v0.6.34：优雅退出（托盘 3002），不留死图标
 }
 
 Write-Host ("hMod=NULL 线程内钩子: 替换(W)=" + $threadRepl + " 客户端存活=" + $threadAlive)
@@ -883,6 +971,7 @@ $gzyzSim9 = Join-Path $gzyzDir9 'YZSimTarget.exe'
 function Invoke-MessageHookPhase([int]$Bit) {
     $ini = @(
         '[General]',
+    'AutoExportOnExit=0',   # v0.6.34：优雅退出时不导包，免得每次退出都拖慢回归
         'Flags=5',
         'WindowPercent=60',
         'LogLevel=3',
@@ -901,8 +990,8 @@ function Invoke-MessageHookPhase([int]$Bit) {
         $s = Start-Process -FilePath $gzyzSim9 -ArgumentList '--hook', '--hook-message' -PassThru
         Start-Sleep -Seconds 4
         $mark = Get-LogLength $appLog
-        $a = Start-Process -FilePath $trainer -PassThru
-        Start-Sleep -Seconds 14
+        $a = Start-Trainer   # v0.6.34：启动并记录状态文件基线
+        [void](Wait-ToolActed 14)   # v0.6.34：条件一到就走，超时按 14 秒兜底
         return [pscustomobject]@{
             Seg      = (Read-LogTail $appLog $mark)
             SimAlive = ($s -and (-not $s.HasExited))
@@ -1017,6 +1106,7 @@ Copy-Item -LiteralPath $sim -Destination $examSim -Force
 function Invoke-ExamPhase([int]$Guard) {
     $ini = @(
         '[General]',
+    'AutoExportOnExit=0',   # v0.6.34：优雅退出时不导包，免得每次退出都拖慢回归
         'Flags=5',
         'WindowPercent=60',
         'LogLevel=3',
@@ -1038,8 +1128,8 @@ function Invoke-ExamPhase([int]$Guard) {
         $s = Start-Process -FilePath $examSim -ArgumentList '--exam' -PassThru
         Start-Sleep -Seconds 3
         $mark = Get-LogLength $appLog
-        $a = Start-Process -FilePath $trainer -PassThru
-        Start-Sleep -Seconds 14
+        $a = Start-Trainer   # v0.6.34：启动并记录状态文件基线
+        [void](Wait-ToolActed 14)   # v0.6.34：条件一到就走，超时按 14 秒兜底
         $state = Get-Content -LiteralPath $examState -ErrorAction SilentlyContinue
         return [pscustomobject]@{
             Seg      = (Read-LogTail $appLog $mark)
@@ -1148,6 +1238,7 @@ foreach ($f in @($stateFile, $capFile)) {
 
 $phase13Ini = @(
     '[General]',
+    'AutoExportOnExit=0',   # v0.6.34：优雅退出时不导包，免得每次退出都拖慢回归
     'Flags=36',
     'WindowPercent=60',
     'LogLevel=3',
@@ -1168,7 +1259,7 @@ try {
     $sim13Proc = Start-Process -FilePath $sim -PassThru
     Start-Sleep -Seconds 3
     $mark13 = Get-LogLength $appLog
-    $app13Proc = Start-Process -FilePath $trainer -PassThru
+    $app13Proc = Start-Trainer   # v0.6.34：启动并记录状态文件基线
 
     for ($i = 0; $i -lt 22; $i++) {
         Start-Sleep -Milliseconds 700
@@ -1180,7 +1271,7 @@ try {
 finally {
     if ($sim13Proc -and -not $sim13Proc.HasExited) { Stop-Process -Id $sim13Proc.Id -Force -ErrorAction SilentlyContinue }
     Start-Sleep -Milliseconds 500
-    if ($app13Proc -and -not $app13Proc.HasExited) { Stop-Process -Id $app13Proc.Id -Force -ErrorAction SilentlyContinue }
+    [void](Close-TrainerGracefully $app13Proc 8)   # v0.6.34：优雅退出（托盘 3002），不留死图标
 }
 
 $log13 = $seg13 -match '外部窗口纠正\(假全屏\)'
@@ -1228,6 +1319,7 @@ else {
 
     $identIni = @(
         '[General]',
+    'AutoExportOnExit=0',   # v0.6.34：优雅退出时不导包，免得每次退出都拖慢回归
         'Flags=5',
         'WindowPercent=60',
         'LogLevel=3',
@@ -1257,11 +1349,11 @@ else {
     Start-Sleep -Seconds 4
     if (Test-Path -LiteralPath $identState) { Move-Item -LiteralPath $identState -Destination "$identState.bak14a-$stamp" -Force }
     $mark14a = Get-LogLength $appLog
-    $appA = Start-Process -FilePath $trainer -PassThru
-    Start-Sleep -Seconds 12
+    $appA = Start-Trainer   # v0.6.34：启动并记录状态文件基线
+    [void](Wait-ToolActed 12)   # v0.6.34：条件一到就走，超时按 12 秒兜底
     $seg14a = Read-LogTail $appLog $mark14a
     $stateA = Get-Content -LiteralPath $identState -ErrorAction SilentlyContinue
-    Stop-Process -Id $appA.Id -Force -ErrorAction SilentlyContinue
+    [void](Close-TrainerGracefully $appA 8)   # v0.6.34：优雅退出（托盘 3002）
     Start-Sleep -Milliseconds 800
     Stop-NewPids 'YZSimTarget' $tA
     Stop-Process -Id $srSimA.Id -Force -ErrorAction SilentlyContinue
@@ -1290,7 +1382,7 @@ else {
     $markSysB   = Get-LogLength $sysLogPath
     $srAppB = Start-Process -FilePath $sysrunExe2 -PassThru -WindowStyle Hidden `
         -ArgumentList '--log', (Join-Path $identDir 'sysrun-app-b.txt'), '--', $trainer
-    Start-Sleep -Seconds 16
+    Start-Sleep -Seconds 16   # v0.6.34：本阶段用 YZSysRun 以 SYSTEM 启动，不走 Start-Trainer，故无基线可用，退回固定等待
     $seg14b = Read-LogTail $appLog $mark14b
     $segSysB = Read-LogTail $sysLogPath $markSysB
     $stateB = Get-Content -LiteralPath $identState -ErrorAction SilentlyContinue
@@ -1361,6 +1453,7 @@ if (-not ('WdaCheck' -as [type])) {
 
 $phase15Ini = @(
     '[General]',
+    'AutoExportOnExit=0',   # v0.6.34：优雅退出时不导包，免得每次退出都拖慢回归
     'Flags=13',
     'WindowPercent=60',
     'LogLevel=3',
@@ -1379,8 +1472,8 @@ try {
     $sim15Proc = Start-Process -FilePath $sim -PassThru
     Start-Sleep -Seconds 3
     $mark15 = Get-LogLength $appLog
-    $app15Proc = Start-Process -FilePath $trainer -PassThru
-    Start-Sleep -Seconds 12
+    $app15Proc = Start-Trainer   # v0.6.34：启动并记录状态文件基线
+    [void](Wait-ToolActed 12)   # v0.6.34：条件一到就走，超时按 12 秒兜底
 
     $seg15 = Read-LogTail $appLog $mark15
     $app15Proc.Refresh()
@@ -1410,7 +1503,7 @@ try {
 finally {
     if ($sim15Proc -and -not $sim15Proc.HasExited) { Stop-Process -Id $sim15Proc.Id -Force -ErrorAction SilentlyContinue }
     Start-Sleep -Milliseconds 500
-    if ($app15Proc -and -not $app15Proc.HasExited) { Stop-Process -Id $app15Proc.Id -Force -ErrorAction SilentlyContinue }
+    [void](Close-TrainerGracefully $app15Proc 8)   # v0.6.34：优雅退出（托盘 3002），不留死图标
 }
 
 # ---------------------------------------------------------------------------
@@ -1430,6 +1523,7 @@ Write-Host '==== 阶段十六：DXGI 桌面复制取证（只计数）===='
 
 $phase16Ini = @(
     '[General]',
+    'AutoExportOnExit=0',   # v0.6.34：优雅退出时不导包，免得每次退出都拖慢回归
     'Flags=5',
     'WindowPercent=60',
     'LogLevel=3',
@@ -1456,8 +1550,8 @@ try {
     $sim16Proc = Start-Process -FilePath $dupSim -ArgumentList '--dup 20' -PassThru
     Start-Sleep -Seconds 4
     $mark16 = Get-LogLength $appLog
-    $app16Proc = Start-Process -FilePath $trainer -PassThru
-    Start-Sleep -Seconds 14
+    $app16Proc = Start-Trainer   # v0.6.34：启动并记录状态文件基线
+    [void](Wait-ToolActed 14)   # v0.6.34：条件一到就走，超时按 14 秒兜底
 
     $seg16   = Read-LogTail $appLog $mark16
     $traceOk = $seg16 -match '\[DXGI 取证\] 建立桌面复制成功'
@@ -1482,7 +1576,7 @@ try {
 finally {
     if ($sim16Proc -and -not $sim16Proc.HasExited) { Stop-Process -Id $sim16Proc.Id -Force -ErrorAction SilentlyContinue }
     Start-Sleep -Milliseconds 500
-    if ($app16Proc -and -not $app16Proc.HasExited) { Stop-Process -Id $app16Proc.Id -Force -ErrorAction SilentlyContinue }
+    [void](Close-TrainerGracefully $app16Proc 8)   # v0.6.34：优雅退出（托盘 3002），不留死图标
 }
 
 # ---------------------------------------------------------------------------
@@ -1697,6 +1791,7 @@ foreach ($f in @($stateFile, $capFile)) {
 
 $phase20Ini = @(
     '[General]',
+    'AutoExportOnExit=0',   # v0.6.34：优雅退出时不导包，免得每次退出都拖慢回归
     'Flags=5',
     'WindowPercent=60',
     'LogLevel=3',
@@ -1716,7 +1811,7 @@ try {
     $sim20Proc = Start-Process -FilePath $sim -PassThru
     Start-Sleep -Seconds 3
     $mark20 = Get-LogLength $appLog
-    $app20Proc = Start-Process -FilePath $trainer -PassThru
+    $app20Proc = Start-Trainer   # v0.6.34：启动并记录状态文件基线
 
     # 消息钩子要等目标线程取一次消息才会把 DLL 映射进去，这里多等一会儿
     for ($i = 0; $i -lt 24; $i++) {
@@ -1729,7 +1824,7 @@ try {
 finally {
     if ($sim20Proc -and -not $sim20Proc.HasExited) { Stop-Process -Id $sim20Proc.Id -Force -ErrorAction SilentlyContinue }
     Start-Sleep -Milliseconds 500
-    if ($app20Proc -and -not $app20Proc.HasExited) { Stop-Process -Id $app20Proc.Id -Force -ErrorAction SilentlyContinue }
+    [void](Close-TrainerGracefully $app20Proc 8)   # v0.6.34：优雅退出（托盘 3002），不留死图标
 }
 
 $hookInj   = $seg20 -match '已通过消息钩子注入 HHOOK=(?:0x)?0*[1-9A-Fa-f]'
@@ -1819,6 +1914,7 @@ foreach ($f in @($stateFile, $capFile)) {
 
 $phase21Ini = @(
     '[General]',
+    'AutoExportOnExit=0',   # v0.6.34：优雅退出时不导包，免得每次退出都拖慢回归
     'Flags=5',
     'WindowPercent=60',
     'LogLevel=3',
@@ -1845,7 +1941,7 @@ $clickOk     = $false
 try {
     $sim21Proc = Start-Process -FilePath $sim -PassThru
     Start-Sleep -Seconds 3
-    $app21Proc = Start-Process -FilePath $trainer -PassThru
+    $app21Proc = Start-Trainer   # v0.6.34：启动并记录状态文件基线
 
     for ($i = 0; $i -lt 20; $i++) {
         Start-Sleep -Milliseconds 700
@@ -1888,7 +1984,7 @@ try {
 finally {
     if ($sim21Proc -and -not $sim21Proc.HasExited) { Stop-Process -Id $sim21Proc.Id -Force -ErrorAction SilentlyContinue }
     Start-Sleep -Milliseconds 500
-    if ($app21Proc -and -not $app21Proc.HasExited) { Stop-Process -Id $app21Proc.Id -Force -ErrorAction SilentlyContinue }
+    [void](Close-TrainerGracefully $app21Proc 8)   # v0.6.34：优雅退出（托盘 3002），不留死图标
 }
 
 Write-Host ("复选框命中=" + $clickOk + " 基线实时=" + $liveBefore + " 勾选后冻结=" + $frozenOn +
@@ -1961,6 +2057,7 @@ foreach ($f in @($stateFile, $capFile)) {
 
 $phase22Ini = @(
     '[General]',
+    'AutoExportOnExit=0',   # v0.6.34：优雅退出时不导包，免得每次退出都拖慢回归
     'Flags=5',
     'WindowPercent=60',
     'LogLevel=3',
@@ -1982,7 +2079,7 @@ $showBack  = $false
 try {
     $sim22Proc = Start-Process -FilePath $sim -PassThru
     Start-Sleep -Seconds 3
-    $app22Proc = Start-Process -FilePath $trainer -PassThru
+    $app22Proc = Start-Trainer   # v0.6.34：启动并记录状态文件基线
 
     for ($i = 0; $i -lt 20; $i++) {
         Start-Sleep -Milliseconds 700
@@ -2021,7 +2118,7 @@ try {
 finally {
     if ($sim22Proc -and -not $sim22Proc.HasExited) { Stop-Process -Id $sim22Proc.Id -Force -ErrorAction SilentlyContinue }
     Start-Sleep -Milliseconds 500
-    if ($app22Proc -and -not $app22Proc.HasExited) { Stop-Process -Id $app22Proc.Id -Force -ErrorAction SilentlyContinue }
+    [void](Close-TrainerGracefully $app22Proc 8)   # v0.6.34：优雅退出（托盘 3002），不留死图标
 }
 
 Write-Host ("托盘防监视生效=" + $trayFroze + "（ini Flags=" + $flags22 + "） 冻结后主界面被收起=" + $hidByFreeze +
@@ -2055,6 +2152,7 @@ Write-Host '==== 阶段二十三：ini 边界项（WindowPercent 钳制 / 自动
 function Invoke-PercentPhase([int]$percent) {
     $iniLines = @(
         '[General]',
+    'AutoExportOnExit=0',   # v0.6.34：优雅退出时不导包，免得每次退出都拖慢回归
         'Flags=1',
         "WindowPercent=$percent",
         'LogLevel=3',
@@ -2076,7 +2174,7 @@ function Invoke-PercentPhase([int]$percent) {
     try {
         $s = Start-Process -FilePath $sim -PassThru
         Start-Sleep -Seconds 3
-        $a = Start-Process -FilePath $trainer -PassThru
+        $a = Start-Trainer   # v0.6.34：启动并记录状态文件基线
         for ($i = 0; $i -lt 20; $i++) {
             Start-Sleep -Milliseconds 700
             $st = Get-Content -LiteralPath $stateFile -ErrorAction SilentlyContinue
@@ -2167,7 +2265,7 @@ $phase24Ini = @(
     'EnableExamGuard=1',
     'ExternalWindowFix=0',
     'AutoExportOnBroadcast=1',
-    'AutoExportOnExit=0',
+    'AutoExportOnExit=1',
     'AutoExportOnCapture=0',
     'ProcessNames=Yistart.exe;TEACHCMD.exe;PlayerGUI.exe;ExdPaintHelper.exe;YZSimTarget.exe'
 )
@@ -2183,7 +2281,7 @@ $packDir   = $null
 try {
     $sim24Proc = Start-Process -FilePath $sim -PassThru
     Start-Sleep -Seconds 3
-    $app24Proc = Start-Process -FilePath $trainer -PassThru
+    $app24Proc = Start-Trainer   # v0.6.34：启动并记录状态文件基线
     for ($i = 0; $i -lt 24; $i++) {
         Start-Sleep -Milliseconds 800
         $now = @(Get-ChildItem -LiteralPath $DistDir -Directory -Filter 'diag-*' -ErrorAction SilentlyContinue |
@@ -2195,7 +2293,7 @@ try {
 finally {
     if ($sim24Proc -and -not $sim24Proc.HasExited) { Stop-Process -Id $sim24Proc.Id -Force -ErrorAction SilentlyContinue }
     Start-Sleep -Milliseconds 500
-    if ($app24Proc -and -not $app24Proc.HasExited) { Stop-Process -Id $app24Proc.Id -Force -ErrorAction SilentlyContinue }
+    $graceful24 = Close-TrainerGracefully $app24Proc 10   # v0.6.34：改优雅退出（托盘 3002）
 }
 
 $sysPacked = $false
@@ -2243,24 +2341,47 @@ if ($manifestOk) {
 
 $script:sw.Stop()
 # ---------------------------------------------------------------------------
-# 阶段二十五：抓屏子进程识别与按 PID 注入（v0.6.32）
-# 现场依据（2026-10-12 机房实测，见 开发记录 §39）：
-#   教师"监视/远程桌面"时，**学生端自己**拉起
-#     C:\Windows\SysWOW64\rundll32.exe "<...>\KsFiles\ExdDtDup.dll",RunCapture 0
-#   （审计日志 origin=remote，会话结束由 tskill <pid> 收尾；5 次会话 5 个新进程）。
-#   那条 DXGI 桌面复制就在这个子进程里——做在 Yistart.exe 里的冻结没用（机房防监视失效的原因）。
-# 本阶段用 YZSimTarget --spawn-child 当替身（它照抄机房那个命令行形状），验证整条链：
-#   父进程（模拟目标，已被注入）拉起子进程 → 钩子在 CreateProcessW 后认出并打标记
-#   → 主程序从镜像日志里认领 → 按 PID 注入 → 日志里给出结果判词。
+# v0.6.34：优雅退出（托盘菜单 退出）——任务栏不留死图标，且退出时会导出诊断包
+if ($graceful24) {
+    $result.Add('PASS  主程序能被"托盘菜单 退出"正常关闭（退出码 0，任务栏不留死图标）')
+} else {
+    $result.Add('FAIL  优雅退出没成功（超时被强杀）——现场"退出"这条路可能有问题')
+}
+$exitPkg = @(Get-ChildItem -LiteralPath $DistDir -Directory -Filter 'diag-*' -ErrorAction SilentlyContinue |
+             Where-Object { $_.Name -notin $diagBefore24 })
+if ($exitPkg.Count -ge 2) {
+    $result.Add('PASS  退出时自动导出了诊断包（AutoExportOnExit=1 → 退出包与广播包各一份）')
+} else {
+    $result.Add('FAIL  退出时没有导出诊断包（AutoExportOnExit=1 应当导出一份）')
+}# 阶段二十五：抓屏子进程识别与按 PID 注入（v0.6.32 / v0.6.33）
+# 走**第二触发**（采集栈监控）——身份无关，机房实测 4 次全中。
+# 为什么不用第一条（CreateProcessW 审计标记）：那条依赖"审计行镜像回宿主"，而镜像只发
+# !selfCall 的行；本仓库路径 E:\...\YuanzhiMultimediaTeaching 同时含 Yuanzhi 与 Teaching，
+# 会被 IsYuanzhiInstallPath 判成"客户端安装目录" ⇒ 本机永远是 origin=self、不镜像
+# （v0.6.32 实测；机房那次是 origin=remote，所以第一条在机房可用）。
+# 替身：把 YZSimTarget 复制成 Yistart.exe（名字进 capturewatch 的"远志相关"名单），
+# 子进程再经 YZ_TEST_LOAD_DLL 加载一个**文件名就叫 ExdDtDup.dll** 的模块（YZHook.dll 副本），
+# 于是采集栈监控按模块名一定命中 → 触发注入。
 # 断言：
-#   58. 钩子认出了抓屏子进程（宿主日志出现"抓屏子进程出现: pid="）
-#   59. 主程序按 PID 注入并给出结论（"已注入"或"注入失败"+原因，不能静默）
+#   58. 主程序认出抓屏子进程（日志出现"抓屏子进程出现: pid="）
+#   59. 主程序按 PID 注入并给出结论（"已注入"或"注入失败"+原因）
+# 注意：采集栈监控 30 秒一轮，所以这里要等够（最多 60 秒）。
 # ---------------------------------------------------------------------------
 Write-Host ''
 Write-Host '==== 阶段二十五：抓屏子进程识别与按 PID 注入 ===='
 
+$ccDir = Join-Path $env:TEMP 'GZYZ-capture-child'
+if (Test-Path $ccDir) { Remove-Item $ccDir -Recurse -Force -ErrorAction SilentlyContinue }
+New-Item -ItemType Directory -Path $ccDir | Out-Null
+$ccSim = Join-Path $ccDir 'Yistart.exe'
+Copy-Item $sim $ccSim -Force
+$ccDll = Join-Path $ccDir 'ExdDtDup.dll'
+Copy-Item (Join-Path $DistDir 'YZHook.dll') $ccDll -Force
+$env:YZ_TEST_LOAD_DLL = $ccDll        # 替身子进程据此加载"名为 ExdDtDup.dll 的模块"
+
 $phase25Ini = @(
     '[General]',
+    'AutoExportOnExit=0',   # v0.6.34：优雅退出时不导包，免得每次退出都拖慢回归
     'Flags=1',
     'WindowPercent=60',
     'LogLevel=3',
@@ -2272,60 +2393,54 @@ $phase25Ini = @(
     'AutoExportOnBroadcast=0',
     'AutoExportOnExit=0',
     'AutoExportOnCapture=0',
-    'ProcessNames=Yistart.exe;TEACHCMD.exe;PlayerGUI.exe;ExdPaintHelper.exe;YZSimTarget.exe'
+    'ProcessNames=Yistart.exe;YZSimTarget.exe'
 )
 Set-Content -LiteralPath $iniFile -Value $phase25Ini -Encoding utf8
 
-foreach ($f in @($stateFile, $capFile)) {
-    if (Test-Path $f) { Move-Item -LiteralPath $f -Destination "$f.bak25-$stamp" -Force }
-}
 $mark25 = Get-LogLength $appLog
-
-$sim25Proc = $null
-$app25Proc = $null
+$ccSimProc = $null
+$ccAppProc = $null
 $seenChild = $false
-$injectVerdict = ''
+$ccVerdict = ''
 
 try {
-    # 替身：8 秒后自己拉起"抓屏子进程"（等注入与配置就绪）
-    $sim25Proc = Start-Process -FilePath $sim -ArgumentList '--spawn-child' -PassThru
+    $ccSimProc = Start-Process -FilePath $ccSim -ArgumentList '--spawn-child' -PassThru
     Start-Sleep -Seconds 1
-    $app25Proc = Start-Process -FilePath $trainer -PassThru
+    $app25Proc = Start-Trainer   # v0.6.34：启动并记录状态文件基线
 
-    for ($i = 0; $i -lt 30; $i++) {
-        Start-Sleep -Milliseconds 700
+    for ($i = 0; $i -lt 80; $i++) {
+        Start-Sleep -Milliseconds 800
         $seg25 = Read-LogTail $appLog $mark25
-        if (-not $seenChild) {
-            if ($seg25 -match '抓屏子进程出现[:：]\s*pid=(\d+)') {
-                $seenChild = $true
-            }
-        }
+        if (-not $seenChild -and $seg25 -match '抓屏子进程出现[:：]\s*pid=(\d+)') { $seenChild = $true }
         if ($seg25 -match '抓屏子进程 pid=(\d+)[:：]\s*(已注入[^\r\n]*|注入失败[^\r\n]*)') {
-            $injectVerdict = $Matches[0].Trim()
+            $ccVerdict = $Matches[0].Trim()
             break
         }
     }
 }
 finally {
-    if ($sim25Proc -and -not $sim25Proc.HasExited) { Stop-Process -Id $sim25Proc.Id -Force -ErrorAction SilentlyContinue }
-    Get-Process -Name YZSimTarget -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    foreach ($n in @('Yistart', 'YZSimTarget')) {
+        Get-Process -Name $n -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    }
     Start-Sleep -Milliseconds 500
-    if ($app25Proc -and -not $app25Proc.HasExited) { Stop-Process -Id $app25Proc.Id -Force -ErrorAction SilentlyContinue }
+    [void](Close-TrainerGracefully $app25Proc 8)   # v0.6.34：优雅退出（托盘 3002），不留死图标
+    Remove-Item Env:\YZ_TEST_LOAD_DLL -ErrorAction SilentlyContinue
 }
 
-Write-Host ("认出抓屏子进程=" + $seenChild + " 注入结论=" + $(if ($injectVerdict) { $injectVerdict } else { '(无)' }))
+Write-Host ("认出抓屏子进程=" + $seenChild + " 注入结论=" + $(if ($ccVerdict) { $ccVerdict } else { '(无)' }))
 
 if ($seenChild) {
-    $result.Add('PASS  钩子认出了厂商拉起的抓屏子进程（教师监视/缩略图时由学生端自己 spawn）')
+    $result.Add('PASS  主程序认出了抓屏子进程（采集栈监控命中，与厂商用哪条 API 拉起无关）')
 } else {
-    $result.Add('FAIL  没认出抓屏子进程——冻结画面就没有落点（重点查 CreateProcessW 钩子与命令行匹配）')
+    $result.Add('FAIL  没认出抓屏子进程——冻结画面就没有落点（查采集栈监控与 ExdDtDup 模块名匹配）')
 }
-if ($injectVerdict) {
+if ($ccVerdict) {
     $result.Add('PASS  主程序按 PID 注入并给出结论（已注入 / 注入失败+原因，不会静默）')
 } else {
     $result.Add('FAIL  识别到抓屏子进程但注入环节没有任何结论（现场将无法判断能不能进）')
 }
 
+$script:sw.Stop()
 Write-Host ("==== 测试结果（总用时 " + [Math]::Round($script:sw.Elapsed.TotalSeconds, 1) + " 秒）====")
 $result | ForEach-Object { Write-Host $_ }
 $failCount = @($result | Where-Object { $_ -like 'FAIL*' }).Count
