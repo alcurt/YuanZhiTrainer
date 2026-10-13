@@ -312,6 +312,19 @@ public class TrayExitSend {
 # 为什么要基线：把"起来之后固定等 14 秒"换成条件轮询能省一大截时间，但上一阶段遗留的状态文件
 # 常常已经写着 fullscreen=0 ⇒ 轮询会立刻满足、阶段在工具动手前就跑下去（第 16 轮激进版就是这么
 # 造出 15 项假红的）。现在要求"状态文件的写入时刻**晚于**启动主程序那一刻"，才允许判定条件成立。
+# 等模拟目标自己进全屏（v0.6.34 提速）：启动主程序前原来固定等 3 秒，改成轮询状态文件出现
+# fullscreen=1（模拟目标自己就会进全屏；没等到就按超时兜底，等于退回原来的固定等待）。
+function Wait-SimFullscreen([int]$TimeoutSec = 6) {
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    while ((Get-Date) -lt $deadline) {
+        if (Test-Path -LiteralPath $stateFile) {
+            $txt = (Get-Content -LiteralPath $stateFile -ErrorAction SilentlyContinue) -join ' '
+            if ($txt -match 'fullscreen=1') { return $true }
+        }
+        Start-Sleep -Milliseconds 200
+    }
+    return $false
+}
 function Start-Trainer {
     $script:stateBaseline = $null
     if (Test-Path -LiteralPath $stateFile) {
@@ -407,7 +420,7 @@ function Read-LogTail([string]$Path, [string]$Mark) {
 try {
     Write-Host '启动模拟目标 ...'
     $simProc = Start-Process -FilePath $sim -PassThru
-    Start-Sleep -Seconds 3
+[void](Wait-SimFullscreen 6)   # v0.6.34 提速：等模拟目标真的进全屏，不再死等 3 秒
 
     $state1 = Get-Content -LiteralPath $stateFile -ErrorAction SilentlyContinue
     Write-Host "模拟目标状态: $state1"
@@ -505,7 +518,7 @@ $app2Proc = $null
 
 try {
     $sim2Proc = Start-Process -FilePath $sim -PassThru
-    Start-Sleep -Seconds 3
+[void](Wait-SimFullscreen 6)   # v0.6.34 提速：等模拟目标真的进全屏，不再死等 3 秒
 
     $mark2 = Get-LogLength $appLog
     $app2Proc = Start-Trainer   # v0.6.34：启动并记录状态文件基线
@@ -572,7 +585,7 @@ $app3Proc = $null
 
 try {
     $sim3Proc = Start-Process -FilePath $sim -PassThru
-    Start-Sleep -Seconds 3
+[void](Wait-SimFullscreen 6)   # v0.6.34 提速：等模拟目标真的进全屏，不再死等 3 秒
     $app3Proc = Start-Trainer   # v0.6.34：启动并记录状态文件基线
 
     $fakeOk = $false
@@ -1053,7 +1066,7 @@ else {
     $loadProc  = $null
     try {
         $watchProc = Start-Process -FilePath $probeExe -PassThru -WindowStyle Hidden `
-            -ArgumentList '-o', $watchOut, '--watch', '--duration', '14', '--interval', '2', '--no-pause'
+            -ArgumentList '-o', $watchOut, '--watch', '--duration', '10', '--interval', '2', '--no-pause'
         Start-Sleep -Seconds 4
         $loadProc = Start-Process -FilePath $sim -ArgumentList '--load', $ddStub -PassThru
         $watchProc.WaitForExit()
@@ -1132,7 +1145,7 @@ function Invoke-ExamPhase([int]$Guard) {
     $a = $null
     try {
         $s = Start-Process -FilePath $examSim -ArgumentList '--exam' -PassThru
-        Start-Sleep -Seconds 3
+[void](Wait-SimFullscreen 6)   # v0.6.34 提速：等模拟目标真的进全屏，不再死等 3 秒
         $mark = Get-LogLength $appLog
         $a = Start-Trainer   # v0.6.34：启动并记录状态文件基线
         [void](Wait-ToolActed 14)   # v0.6.34：条件一到就走，超时按 14 秒兜底
@@ -1263,7 +1276,7 @@ $fake13    = $false
 
 try {
     $sim13Proc = Start-Process -FilePath $sim -PassThru
-    Start-Sleep -Seconds 3
+[void](Wait-SimFullscreen 6)   # v0.6.34 提速：等模拟目标真的进全屏，不再死等 3 秒
     $mark13 = Get-LogLength $appLog
     $app13Proc = Start-Trainer   # v0.6.34：启动并记录状态文件基线
 
@@ -1476,7 +1489,7 @@ $app15Proc = $null
 
 try {
     $sim15Proc = Start-Process -FilePath $sim -PassThru
-    Start-Sleep -Seconds 3
+[void](Wait-SimFullscreen 6)   # v0.6.34 提速：等模拟目标真的进全屏，不再死等 3 秒
     $mark15 = Get-LogLength $appLog
     $app15Proc = Start-Trainer   # v0.6.34：启动并记录状态文件基线
     [void](Wait-ToolActed 12)   # v0.6.34：条件一到就走，超时按 12 秒兜底
@@ -1741,7 +1754,7 @@ else {
     $load64  = $null
     try {
         $watch64 = Start-Process -FilePath $probeExe64 -PassThru -WindowStyle Hidden `
-            -ArgumentList '-o', $watchOut64, '--watch', '--duration', '14', '--interval', '2', '--no-pause'
+            -ArgumentList '-o', $watchOut64, '--watch', '--duration', '10', '--interval', '2', '--no-pause'
         Start-Sleep -Seconds 4
         $load64 = Start-Process -FilePath $gzyzSim -ArgumentList '--load', $ddStub -PassThru
         $watch64.WaitForExit()
@@ -1815,7 +1828,7 @@ $state20   = ''
 
 try {
     $sim20Proc = Start-Process -FilePath $sim -PassThru
-    Start-Sleep -Seconds 3
+[void](Wait-SimFullscreen 6)   # v0.6.34 提速：等模拟目标真的进全屏，不再死等 3 秒
     $mark20 = Get-LogLength $appLog
     $app20Proc = Start-Trainer   # v0.6.34：启动并记录状态文件基线
 
@@ -1946,7 +1959,7 @@ $clickOk     = $false
 
 try {
     $sim21Proc = Start-Process -FilePath $sim -PassThru
-    Start-Sleep -Seconds 3
+[void](Wait-SimFullscreen 6)   # v0.6.34 提速：等模拟目标真的进全屏，不再死等 3 秒
     $app21Proc = Start-Trainer   # v0.6.34：启动并记录状态文件基线
 
     for ($i = 0; $i -lt 20; $i++) {
@@ -2084,7 +2097,7 @@ $showBack  = $false
 
 try {
     $sim22Proc = Start-Process -FilePath $sim -PassThru
-    Start-Sleep -Seconds 3
+[void](Wait-SimFullscreen 6)   # v0.6.34 提速：等模拟目标真的进全屏，不再死等 3 秒
     $app22Proc = Start-Trainer   # v0.6.34：启动并记录状态文件基线
 
     for ($i = 0; $i -lt 20; $i++) {
@@ -2179,7 +2192,7 @@ function Invoke-PercentPhase([int]$percent) {
     $style = 0
     try {
         $s = Start-Process -FilePath $sim -PassThru
-        Start-Sleep -Seconds 3
+[void](Wait-SimFullscreen 6)   # v0.6.34 提速：等模拟目标真的进全屏，不再死等 3 秒
         $a = Start-Trainer   # v0.6.34：启动并记录状态文件基线
         for ($i = 0; $i -lt 20; $i++) {
             Start-Sleep -Milliseconds 700
@@ -2286,7 +2299,7 @@ $packDir   = $null
 
 try {
     $sim24Proc = Start-Process -FilePath $sim -PassThru
-    Start-Sleep -Seconds 3
+[void](Wait-SimFullscreen 6)   # v0.6.34 提速：等模拟目标真的进全屏，不再死等 3 秒
     $app24Proc = Start-Trainer   # v0.6.34：启动并记录状态文件基线
     for ($i = 0; $i -lt 24; $i++) {
         Start-Sleep -Milliseconds 800
