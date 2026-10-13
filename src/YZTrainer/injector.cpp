@@ -647,7 +647,22 @@ void WatchdogTick()
         return;
 
     DWORD now = GetTickCount();
-    if (now - g_app.lastInjectTick < 2000)
+    /* v0.6.37：同一个 pid 反复注入却始终不回报状态（典型场景：抓屏子进程，它连不上管道——
+       服务端同时只服务一个客户端）时按指数退避，别每 2 秒无限重注入（§39.7 实测被注入 12 次以上）。 */
+    if (g_app.injectBackoffPid != pid)
+    {
+        g_app.injectBackoffPid   = pid;
+        g_app.injectBackoffCount = 0;
+    }
+    DWORD injectIntervalMs = 2000;
+    if (g_app.injectBackoffCount > 3)
+    {
+        const DWORD shift = (g_app.injectBackoffCount - 4) > 3 ? 3 : (g_app.injectBackoffCount - 4);
+        injectIntervalMs = 8000u << shift;          /* 8 / 16 / 32 / 64 秒 */
+        if (injectIntervalMs > 60000)
+            injectIntervalMs = 60000;
+    }
+    if (now - g_app.lastInjectTick < injectIntervalMs)
         return;
 
     DWORD clientPid = 0;
@@ -655,6 +670,10 @@ void WatchdogTick()
         return;
 
     g_app.lastInjectTick = now;
+    if (g_app.injectBackoffCount == 3)
+        YZLOGI(L"pid=%u 已连续注入 3 次仍未见回报状态（例如它连不上管道），重试间隔放宽到 8 秒并继续退避",
+               pid);
+    ++g_app.injectBackoffCount;
 
     /* 换目标（客户端被服务重启）就重新计失败次数 */
     if (g_app.injectFailPid != pid)

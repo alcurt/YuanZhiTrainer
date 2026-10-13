@@ -80,6 +80,10 @@ struct AppRuntime
        连续失败到阈值就运行期自动改用消息钩子（不改 ini）：09-29 实测里受保护的客户端
        永远注入不进去，而消息钩子在同级/更高完整性下是通的。 */
     DWORD            injectFailStreak;
+    /* v0.6.37：同一 pid 连续注入却始终不回报状态时的指数退避（§39.7：抓屏子进程连不上管道，
+       旧逻辑会对它每 2 秒无限重注入） */
+DWORD            injectBackoffPid;
+DWORD            injectBackoffCount;
     DWORD            injectFailPid;
     bool             autoHookFallback;
     bool             autoExportedBroadcast;   /* "首次识别到广播窗口"那份是否已导过 */
