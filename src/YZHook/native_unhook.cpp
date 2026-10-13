@@ -210,8 +210,11 @@ DWORD WINAPI WorkerProc(LPVOID)
         YZLOGI(L"NativeUnhook: 第 %d 轮完成，本轮成功调用 %u 个入口（累计 %d 个）",
                round, called, total);
     else if (round == 1)
-        YZLOGW(L"NativeUnhook: 首轮没有入口被调用（模块未加载或未通过自检，见上文日志）；"
-               L"之后每 2 秒重试，模块一出现就会再试");
+        YZLOGI(L"NativeUnhook: 首轮没有入口可调（远志的钩子模块还没加载，属正常时序——我们的注入通常"
+               L"早于它加载）；之后每 2 秒重试，最多 %u 轮", (unsigned)kMaxAttempts);
+    else if (round >= static_cast<LONG>(kMaxAttempts))
+        YZLOGW(L"NativeUnhook: %u 轮都没能调用到入口（远志的钩子模块始终未出现、或未通过自检）——"
+               L"如果现场键鼠仍被锁住，这是首要怀疑点", (unsigned)kMaxAttempts);
 
     InterlockedExchange(&g_running, 0);   /* 本轮结束，允许下一轮 */
     return 0;
