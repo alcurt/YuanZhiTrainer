@@ -105,6 +105,9 @@ DWORD FindTargetProcess(const AppConfig& cfg);
 bool  InjectHookDll(DWORD pid, const std::wstring& dllPath, std::wstring* err);
 /* 抓屏子进程出现时的处理（v0.6.32，实现在 injector.cpp）：记日志 + 按 PID 注入 */
 void  OnCaptureChildSeen(DWORD pid, const std::wstring& line);
+/* 把"当前要不要冻结抓屏进程"写到 C:\ProgramData\YZTrainer\capture-state.txt（v0.6.36）：
+   抓屏子进程常连不上管道（服务端同时只服务一个客户端），这条是配置之外的补充通道。 */
+void  WriteCaptureStateFile();
 void  WatchdogTick();
 std::wstring ResolveHookDllPath();
 

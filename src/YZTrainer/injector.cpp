@@ -802,10 +802,37 @@ void OnCaptureChildSeen(DWORD pid, const std::wstring& line)
         YZLOGI(L"抓屏子进程: 按配置不注入（InjectCaptureChild=0，只识别不干预）");
         return;
     }
+    WriteCaptureStateFile();   /* v0.6.36：抓屏子进程连不上管道也不怕——补充通道带上当前意图 */
     HANDLE th = CreateThread(nullptr, 0, CaptureChildInjectThread,
                              reinterpret_cast<LPVOID>(static_cast<ULONG_PTR>(pid)), 0, nullptr);
     if (th != nullptr)
         CloseHandle(th);
     else
         YZLOGW(L"抓屏子进程 pid=%u：起注入线程失败 err=%u", pid, GetLastError());
+}
+
+/* 补充状态通道（v0.6.36）。现场问题：管道服务端同时只服务一个客户端，学生端先占着，
+   于是我们**后注入的抓屏子进程永远连不上管道、拿不到配置帧**，v0.6.33 的冻结就不会被武装。
+   这里把当前意图写到 ProgramData 下的一个共享小文件（SYSTEM 与用户身份都读得到），
+   抓屏进程里的钩子每约 2 秒读一次。写失败不致命，只记一条 DEBUG。 */
+void WriteCaptureStateFile()
+{
+    const std::wstring dir = L"C:\\ProgramData\\YZTrainer";
+    yz::EnsureDirectory(dir);
+    const std::wstring path = yz::JoinPath(dir, L"capture-state.txt");
+    const DWORD anti = (g_app.cfg.flags & YZ_FLAG_ANTI_MONITOR) ? 1 : 0;
+    const std::wstring text = yz::Format(L"AntiMonitor=%u\r\nFlags=0x%08X\r\nWriter=%u\r\n",
+                                         anti, g_app.cfg.flags, GetCurrentProcessId());
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr,
+                           CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE)
+    {
+        YZLOGD(L"补充状态通道: 写 %s 失败 err=%u", path.c_str(), GetLastError());
+        return;
+    }
+    const std::string utf8 = yz::WideToUtf8(text);
+    DWORD written = 0;
+    WriteFile(h, utf8.data(), static_cast<DWORD>(utf8.size()), &written, nullptr);
+    CloseHandle(h);
+    YZLOGI(L"补充状态通道: 已写 %s（AntiMonitor=%u，供抓屏子进程读取）", path.c_str(), anti);
 }

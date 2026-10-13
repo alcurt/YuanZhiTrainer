@@ -81,6 +81,7 @@ int WINAPI wWinMain(HINSTANCE hinst, HINSTANCE, LPWSTR, int)
 
     yz::LogInit(L"YZTrainer");
     ConfigLoad(g_app.cfg, g_app.iniPath);
+    WriteCaptureStateFile();   /* v0.6.36：启动即把"是否要冻结"写进补充状态通道，避免读到上一次运行的陈旧值 */
     yz::LogSetLevel(g_app.cfg.logLevel);
     yz::LogSetSink(LogSinkProc, nullptr);
     YZLOGI(L"YZTrainer 启动，exeDir=%s", g_app.exeDir.c_str());

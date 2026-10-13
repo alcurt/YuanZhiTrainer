@@ -269,6 +269,11 @@ void DupTraceShutdown()
 }
 /* 冻结开关（v0.6.33）：定义放在匿名命名空间之外，否则引擎侧链接不到 */
 
+bool DupTraceIsFrozen()
+{
+    return InterlockedCompareExchange(&g_freezeDup, 0, 0) != 0;
+}
+
 void DupTraceSetFreeze(bool on)
 {
     InterlockedExchange(&g_freezeDup, on ? 1 : 0);

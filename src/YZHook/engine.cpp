@@ -16,7 +16,9 @@
 #include <deque>
 #include <string.h>
 #include <string>
-#include <vector>
+#include <vector>
+
+namespace yzhook { bool ProcessLoadedCaptureComponent(); }   /* 前置声明：定义在文件后半，供抓屏子进程的补充状态通道使用 */
 
 namespace yzhook
 {
@@ -249,10 +251,68 @@ void ExamTick()
     }
 }
 
+/* 抓屏子进程常常**连不上主程序管道**（管道服务端同时只服务一个客户端，客户端先占着），
+   于是它拿不到配置帧——而 v0.6.33 的冻结正是靠配置帧里的防监视位武装的。
+   这里加一条**补充通道**：主程序把当前意图写进 C:\ProgramData\YZTrainer\capture-state.txt
+   （SYSTEM 与用户身份都能读），本进程每约 2 秒读一次。配置帧若到达，仍以配置帧为准。 */
+void RefreshCaptureFreezeFromFile()
+{
+    static DWORD lastTick = 0;
+    const DWORD now = GetTickCount();
+    if (lastTick != 0 && (now - lastTick) < 2000)
+        return;
+    lastTick = now;
+
+    static int reported = 0;
+    HANDLE h = CreateFileW(L"C:\\ProgramData\\YZTrainer\\capture-state.txt", GENERIC_READ,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
+                           FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE)
+    {
+        if (reported != -1)
+        {
+            reported = -1;
+            YZLOGI(L"补充状态通道: capture-state.txt 暂不可读（err=%u，首次写入前属正常）",
+                   GetLastError());
+        }
+        return;
+    }
+    char buf[256] = { 0 };
+    DWORD got = 0;
+    ReadFile(h, buf, sizeof(buf) - 1, &got, nullptr);
+    CloseHandle(h);
+    buf[got] = '\0';
+
+    int anti = -1;
+    if (const char* p = strstr(buf, "AntiMonitor="))
+        anti = (p[12] == '1') ? 1 : 0;
+    if (reported != 1)
+    {
+        reported = 1;
+        YZLOGI(L"补充状态通道: 读到 AntiMonitor=%d（本进程是抓屏进程=%d，当前已冻结=%d）",
+               anti, yzhook::ProcessLoadedCaptureComponent() ? 1 : 0,
+               yzhook::DupTraceIsFrozen() ? 1 : 0);
+    }
+    if (anti < 0)
+        return;
+
+    if (anti == 0)
+    {
+        yzhook::DupTraceSetFreeze(false);
+        return;
+    }
+    if (yzhook::ProcessLoadedCaptureComponent() && !yzhook::DupTraceIsFrozen())
+    {
+        /* 只置冻结标志不够——vtable 交换也得装上，否则调用方走的还是真函数。装钩是幂等的。 */
+        yzhook::DupTraceInstall(true);
+        yzhook::DupTraceSetFreeze(true);
+    }
+}
 void SweepTick()
 {
     if (yzhook::g_examMode != 0)
         return;
+    RefreshCaptureFreezeFromFile();   /* v0.6.36：抓屏子进程的补充状态通道 */
     yzhook::WindowSweepTick();
     yzhook::InputEnforceTick();
 

@@ -802,6 +802,7 @@ void CmdSetFlag(DWORD flag, bool on)
         g_app.cfg.flags &= ~flag;
 
     ConfigSave(g_app.cfg, g_app.iniPath);
+    WriteCaptureStateFile();   /* v0.6.36：功能位一变就刷新补充状态通道（抓屏子进程据此武装冻结） */
 
     DWORD opcode = 0;
     if (flag == YZ_FLAG_WINDOWIZE)      opcode = YZ_CMD_SET_WINDOW_MODE;
@@ -810,6 +811,7 @@ void CmdSetFlag(DWORD flag, bool on)
     if (flag == YZ_FLAG_BLOCK_REMOTE)   opcode = YZ_CMD_SET_BLOCK_REMOTE;
 
     if (opcode != 0)
+
         IpcSendFlagCommand(opcode, on);
     else
         IpcSendConfig();
