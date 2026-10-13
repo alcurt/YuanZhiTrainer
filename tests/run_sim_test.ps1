@@ -443,10 +443,16 @@ try {
     # v0.6.31：托盘图标优先用固定 GUID 身份（被杀/重启后复用同一槽位，不堆死图标）。
     # 断言"结果必须有明确记录"：GUID 成功 / 回落 uID / 两次都失败，三条路都要在日志里留痕——
     # 静默失败最坏（用户只会看到"托盘图标没了"，日志里毫无线索）。
+    $trayAll  = (([regex]::Matches($seg1, '托盘图标: [^\r\n]*') | ForEach-Object { $_.Value }) -join ' || ')
     $trayLine = ([regex]::Match($seg1, '托盘图标: [^\r\n]*')).Value
+    # v0.6.34 加严：走了 uID 回落时，日志必须带出 cbSize/uFlags/err 这组诊断字段，
+    # 否则"为什么没走 GUID"永远查不出来（本机实测 NIF_GUID 返回 E_FAIL，且 err 常被误当 0）。
+    $trayDiag = ($trayAll -match 'cbSize=') -and ($trayAll -match 'uFlags=') -and ($trayAll -match 'err=')
     Write-Host ("托盘图标注册: " + $(if ($trayLine) { $trayLine } else { '(日志里没有)' }))
-    if ($trayLine) {
-        $result.Add('PASS  托盘图标注册结果有明确记录（GUID 优先，失败会写明原因）')
+    if ($trayLine -and ((($trayAll -notmatch '回落')) -or $trayDiag)) {
+        $result.Add('PASS  托盘图标注册有明确结论；走回落时带出 cbSize/uFlags/err 诊断字段（v0.6.34）')
+    } elseif ($trayLine) {
+        $result.Add('FAIL  托盘图标回落了但日志缺 cbSize/uFlags/err 诊断字段（无法定位为什么没走 GUID）')
     } else {
         $result.Add('FAIL  托盘图标注册没有任何日志（静默失败：现场无法判断是没注册上还是没显示）')
     }

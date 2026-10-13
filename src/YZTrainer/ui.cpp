@@ -228,32 +228,55 @@ void AddTrayIcon(HWND hwnd)
     g_nid.hIcon            = g_icon;
     wcsncpy_s(g_nid.szTip, sizeof(g_nid.szTip) / sizeof(wchar_t), kAppTitle, _TRUNCATE);
 
-    /* 一级：固定 GUID 身份（被杀/重启后复用同一槽位，不再堆死图标） */
+    /* 一级：固定 GUID 身份（被杀/重启后复用同一槽位，不再堆死图标）。
+       注意 NIF_GUID 的两个坑（本机实测）：① Shell 里若已存在**同一 GUID 的残留注册**
+       （前面被强杀的实例留下的），NIM_ADD 会返回失败而 GetLastError() 是 0 —— 所以
+       err 不能单独当判据；② 失败后先发一次 NIM_DELETE（同一个 GUID）把残留槽位清掉再试一次，
+       这一步是本机 A/B 之后加的，见开发记录 §42。 */
     g_nid.uFlags   = NIF_ICON | NIF_MESSAGE | NIF_TIP | NIF_GUID;
     g_nid.guidItem = kTrayGuid;
-    if (Shell_NotifyIconW(NIM_ADD, &g_nid))
+    g_nid.uVersion = NOTIFYICON_VERSION_4;   /* v0.6.34 实验：有的 shell 要求在 NIM_ADD 之前就声明版本 */
+    bool guidOk = (Shell_NotifyIconW(NIM_ADD, &g_nid) != FALSE);
+    const DWORD guidErr = GetLastError();
+    if (!guidOk)
+    {
+        /* 清残留槽位后重试一次：能否清掉取决于 shell（同一个 GUID 的死注册未必允许别的进程删），
+           所以失败也照样往下走，只是把过程写进日志便于现场判读。 */
+        Shell_NotifyIconW(NIM_DELETE, &g_nid);
+        guidOk = (Shell_NotifyIconW(NIM_ADD, &g_nid) != FALSE);
+        YZLOGI(L"托盘图标: GUID 首次注册失败（err=%u；NIF_GUID 分支下 err 常为 0，不可单独作判据），"
+               L"清理残留槽位后重试 = %s", guidErr, guidOk ? L"成功" : L"仍失败");
+    }
+    if (guidOk)
     {
         g_trayAdded = true;
+        /* 官方建议：注册成功后用 NIM_SETVERSION 声明版本（v0.6.34 补上；
+           本机实测 GUID 路径的成败与它无关，但缺它会让部分 shell 行为按 v0 处理）。 */
+        g_nid.uVersion = NOTIFYICON_VERSION_4;
+        Shell_NotifyIconW(NIM_SETVERSION, &g_nid);
         YZLOGI(L"托盘图标: 以固定 GUID 注册成功（被强杀/重启后复用同一槽位，不会在任务栏堆死图标）");
         return;
     }
 
-    /* 二级：回落 uID 方式（老 shell 不认 NIF_GUID） */
+    /* 二级：回落 uID 方式（老 shell 不认 NIF_GUID，或 GUID 槽位被死注册占着清不掉） */
+    const DWORD cbSizeUsed = g_nid.cbSize;
+    const UINT  guidFlags  = g_nid.uFlags;
     g_nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
     g_nid.uID    = 1;
     if (Shell_NotifyIconW(NIM_ADD, &g_nid))
     {
         g_trayAdded = true;
-        YZLOGW(L"托盘图标: GUID 方式失败（err=%u），已回落 uID 方式——被强杀时任务栏可能留下死图标",
-               GetLastError());
+        YZLOGW(L"托盘图标: GUID 方式失败，已回落 uID 方式——被强杀时任务栏可能留下死图标"
+               L"（首次 err=%u 常为 0，不可单独作判据；cbSize=%u uFlags=0x%X hwnd=%p guid 前 4 字节=%08X）",
+               guidErr, cbSizeUsed, guidFlags, g_nid.hWnd, kTrayGuid.Data1);
     }
     else
     {
         /* 两次都失败也要说出来（v0.6.31）：静默失败最坏——用户会以为"托盘图标没了"是程序坏了，
            而日志里一条线索都没有。常见原因是通知区域被大量"死图标"占满（被杀进程留下的）。 */
         const DWORD err = GetLastError();
-        YZLOGW(L"托盘图标: GUID 与 uID 两种方式都失败（err=%u）——通知区域可能已满或 Explorer 异常；"
-               L"主界面与热键仍可用", err);
+        YZLOGW(L"托盘图标: GUID 与 uID 两种方式都失败（err=%u，uID 分支下这个值才有意义）——"
+               L"通知区域可能已满或 Explorer 异常；主界面与热键仍可用", err);
     }
 }
 
