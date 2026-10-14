@@ -60,10 +60,21 @@ foreach ($pl in 'Win32', 'x64') {
           ("版本=" + $(if ($it) { $it.VersionInfo.FileVersionRaw } else { '缺失' }) + " " + $(if ($it) { "$($it.Length) 字节" }))
     Check ("$pl YZProbe.exe") (Test-Path -LiteralPath (Join-Path $repo "dist\$pl\YZProbe.exe") -ErrorAction SilentlyContinue) ''
     $ini = Join-Path $repo "dist\$pl\YZTrainer.ini"
+    # 开发机上是出厂值 Flags=5；U 盘/现场会把 tools\field-ini 的模板覆盖进来（Flags=45），两者都合格。
     $flags = (Select-String -LiteralPath $ini -Pattern '^Flags=(\d+)' -ErrorAction SilentlyContinue | Select-Object -First 1)
-    Check ("$pl 出厂 ini") ($flags -and $flags.Matches[0].Groups[1].Value -eq '5') 'Flags=5（出厂值）'
+    $fv = if ($flags) { $flags.Matches[0].Groups[1].Value } else { '' }
+    Check ("$pl ini") ($fv -eq '5' -or $fv -eq '45') `
+          ("Flags=$fv " + $(if ($fv -eq '5') { '（出厂值）' } elseif ($fv -eq '45') { '（现场模板：窗口化+键鼠解锁+防监视+假全屏）' } else { '（既不是 5 也不是 45，请确认）' }))
 }
 
+L ''
+L '---- 1b. dist 里不应有回归残留（否则会被一起拷进 U 盘，判读时干扰计数）----'
+foreach ($pl in 'Win32', 'x64') {
+    $dirs = @(Get-ChildItem -LiteralPath (Join-Path $repo "dist\$pl") -Directory -Filter 'diag-*' -ErrorAction SilentlyContinue)
+    $junk = @(Get-ChildItem -LiteralPath (Join-Path $repo "dist\$pl") -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -like 'sim_*' -or $_.Name -like '*.bak*' })
+    Check ("$pl 无 diag-* 残留") ($dirs.Count -eq 0) ("发现 {0} 个诊断包目录（跑过回归就会有；拷走前清一下）" -f $dirs.Count)
+    Check ("$pl 无 sim_*/*.bak* 残留") ($junk.Count -eq 0) ("发现 {0} 个" -f $junk.Count)
+}
 L ''
 L '---- 2. 内嵌钩子载荷是否为当前源码（v0.6.35 踩过旧载荷）----'
 Check '内嵌载荷含"补充状态通道"' (HasStr (Join-Path $repo 'dist\Win32\YZTrainer.exe') '补充状态通道') ''
@@ -73,7 +84,12 @@ L ''
 L '---- 3. 现场工具（pwsh7 与 5.1 都要能解析）----'
 foreach ($t in @('tools\input-probe.ps1', 'tools\collect-field-data.ps1', 'tools\analyze-field-data.ps1', 'tests\timeguard.ps1')) {
     $full = Join-Path $repo $t
-    if (-not (Test-Path -LiteralPath $full -ErrorAction SilentlyContinue)) { Check $t $false '文件缺失'; continue }
+    if (-not (Test-Path -LiteralPath $full -ErrorAction SilentlyContinue)) {
+        # 只带 dist+tools 的 U 盘/现场布局没有 tests 目录，这属正常（回归只在开发机上跑），记跳过不算失败。
+        if ($t -like 'tests\*') { $ok++; L ("  [OK]   {0}  （跳过：未带 tests 目录，现场不需要它）" -f $t) }
+        else { Check $t $false '文件缺失' }
+        continue
+    }
     $e7 = ParseErrors $full
     $e51 = 0
     try {
@@ -102,8 +118,13 @@ if (Test-Path -LiteralPath $fin -ErrorAction SilentlyContinue) {
 
 L ''
 L '---- 5. 工作区状态 ----'
-$st = @(git -C $repo status --porcelain 2>$null)
-Check 'git 工作区干净' ($st.Count -eq 0) ($st -join ' ')
+# U 盘/拷贝出来的目录不是 git 仓库，这一项要跳过而不是报 BAD（否则现场会误以为检查没过）。
+if (Test-Path -LiteralPath (Join-Path $repo '.git') -ErrorAction SilentlyContinue) {
+    $st = @(git -C $repo status --porcelain 2>$null)
+    Check 'git 工作区干净' ($st.Count -eq 0) ($st -join ' ')
+} else {
+    $ok++; L '  [OK]   git 工作区干净  （跳过：当前目录不是 git 仓库，从 U 盘/拷贝目录运行属正常）'
+}
 $procs = @(Get-Process -Name YZTrainer, YZSimTarget, YZProbe, YZSysRun -ErrorAction SilentlyContinue)
 Check '没有残留进程' ($procs.Count -eq 0) ($procs | ForEach-Object { $_.ProcessName } | Select-Object -Unique)
 
