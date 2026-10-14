@@ -930,7 +930,7 @@ try {
     Start-Sleep -Seconds 4
     $mark8 = Get-LogLength $appLog
     $app8Proc = Start-Trainer   # v0.6.34：启动并记录状态文件基线
-    [void](Wait-ToolActed 14)   # v0.6.34：条件一到就走，超时按 14 秒兜底
+    [void](Wait-LogLine '已用空过程替换远志键盘/鼠标钩子' 14 $mark8)   # v0.6.40 提速：等本阶段断言真正要看的那条日志行（原来等窗口化转变，本阶段不会发生）
 
     $seg8      = Read-LogTail $appLog $mark8
     $replaced  = $seg8 -match '已用空过程替换远志键盘/鼠标钩子'
@@ -974,7 +974,7 @@ try {
     Start-Sleep -Seconds 4
     $mark8b = Get-LogLength $appLog
     $app8b = Start-Trainer   # v0.6.34：启动并记录状态文件基线
-    [void](Wait-ToolActed 14)   # v0.6.34：条件一到就走，超时按 14 秒兜底
+    [void](Wait-LogLine '已用空过程替换远志键盘/鼠标钩子\(W\)' 14 $mark8b)   # v0.6.40 提速：等本阶段断言真正要看的那条日志行（原来等窗口化转变，本阶段不会发生）
     $seg8b       = Read-LogTail $appLog $mark8b
     $threadRepl  = $seg8b -match '已用空过程替换远志键盘/鼠标钩子\(W\)'
     $threadAlive = ($sim8b -and (-not $sim8b.HasExited))
@@ -1582,7 +1582,7 @@ try {
     Start-Sleep -Seconds 4
     $mark16 = Get-LogLength $appLog
     $app16Proc = Start-Trainer   # v0.6.34：启动并记录状态文件基线
-    [void](Wait-ToolActed 14)   # v0.6.34：条件一到就走，超时按 14 秒兜底
+    [void](Wait-ToolActed 14)   # v0.6.34：条件一到就走，超时按 14 秒兜底（v0.6.40 曾试改日志行轮询，因取证行的"安装/建立复制/周期统计"多条并存、模式太松会提前返回，已回退）
 
     $seg16   = Read-LogTail $appLog $mark16
     $traceOk = $seg16 -match '\[DXGI 取证\] 建立桌面复制成功'
