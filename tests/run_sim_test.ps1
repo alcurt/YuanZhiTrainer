@@ -325,6 +325,18 @@ function Wait-SimFullscreen([int]$TimeoutSec = 6) {
     }
     return $false
 }
+# 轮询日志行（v0.6.40 提速）：等"某个断言真正要看的日志行"出现，而不是等一个与本阶段无关的
+# 状态转变（阶段九原来在等窗口化、阶段十四在等状态文件变化，两者在本阶段都不会发生，只能等满超时）。
+# 语义与 Wait-ToolActed 一致：条件一到就返回，超时按给定秒数兜底（超时后断言照样会红）。
+function Wait-LogLine([string]$Pattern, [int]$TimeoutSec = 12, [string]$Mark = '') {
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    while ((Get-Date) -lt $deadline) {
+        $seg = Read-LogTail $appLog $Mark
+        if ($seg -match $Pattern) { return $true }
+        Start-Sleep -Milliseconds 250
+    }
+    return $false
+}
 function Start-Trainer {
     $script:stateBaseline = $null
     if (Test-Path -LiteralPath $stateFile) {
@@ -360,6 +372,21 @@ function Wait-ToolActed([int]$TimeoutSec = 14) {
         Start-Sleep -Milliseconds 250
     }
     return $false
+}
+# ---- 逐阶段计时（v0.6.40，仅测量：不改任何断言语义）-----------------------------
+# 为什么加：目标 ④ 要把一轮从 383.6 秒压到 ~300 秒，必须知道时间到底花在哪些阶段，
+# 而不是继续凭感觉缩短等待（那样会伤断言可信度）。
+$script:stageStart = Get-Date
+$script:stageName  = '(开始)'
+function Start-Stage([string]$title) {
+    if ($script:stageName -ne '(开始)') {
+        Write-Host ('  [计时] {0} 用时 {1} 秒' -f $script:stageName,
+                    [Math]::Round(((Get-Date) - $script:stageStart).TotalSeconds, 1))
+    }
+    $script:stageName  = ($title -replace '^====\s*', '' -replace '\s*====$', '')
+    $script:stageStart = Get-Date
+    Write-Host ''
+    Write-Host $title
 }
 function Get-RelatedLogPaths([string]$Path) {
     if ([string]::IsNullOrEmpty($Path)) { return @() }
@@ -492,8 +519,7 @@ finally {
 # AutoInject=0 让主程序完全不注入，窗口化只能靠跨进程改样式完成；
 # 模拟目标每 3 秒抢回全屏、外部纠正每秒一次，所以这里轮询等待而不是只看一眼。
 # ---------------------------------------------------------------------------
-Write-Host ''
-Write-Host '==== 阶段二：免注入外部窗口纠正 ===='
+Start-Stage '==== 阶段二：免注入外部窗口纠正 ===='
 
 foreach ($f in @($stateFile, $capFile)) {
     if (Test-Path $f) { Move-Item -LiteralPath $f -Destination "$f.bak2-$stamp" -Force }
@@ -559,8 +585,7 @@ finally {
 # 期望：窗口仍铺满整屏、没有标题栏，但已不置顶——这样 Alt+Tab 切过去的窗口能盖在广播上。
 # 模拟目标每 3 秒抢回全屏并重新置顶，所以同样要轮询等待。
 # ---------------------------------------------------------------------------
-Write-Host ''
-Write-Host '==== 阶段三：假全屏 ===='
+Start-Stage '==== 阶段三：假全屏 ===='
 
 foreach ($f in @($stateFile, $capFile)) {
     if (Test-Path $f) { Move-Item -LiteralPath $f -Destination "$f.bak3-$stamp" -Force }
@@ -615,8 +640,7 @@ finally {
 # ---------------------------------------------------------------------------
 # 阶段四：教师端远程执行审计（YZSimTarget --exec 模拟教师端下发的 CreateProcess）
 # ---------------------------------------------------------------------------
-Write-Host ''
-Write-Host '==== 阶段四：远程执行审计 ===='
+Start-Stage '==== 阶段四：远程执行审计 ===='
 
 $auditFile = Join-Path (Join-Path $env:TEMP 'YZTrainer') 'remote-exec.log'
 if (Test-Path $auditFile) { Move-Item -LiteralPath $auditFile -Destination "$auditFile.bak4-$stamp" -Force }
@@ -675,8 +699,7 @@ finally {
 #   （随后因为替身没有那个导出，跟一条"找不到导出 … 跳过"）
 # 这条断言直接盯着"注入与模块加载的时序竞争"，是 v0.6.3 修 P1.3 的回归闸门。
 # ---------------------------------------------------------------------------
-Write-Host ''
-Write-Host '==== 阶段五：主动拔钩的晚加载重试 ===='
+Start-Stage '==== 阶段五：主动拔钩的晚加载重试 ===='
 
 $stubDir  = Join-Path $env:TEMP 'yzt-lateload'
 $stubDll  = Join-Path $stubDir 'ExdHooks.dll'
@@ -738,8 +761,7 @@ finally {
 #       而不是跟着客户端每秒十几次地互相拉扯（那在 Win11 下就是放大缩小横跳）。
 # 用 AutoInject=0 保证走的是跨进程纠正这条路径（注入路径会被进程内 Hook 接管）。
 # ---------------------------------------------------------------------------
-Write-Host ''
-Write-Host '==== 阶段六：反横跳闸门 ===='
+Start-Stage '==== 阶段六：反横跳闸门 ===='
 
 foreach ($f in @($stateFile, $capFile)) {
     if (Test-Path $f) { Move-Item -LiteralPath $f -Destination "$f.bak6-$stamp" -Force }
@@ -791,8 +813,7 @@ Write-Host ''
 # 断言：日志出现"采集栈监控: PID=… 出现采集组件 ExdDtDup.dll"，且自动导出的诊断包里
 #       snapshot.txt 含"== 采集栈快照 =="与该命中。
 # ---------------------------------------------------------------------------
-Write-Host ''
-Write-Host '==== 阶段七：采集栈监控 ===='
+Start-Stage '==== 阶段七：采集栈监控 ===='
 
 $ddStubDir = Join-Path $env:TEMP 'yzt-capture'
 $ddStub    = Join-Path $ddStubDir 'ExdDtDup.dll'
@@ -803,6 +824,7 @@ if (-not (Test-Path $ddStubSrc)) { $ddStubSrc = Join-Path $env:WINDIR 'System32\
 
 $phase7Ini = @(
     '[General]',
+    'CaptureScanIntervalMs=3000',   # v0.6.40 提速：本阶段等采集栈监控命中，默认 30 秒扫描太慢（A/B：26.9→5.7 秒）
     'AutoExportOnExit=0',   # v0.6.34：优雅退出时不导包，免得每次退出都拖慢回归
     'Flags=5',
     'WindowPercent=60',
@@ -874,8 +896,7 @@ finally {
 # 负向验证（人工做一次即可）：把 hooks_input.cpp 的 ReplaceWithPassthrough 暂时改成直接
 # return nullptr，重编后本阶段必须失败——证明这条闸门真的会拦人。
 # ---------------------------------------------------------------------------
-Write-Host ''
-Write-Host '==== 阶段八：P0 空过程替换（客户端自杀回归）===='
+Start-Stage '==== 阶段八：P0 空过程替换（客户端自杀回归）===='
 
 $gzyzDir     = Join-Path $env:TEMP 'GZYZ-yzsim'
 $gzyzSim     = Join-Path $gzyzDir 'YZSimTarget.exe'
@@ -941,8 +962,7 @@ finally {
 # 上面的 try 里，结果上一段的模拟目标一直活着，注入器反复选中那个"已注入过、管道已断"的
 # 旧进程（日志里 10 次重复注入同一个 pid），新目标永远等不到 YZHook —— 断言因此误报失败。
 # ---------------------------------------------------------------------------
-Write-Host ''
-Write-Host '==== 阶段八（第二段）：hMod=NULL 的线程内钩子 ===='
+Start-Stage '==== 阶段八（第二段）：hMod=NULL 的线程内钩子 ===='
 
 $sim8b       = $null
 $app8b       = $null
@@ -981,8 +1001,7 @@ else { $result.Add('FAIL  --hook-thread 模式下模拟客户端退出了') }
 #   20. BlockMessageHooks=1（默认）：两条"已用空过程替换…"都出现
 #   21. BlockMessageHooks=0：键盘那条仍出现，消息层那条**不出现**（客户端照旧存活）
 # ---------------------------------------------------------------------------
-Write-Host ''
-Write-Host '==== 阶段九：消息层钩子开关（BlockMessageHooks）===='
+Start-Stage '==== 阶段九：消息层钩子开关（BlockMessageHooks）===='
 
 $gzyzDir9 = Join-Path $env:TEMP 'GZYZ-yzsim'
 $gzyzSim9 = Join-Path $gzyzDir9 'YZSimTarget.exe'
@@ -1010,7 +1029,7 @@ function Invoke-MessageHookPhase([int]$Bit) {
         Start-Sleep -Seconds 4
         $mark = Get-LogLength $appLog
         $a = Start-Trainer   # v0.6.34：启动并记录状态文件基线
-        [void](Wait-ToolActed 14)   # v0.6.34：条件一到就走，超时按 14 秒兜底
+        [void](Wait-LogLine '已用空过程替换远志(键盘/鼠标|消息层)钩子' 14 $mark)   # v0.6.40：等本阶段真正要看的替换行（两个子用例共用这里）
         return [pscustomobject]@{
             Seg      = (Read-LogTail $appLog $mark)
             SimAlive = ($s -and (-not $s.HasExited))
@@ -1049,8 +1068,7 @@ if ($offKey -and (-not $offMsg) -and $off.SimAlive) {
 # 起一个常驻探针 → 让模拟目标加载改名成 ExdDtDup.dll 的替身 → 断言触发落盘与内容。
 # 替身与加载器都用与 $DistDir 同位数的一组（x64 用 System32 的 version.dll）。
 # ---------------------------------------------------------------------------
-Write-Host ''
-Write-Host '==== 阶段十：探针 --watch 触发式采集 ===='
+Start-Stage '==== 阶段十：探针 --watch 触发式采集 ===='
 
 $probeExe = Join-Path $DistDir 'YZProbe.exe'
 if (-not (Test-Path $probeExe)) {
@@ -1113,8 +1131,7 @@ else {
 #       （GZYZ 目标的状态文件仍是 fullscreen=1 —— 光有日志不够，必须看到功能真的停了）
 #   27. EnableExamGuard=0（对照）：同一场景不熔断，窗口化照常生效（fullscreen=0）
 # ---------------------------------------------------------------------------
-Write-Host ''
-Write-Host '==== 阶段十一：考试/测验强信号熔断 ===='
+Start-Stage '==== 阶段十一：考试/测验强信号熔断 ===='
 
 $examDir = Join-Path $env:TEMP 'GZYZ-yzsim'
 $examSim = Join-Path $examDir 'YZSimTarget.exe'
@@ -1197,8 +1214,7 @@ if ($guardOff -and $windowizedOff) {
 # 做法：用它起一个 cmd.exe 子进程，并让它把输出写进指定的 txt，然后只匹配 ASCII 片段与数字
 # （与输出文件的编码无关）。
 # ---------------------------------------------------------------------------
-Write-Host ''
-Write-Host '==== 阶段十二：YZSysRun 令牌复制自检 ===='
+Start-Stage '==== 阶段十二：YZSysRun 令牌复制自检 ===='
 
 $sysrunExe = Join-Path $DistDir 'YZSysRun.exe'
 if (-not (Test-Path $sysrunExe)) {
@@ -1248,8 +1264,7 @@ else {
 #   30. 状态文件出现 fullscreen=1 且 topmost=0，且日志有"外部窗口纠正(假全屏)"
 #   31. 该窗口没有被加标题栏（外观仍是全屏广播的样子）
 # ---------------------------------------------------------------------------
-Write-Host ''
-Write-Host '==== 阶段十三：免注入路径下的假全屏 ===='
+Start-Stage '==== 阶段十三：免注入路径下的假全屏 ===='
 
 foreach ($f in @($stateFile, $capFile)) {
     if (Test-Path $f) { Move-Item -LiteralPath $f -Destination "$f.bak13-$stamp" -Force }
@@ -1321,8 +1336,7 @@ if ($fake13 -and $state13 -match 'style=0x([0-9A-Fa-f]{8})') {
 #   32. A 里日志有"外部窗口纠正…失败"，目标仍是 fullscreen=1（确实没改成）
 #   33. B 里日志有"外部窗口纠正: 0x… -> …"且目标变成 fullscreen=0
 # ---------------------------------------------------------------------------
-Write-Host ''
-Write-Host '==== 阶段十四：身份不足时的判读（UIPI 与 SYSTEM 对照）===='
+Start-Stage '==== 阶段十四：身份不足时的判读（UIPI 与 SYSTEM 对照）===='
 
 $identDir   = Join-Path $env:TEMP 'GZYZ-yzsim'
 $identSim   = Join-Path $identDir 'YZSimTarget.exe'
@@ -1369,7 +1383,7 @@ else {
     if (Test-Path -LiteralPath $identState) { Move-Item -LiteralPath $identState -Destination "$identState.bak14a-$stamp" -Force }
     $mark14a = Get-LogLength $appLog
     $appA = Start-Trainer   # v0.6.34：启动并记录状态文件基线
-    [void](Wait-ToolActed 12)   # v0.6.34：条件一到就走，超时按 12 秒兜底
+    [void](Wait-LogLine '外部窗口纠正[^\r\n]*失败' 12 $mark14a)   # v0.6.40：UIPI 拒绝就是本子用例的预期结果，等那条 WARN
     $seg14a = Read-LogTail $appLog $mark14a
     $stateA = Get-Content -LiteralPath $identState -ErrorAction SilentlyContinue
     [void](Close-TrainerGracefully $appA 8)   # v0.6.34：优雅退出（托盘 3002）
@@ -1401,7 +1415,7 @@ else {
     $markSysB   = Get-LogLength $sysLogPath
     $srAppB = Start-Process -FilePath $sysrunExe2 -PassThru -WindowStyle Hidden `
         -ArgumentList '--log', (Join-Path $identDir 'sysrun-app-b.txt'), '--', $trainer
-    Start-Sleep -Seconds 16   # v0.6.34：本阶段用 YZSysRun 以 SYSTEM 启动，不走 Start-Trainer，故无基线可用，退回固定等待
+    [void](Wait-LogLine '外部窗口纠正: 0x' 16 $mark14b)   # v0.6.40：等 SYSTEM 那条成功行，替代固定 16 秒
     $seg14b = Read-LogTail $appLog $mark14b
     $segSysB = Read-LogTail $sysLogPath $markSysB
     $stateB = Get-Content -LiteralPath $identState -ErrorAction SilentlyContinue
@@ -1439,8 +1453,7 @@ else {
 #   34. 冻结期间进程没有可见主窗口（MainWindowHandle=0），日志有那行"已收入托盘"
 #   35. 从进程外读回该进程顶层窗口的显示亲和性 = 0x11（WDA_EXCLUDEFROMCAPTURE）
 # ---------------------------------------------------------------------------
-Write-Host ''
-Write-Host '==== 阶段十五：冻结开启时把自己从画面里摘出去 ===='
+Start-Stage '==== 阶段十五：冻结开启时把自己从画面里摘出去 ===='
 
 if (-not ('WdaCheck' -as [type])) {
     $wdaSrc = @(
@@ -1537,8 +1550,7 @@ finally {
 #   37. 日志出现"[DXGI 取证] 周期 取帧统计"（AcquireNextFrame 被计数），
 #       且模拟目标自己记到"dup: 完成 取到帧=N" 里 N > 0（证明真的取到了帧，不是空转）
 # ---------------------------------------------------------------------------
-Write-Host ''
-Write-Host '==== 阶段十六：DXGI 桌面复制取证（只计数）===='
+Start-Stage '==== 阶段十六：DXGI 桌面复制取证（只计数）===='
 
 $phase16Ini = @(
     '[General]',
@@ -1607,8 +1619,7 @@ finally {
 # 但此前从没验证过，所以这里用"32 位模拟目标加载改名成 ExdDtDup.dll 的 32 位替身"钉住：
 # 断言 38/39 都只看 **x64** 探针在 32 位目标上的输出。
 # ---------------------------------------------------------------------------
-Write-Host ''
-Write-Host '==== 阶段十七：探针跨架构枚举（x64 探针看 32 位目标）===='
+Start-Stage '==== 阶段十七：探针跨架构枚举（x64 探针看 32 位目标）===='
 
 $distDir64  = Join-Path (Split-Path -Parent $DistDir) 'x64'
 $probeExe64 = Join-Path $distDir64 'YZProbe.exe'
@@ -1677,8 +1688,7 @@ else {
 #   40. 它确实出现在"远志相关进程"表里（晋级口径仍在——否则这条断言失去意义）
 #   41. 它的"进程保护"列不是 PPL/WinTcbLight，而是"无"/"无保护"（修好的那条）
 # ---------------------------------------------------------------------------
-Write-Host ''
-Write-Host '==== 阶段十八：探针的保护级别判读（仅因采集组件晋级的进程）===='
+Start-Stage '==== 阶段十八：探针的保护级别判读（仅因采集组件晋级的进程）===='
 
 $nonVendorDir = Join-Path $env:TEMP 'yzt-not-yuanzhi'
 $nonVendorSim = Join-Path $nonVendorDir 'YZSimTarget.exe'
@@ -1736,8 +1746,7 @@ finally {
 #   42. 出现 -watch-capture 报告，且报告里含该 pid 的 ExdDtDup 命中
 #   43. 那份报告里该 pid 的"图形采集栈"行判为 DXGI（跨架构下 stack 判词也成立）
 # ---------------------------------------------------------------------------
-Write-Host ''
-Write-Host '==== 阶段十九：x64 探针 --watch 跨架构（32 位目标）===='
+Start-Stage '==== 阶段十九：x64 探针 --watch 跨架构（32 位目标）===='
 
 if (-not (Test-Path $probeExe64)) {
     $result.Add('WARN  找不到 dist\x64\YZProbe.exe，跳过阶段十九')
@@ -1801,8 +1810,7 @@ else {
 #   45. 窗口化照常生效（模拟目标状态 fullscreen=0）——说明引擎真的在目标进程里跑起来了
 #   46. 该阶段日志段里**没有**"已注入目标进程 pid="（injectMethod=1 时不应再尝试远程线程注入）
 # ---------------------------------------------------------------------------
-Write-Host ''
-Write-Host '==== 阶段二十：InjectMethod=1 消息钩子注入 ===='
+Start-Stage '==== 阶段二十：InjectMethod=1 消息钩子注入 ===='
 
 foreach ($f in @($stateFile, $capFile)) {
     if (Test-Path $f) { Move-Item -LiteralPath $f -Destination "$f.bak20-$stamp" -Force }
@@ -1882,8 +1890,7 @@ if ($noRemote) {
 #   49. WM_HOTKEY(F12) 真的能隐藏主界面、再发一次又恢复显示
 #      —— 钉住 v0.6.26 修的"F12 原来只显示、不隐藏"那个 bug
 # ---------------------------------------------------------------------------
-Write-Host ''
-Write-Host '==== 阶段二十一：界面/热键开关链（YZ_CMD_SET_*）===='
+Start-Stage '==== 阶段二十一：界面/热键开关链（YZ_CMD_SET_*）===='
 
 if (-not ('UiDrive' -as [type])) {
     $uiSrc = @(
@@ -2039,8 +2046,7 @@ if ($hwndVisible -ne 0 -and $hwndHidden -eq 0 -and $hwndBack -ne 0) {
 #   50. 托盘菜单能打开防监视（ini 出现防监视位，抓帧哈希停住）
 #   51. 冻结把主界面收进托盘后，托盘"显示主界面"能恢复界面，且冻结不被解开
 # ---------------------------------------------------------------------------
-Write-Host ''
-Write-Host '==== 阶段二十二：托盘菜单路径 ===='
+Start-Stage '==== 阶段二十二：托盘菜单路径 ===='
 
 function Get-CapHashes22([int]$Take) {
     if (-not (Test-Path -LiteralPath $capFile)) { return @() }
@@ -2165,8 +2171,7 @@ if ($hidByFreeze -and $showBack) {
 #   53. WindowPercent=200 → 实际按 100% 钳制（比值 ≥ 0.95）
 #   54. 三个 AutoExport 全关时，阶段期间没有新增 diag-*-auto 目录
 # ---------------------------------------------------------------------------
-Write-Host ''
-Write-Host '==== 阶段二十三：ini 边界项（WindowPercent 钳制 / 自动导出关闭）===='
+Start-Stage '==== 阶段二十三：ini 边界项（WindowPercent 钳制 / 自动导出关闭）===='
 
 function Invoke-PercentPhase([int]$percent) {
     $iniLines = @(
@@ -2271,8 +2276,7 @@ if ($newDiag.Count -eq 0) {
 #   55. 自动导出的诊断包里带 SYSTEM 侧日志（yzt-sys.log），且 snapshot 里列出了 sys 来源
 #   56. 日志目录里现存的每一个 yzt*.log / remote-exec*.log 都在包里有一份（own 侧一个不漏）
 # ---------------------------------------------------------------------------
-Write-Host ''
-Write-Host '==== 阶段二十四：诊断包自带各来源日志 ===='
+Start-Stage '==== 阶段二十四：诊断包自带各来源日志 ===='
 
 $phase24Ini = @(
     '[General]',
@@ -2386,8 +2390,7 @@ if ($exitPkg.Count -ge 2) {
 #   59. 主程序按 PID 注入并给出结论（"已注入"或"注入失败"+原因）
 # 注意：采集栈监控 30 秒一轮，所以这里要等够（最多 60 秒）。
 # ---------------------------------------------------------------------------
-Write-Host ''
-Write-Host '==== 阶段二十五：抓屏子进程识别与按 PID 注入 ===='
+Start-Stage '==== 阶段二十五：抓屏子进程识别与按 PID 注入 ===='
 
 $ccDir = Join-Path $env:TEMP 'GZYZ-capture-child'
 if (Test-Path $ccDir) { Remove-Item $ccDir -Recurse -Force -ErrorAction SilentlyContinue }
@@ -2400,6 +2403,7 @@ $env:YZ_TEST_LOAD_DLL = $ccDll        # 替身子进程据此加载"名为 ExdDt
 
 $phase25Ini = @(
     '[General]',
+    'CaptureScanIntervalMs=3000',   # v0.6.40 提速：本阶段等采集栈监控命中，默认 30 秒扫描太慢（A/B：26.9→5.7 秒）
     'AutoExportOnExit=0',   # v0.6.34：优雅退出时不导包，免得每次退出都拖慢回归
     'Flags=1',
     'WindowPercent=60',
@@ -2467,6 +2471,7 @@ if ($ccConnects -ge 2) {
     $result.Add(('FAIL  只有 {0} 个客户端连上管道（多客户端未生效，抓屏子进程仍拿不到配置）' -f $ccConnects))
 }
 
+if ($script:stageName -ne '(开始)') { Write-Host ('  [计时] {0} 用时 {1} 秒' -f $script:stageName, [Math]::Round(((Get-Date) - $script:stageStart).TotalSeconds,1)) }
 $script:sw.Stop()
 Write-Host ("==== 测试结果（总用时 " + [Math]::Round($script:sw.Elapsed.TotalSeconds, 1) + " 秒）====")
 $result | ForEach-Object { Write-Host $_ }

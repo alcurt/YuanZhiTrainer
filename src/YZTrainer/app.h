@@ -47,6 +47,9 @@ struct AppConfig
        rundll32.exe + ExdDtDup.dll 做 DXGI 桌面复制，冻结必须在那个进程里做。
        设 0 时只识别、不注入（用于只想取证、不想动手的场合）。 */
     bool         injectCaptureChild;
+    /* 采集栈监控的常规扫描周期（v0.6.40 起可配，默认 30000）。回归里调小到 3 秒，
+       把"等一次 30 秒扫描"的时间省掉——阶段七/二十五合计约 60 秒。 */
+    DWORD        captureScanIntervalMs;
     std::wstring targetDir;        /* 远志安装目录，空=按进程路径自动判定 */
     std::wstring hookDllPath;      /* 空=用内嵌资源；填路径则强制使用该文件 */
     std::vector<std::wstring> processNames;

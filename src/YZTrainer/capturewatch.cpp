@@ -314,7 +314,10 @@ void capturewatch::Tick()
         return;   /* 考试模式：连同审计一起停，这里也不采集 */
 
     const DWORD now = GetTickCount();
-    if (g_lastScanTick != 0 && (now - g_lastScanTick) < kScanIntervalMs)
+    /* v0.6.40：周期改成可配（CaptureScanIntervalMs）。默认仍是 30 秒——现场别调太小，
+       全进程扫描是有成本的；回归里调成 3 秒，省掉"等一次 30 秒扫描"的时间。 */
+    const DWORD scanInterval = g_app.cfg.captureScanIntervalMs < 500 ? 500 : g_app.cfg.captureScanIntervalMs;
+    if (g_lastScanTick != 0 && (now - g_lastScanTick) < scanInterval)
         return;
     g_lastScanTick = now;
 
