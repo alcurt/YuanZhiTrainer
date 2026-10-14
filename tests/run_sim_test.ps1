@@ -169,7 +169,7 @@
          探针产物也从"只认 report"放宽到 `YZProbe-*.*`，`--watch` 留下的
          `YZProbe-watch-<时间戳>.log` 现在也进包（前提是探针用 `-o` 指向该目录）
 
-    阶段二十五（抓屏子进程识别与按 PID 注入，v0.6.32）断言 2 条：
+    阶段二十五（抓屏子进程识别 + 按 PID 注入 + 多客户端连上，v0.6.32/v0.6.38）断言 3 条：
      58. 主程序认出厂商拉起的抓屏子进程（机房实测：教师监视/缩略图时**学生端自己**拉起
          `rundll32.exe "<...>\KsFiles\ExdDtDup.dll",RunCapture 0`，DXGI 桌面复制在子进程里）
      59. 主程序按 PID 注入并给出结论（"已注入"或"注入失败+原因"）——现场要判的第一件事就是
@@ -2457,6 +2457,14 @@ if ($ccVerdict) {
     $result.Add('PASS  主程序按 PID 注入并给出结论（已注入 / 注入失败+原因，不会静默）')
 } else {
     $result.Add('FAIL  识别到抓屏子进程但注入环节没有任何结论（现场将无法判断能不能进）')
+}
+# 62. v0.6.38：管道多客户端——抓屏子进程应当**自己连上**管道（于是拿得到配置帧），
+#     而不是像 v0.6.36 之前那样永远连不上、只能靠 capture-state.txt 这条补充通道绕过。
+$ccConnects = @([regex]::Matches($seg25, 'Hook DLL 已连接')).Count
+if ($ccConnects -ge 2) {
+    $result.Add('PASS  两个客户端都连上了管道（多客户端生效：抓屏子进程也拿到配置帧）')
+} else {
+    $result.Add(('FAIL  只有 {0} 个客户端连上管道（多客户端未生效，抓屏子进程仍拿不到配置）' -f $ccConnects))
 }
 
 $script:sw.Stop()

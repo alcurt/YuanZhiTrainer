@@ -119,6 +119,8 @@ std::wstring ResolveHookDllPath();
 bool IpcStart();
 void IpcStop();
 bool IpcIsConnected(DWORD* pid);
+/* v0.6.38：某个 pid 是否已有连上的客户端（多客户端后"是否已注入"不能只看主客户端） */
+bool IpcIsClientPidConnected(DWORD pid);
 bool IpcSend(DWORD opcode, const void* payload, DWORD len);
 bool IpcSendConfig();
 bool IpcSendFlagCommand(DWORD opcode, bool on);

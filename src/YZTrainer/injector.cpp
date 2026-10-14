@@ -666,7 +666,7 @@ void WatchdogTick()
         return;
 
     DWORD clientPid = 0;
-    if (IpcIsConnected(&clientPid) && clientPid == pid)
+    if (IpcIsClientPidConnected(pid))
         return;
 
     g_app.lastInjectTick = now;
