@@ -43,3 +43,4 @@ tests/unit/*.exe
 tests/unit/*.obj
 tests/unit/*.pdb
 /工作顺序-存档-*.txt
+/tools/现场清单.txt
