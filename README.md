@@ -890,6 +890,7 @@ v0.6.36 只是绕过（`capture-state.txt` 补充通道），根因在管道：*
 | `tools\collect-field-data.ps1` | 一键回收：扫 `%TEMP%\YZTrainer`、`C:\Windows\Temp\YZTrainer`（主程序以 SYSTEM 跑过时的落点）、`C:\ProgramData\YZTrainer` 与当前目录，收**日志含全部轮转档** + `diag-*` 诊断包 + 探针产物 + ini，写 `manifest.txt`（含主日志 SHA256 前 16 位）并打 zip。 |
 | `tools\input-probe.ps1` | 键鼠被屏蔽时量"哪一层被拦"：A `SendInput`、B `PostMessage`、C 自装 `WH_KEYBOARD_LL`（**合成/物理事件分开计数** + 自校准 + 要求人工确认"确实按了物理键"）、D **只读**驱动栈侦察（键盘/鼠标/HID 类的 Upper/LowerFilters 与运行中的相关内核驱动）。本工具自身不安装任何驱动。 |
 | `tools\preflight-check.ps1` | 出发前一把过的检查：交付产物版本与出厂 ini、**内嵌钩子载荷是否为当前源码**（v0.6.35 踩过"上一版载荷"）、三个现场工具在 pwsh7 与 5.1 下是否都能解析、现场 ini 是否无 BOM、git 是否干净、有无残留进程。退出码 0=全绿 / 1=有 BAD 项 |
+| `tools\analyze-field-data.ps1` | 回来后的判读：对回收包一条命令出表——客户端连接数与 pid、抓屏子进程识别/注入、冻结是否被武装、补充通道读写、`[DXGI 取证] 取帧统计`、考试信号、UIPI 失败数、WRN/ERR 前 10 汇总、以及键鼠探针 A/B/C/D 的结论 |
 | `tests\timeguard.ps1` | 运行时间红线守门（中午 13:55 / 晚间 22:45）：打印剩余时间与档位（`OK` / `SHORT-ONLY` / `STOP`）；`-Watch` 可在到点后清理残留进程。 |
 
 用法（Windows PowerShell 5.1 亦可）：

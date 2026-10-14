@@ -71,7 +71,7 @@ Check '内嵌载荷含"[DXGI 判定]"'   (HasStr (Join-Path $repo 'dist\Win32\YZ
 
 L ''
 L '---- 3. 现场工具（pwsh7 与 5.1 都要能解析）----'
-foreach ($t in @('tools\input-probe.ps1', 'tools\collect-field-data.ps1', 'tests\timeguard.ps1')) {
+foreach ($t in @('tools\input-probe.ps1', 'tools\collect-field-data.ps1', 'tools\analyze-field-data.ps1', 'tests\timeguard.ps1')) {
     $full = Join-Path $repo $t
     if (-not (Test-Path -LiteralPath $full -ErrorAction SilentlyContinue)) { Check $t $false '文件缺失'; continue }
     $e7 = ParseErrors $full
