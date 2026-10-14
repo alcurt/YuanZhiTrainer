@@ -119,4 +119,12 @@ if (-not $NoZip) {
     }
 }
 Write-Host ''
-Write-Host '带回前请确认：manifest.txt 里"日志（含轮转档）"至少 1 份、"诊断包"含广播/采集/退出三份。' -ForegroundColor Cyan
+# 防漏：一个 diag 都没收到，往往是因为**没在放 exe/diag 的目录里跑**（诊断包生成在 exe 所在目录）。
+$diagCount = @(Get-ChildItem -LiteralPath (Join-Path $dest 'diag') -Directory -ErrorAction SilentlyContinue).Count
+if ($diagCount -eq 0) {
+    Write-Host '提示：没找到任何 diag-* 诊断包。诊断包生成在**主程序 exe 所在的目录**，' -ForegroundColor Yellow
+    Write-Host '      请 cd 到那个目录再跑本脚本（或用 -OutDir 指定，但扫描目录仍是"当前目录"）。' -ForegroundColor Yellow
+} else {
+    Write-Host ("已收到 {0} 个诊断包（期望含 广播 / 采集 / 退出 三份，按现场实际发生的取）。" -f $diagCount) -ForegroundColor Cyan
+}
+Write-Host '带回前请确认：manifest.txt 里"日志（含轮转档）"至少 1 份、诊断包数与你现场触发的次数对得上。' -ForegroundColor Cyan
