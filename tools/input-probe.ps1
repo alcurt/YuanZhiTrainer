@@ -269,9 +269,49 @@ if ($hookOk) { Say ("  C 低层钩子事件数: 总计 {0} / 合成 {1} / 物理
 Say '  组合判读：'
 Say '    A=y                      ⇒ 输入队列没被拦，问题只在目标程序的用户态钩子 → 用拔钩/消息层解'
 Say '    A=n, B=y                 ⇒ 队列被拦（用户态钩子或驱动），但目标程序认消息 → 用消息层解'
-Say '    A=n, C>0                 ⇒ 物理按键还在派发 ⇒ 拦截在用户态队列过滤层，值得继续查'
-Say '    A=n, C=0                 ⇒ **设备/驱动级拦截** ⇒ 用户态无解，如实记录并回报，不越界'
+    A=n, C(物理)>0           ⇒ 物理按键还在派发 ⇒ 拦截在用户态队列过滤层，值得继续查
+    A=n, C(物理)=0 且自校准通过且你确认按过 ⇒ **设备/驱动级拦截** ⇒ 用户态无解，如实记录并回报，不越界
+Say ''
+# ---------------------------------------------------------------- D：驱动栈侦察（只读）
+# 目的：不碰任何驱动，只把"谁在这条链路里"读出来。明天在机房若 A/B/C 指向设备级拦截，
+#       这份清单就是唯一的依据（哪个厂商过滤驱动、挂在哪个类上）。
+Say ''
+Say '---- D. 驱动栈侦察（只读：注册表类过滤 + 运行中的相关内核驱动）----'
+$classGuids = @{
+    '键盘类 {4d36e96b-e325-11ce-bfc1-08002be10318}' = '{4d36e96b-e325-11ce-bfc1-08002be10318}'
+    '鼠标类 {4d36e96f-e325-11ce-bfc1-08002be10318}' = '{4d36e96f-e325-11ce-bfc1-08002be10318}'
+    'HID 类 {745a17a0-74d3-11d0-b6fe-00a0c90f57da}'  = '{745a17a0-74d3-11d0-b6fe-00a0c90f57da}'
+}
+foreach ($k in $classGuids.Keys) {
+    $base = 'HKLM:\SYSTEM\CurrentControlSet\Control\Class\' + $classGuids[$k]
+    try {
+        $up = (Get-ItemProperty -LiteralPath $base -Name UpperFilters -ErrorAction SilentlyContinue).UpperFilters
+        $lo = (Get-ItemProperty -LiteralPath $base -Name LowerFilters -ErrorAction SilentlyContinue).LowerFilters
+        Say ("  {0}: UpperFilters=[{1}]  LowerFilters=[{2}]" -f $k,
+             $(if ($up) { ($up -join ', ') } else { '' }),
+             $(if ($lo) { ($lo -join ', ') } else { '' }))
+    } catch {
+        Say ("  {0}: 读取失败（{1}）" -f $k, $_.Exception.Message)
+    }
+}
+Say '  运行中的相关内核驱动（名字或路径命中 kbd/mou/hid/filter/hook/yz/exd/ks/teach/class）：'
+try {
+    $drv = Get-CimInstance Win32_SystemDriver -ErrorAction Stop | Where-Object {
+        $_.State -eq 'Running' -and ($_.Name + ' ' + $_.PathName) -match '(?i)kbd|mou|hid|filter|hook|yz|exd|ks|teach|class'
+    }
+    if ($drv) {
+        foreach ($x in ($drv | Sort-Object Name)) {
+            Say ("    {0,-22} {1,-10} {2}" -f $x.Name, $x.StartMode, $x.PathName)
+        }
+    } else {
+        Say '    （没有命中项——可能确实干净，也可能是权限不足看不到）'
+    }
+} catch {
+    Say ("    枚举失败（{0}）" -f $_.Exception.Message)
+}
+Say '  说明：本工具自身**不安装任何驱动**；上面这些若出现厂商名字，那才是"设备级拦截"的候选。'
 Say ''
 $log | Set-Content -LiteralPath $outFile -Encoding UTF8
 Write-Host ''
 Write-Host ("结果已写入: " + $outFile) -ForegroundColor Green
+
