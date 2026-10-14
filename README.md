@@ -878,6 +878,28 @@ v0.6.36 只是绕过（`capture-state.txt` 补充通道），根因在管道：*
 
 另加**逐阶段计时输出**（`[计时] 阶段X 用时 N 秒`）：以后优化都先看画像，不凭感觉缩短等待。
 
+### 现场工具（tools\，v0.6.40 起）
+
+机房那一趟只有一次机会，工具都按"能在 Windows PowerShell 5.1 上跑、错误流为 0"标准验过（脚本存为 UTF-8 带 BOM）。
+
+| 工具 | 用途 |
+|---|---|
+| `tools\field-ini\YZTrainer.ini` | 现场配置模板：`Flags=45`（窗口化+键鼠解锁+防监视+假全屏）+ `TraceDesktopDuplication=1`（冻结取证）+ 采集时导诊断包、退出不导。拷到 exe 同目录改名 `YZTrainer.ini` 即可。**注意：该文件必须无 BOM**——带 BOM 时 `GetPrivateProfileInt` 会把首行当成 `\xEF\xBB\xBF[General]`，`[General]` 段不存在，整份配置静默回落到默认值。 |
+| `tools\collect-field-data.ps1` | 一键回收：扫 `%TEMP%\YZTrainer`、`C:\Windows\Temp\YZTrainer`（主程序以 SYSTEM 跑过时的落点）、`C:\ProgramData\YZTrainer` 与当前目录，收**日志含全部轮转档** + `diag-*` 诊断包 + 探针产物 + ini，写 `manifest.txt`（含主日志 SHA256 前 16 位）并打 zip。 |
+| `tools\input-probe.ps1` | 键鼠被屏蔽时量"哪一层被拦"：A `SendInput`、B `PostMessage`、C 自装 `WH_KEYBOARD_LL`（**合成/物理事件分开计数** + 自校准 + 要求人工确认"确实按了物理键"）、D **只读**驱动栈侦察（键盘/鼠标/HID 类的 Upper/LowerFilters 与运行中的相关内核驱动）。本工具自身不安装任何驱动。 |
+| `tests\timeguard.ps1` | 运行时间红线守门（中午 13:55 / 晚间 22:45）：打印剩余时间与档位（`OK` / `SHORT-ONLY` / `STOP`）；`-Watch` 可在到点后清理残留进程。 |
+
+用法（Windows PowerShell 5.1 亦可）：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\collect-field-data.ps1 -OutDir D:\带回
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\input-probe.ps1
+pwsh -NoProfile -File tests\timeguard.ps1
+```
+
+判读要点（完整口径见 `工作顺序.txt`）：冻结生效的证据链是
+`抓屏子进程出现: pid=…` → `应用配置: flags=…`（或 `补充状态通道: 读到 AntiMonitor=1`）→ `DXGI 冻结: 已开启`；
+量化统计看钩子的 `[DXGI 取证] 取帧统计 #N: 调用=… 超时=… 取到帧=…`（冻住时"取到帧"不再增长）。
 ## 免责声明与使用边界
 
 ### 2026-10-13（第二十四轮）v0.6.37：同一 pid 重复注入的指数退避
@@ -937,7 +959,6 @@ v0.6.36 只是绕过（`capture-state.txt` 补充通道），根因在管道：*
 
 另加**逐阶段计时输出**（`[计时] 阶段X 用时 N 秒`）：以后优化都先看画像，不凭感觉缩短等待。
 
-## 免责声明与使用边界
 
 
 本项目仅供**教育研究**与**技术学习**目的使用，为学习、研究相关软件在 Windows 用户态的运行机制（进程注入、API Hook、窗口与输入子系统）而编写，**禁止用于任何非法用途**。作者的出发点与 JiYuTrainer 相同：在**不影响正常教学**的前提下改善个人课堂体验。
