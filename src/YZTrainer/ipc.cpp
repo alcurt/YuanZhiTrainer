@@ -40,6 +40,7 @@ struct ClientSlot
     HANDLE ioEvent = nullptr;
     HANDLE thread = nullptr;
     DWORD  pid    = 0;
+    bool   lastExam = false;   /* 该客户端最近一次上报的考试状态（v0.6.39，见 RecomputeExamLocked） */
 };
 
 ClientSlot g_clients[kMaxClients];   /* 受 g_app.cs 保护 */
@@ -150,7 +151,36 @@ bool ReadFrame(HANDLE pipe, HANDLE ioEvent, DWORD* opcode, std::vector<BYTE>* pa
     return true;
 }
 
-void HandleEvent(DWORD opcode, const std::vector<BYTE>& payload)
+/* 考试熔断状态由**所有连上的客户端取或**得到（v0.6.39）。为什么必须这样：
+   多客户端之后抓屏子进程也会上报 YZ_EVT_STATUS，而它不会检测考试（恒为 0）；
+   原先那个直接赋值 `g_app.examMode = exam` 会被这条 0 覆盖，**把考试熔断清掉、功能重新打开**
+   ——那是硬边界问题。现在：任一客户端报 1 就保持熔断，只有全部报 0（或它断开）才解除。 */
+void RecomputeExamLocked()
+{
+    bool anyExam = false;
+    for (int i = 0; i < kMaxClients; i++)
+        if (g_clients[i].pipe != INVALID_HANDLE_VALUE && g_clients[i].lastExam)
+            anyExam = true;
+
+    const bool changed = (g_app.examMode != anyExam);
+    g_app.examMode = anyExam;
+
+    /* 熔断状态变化时通知 UI（原来只在 EXAM_MODE 帧里通知，多客户端下不再够用） */
+    if (changed && g_app.hwndMain != nullptr)
+        PostMessageW(g_app.hwndMain, WM_YZ_STATUS, 0, 0);
+    if (changed)
+        UiNotifyExam(anyExam);
+}
+
+bool IsPrimarySlotLocked(int slot)
+{
+    for (int i = 0; i < kMaxClients; i++)
+        if (g_clients[i].pipe != INVALID_HANDLE_VALUE)
+            return i == slot;
+    return false;
+}
+
+void HandleEvent(int slot, DWORD opcode, const std::vector<BYTE>& payload)
 {
     switch (opcode)
     {
@@ -191,14 +221,17 @@ void HandleEvent(DWORD opcode, const std::vector<BYTE>& payload)
     case YZ_EVT_EXAM_MODE:
         if (payload.size() >= sizeof(YZ_STATUS))
         {
+            const YZ_STATUS* st = reinterpret_cast<const YZ_STATUS*>(payload.data());
             EnterCriticalSection(&g_app.cs);
-            memcpy(&g_app.status, payload.data(), sizeof(YZ_STATUS));
-            bool exam = g_app.status.examMode != 0;
-            g_app.examMode = exam;
+            /* 状态（hooksInstalled 等）只认**主客户端**的：主客户端=连接顺序里的第一个，
+               旧单客户端语义就是它。抓屏子进程的状态帧不覆盖这些字段。 */
+            if (IsPrimarySlotLocked(slot))
+                memcpy(&g_app.status, st, sizeof(YZ_STATUS));
+            /* 考试状态按客户端分别记录，再取或（见 RecomputeExamLocked 的说明）。 */
+            if (slot >= 0 && slot < kMaxClients)
+                g_clients[slot].lastExam = (st->examMode != 0);
+            RecomputeExamLocked();
             LeaveCriticalSection(&g_app.cs);
-
-            if (opcode == YZ_EVT_EXAM_MODE)
-                UiNotifyExam(exam);
             PostStatusToUi();
         }
         break;
@@ -235,13 +268,15 @@ DWORD WINAPI ClientThreadEntry(LPVOID param)
         std::vector<BYTE> payload;
         if (!ReadFrame(pipe, ioEvent, &opcode, &payload))
             break;
-        HandleEvent(opcode, payload);
+        HandleEvent(idx, opcode, payload);
     }
 
     EnterCriticalSection(&g_app.cs);
-    g_clients[idx].pipe = INVALID_HANDLE_VALUE;
-    g_clients[idx].pid  = 0;
+    g_clients[idx].pipe     = INVALID_HANDLE_VALUE;
+    g_clients[idx].pid      = 0;
+    g_clients[idx].lastExam = false;
     SyncPrimaryLocked();
+    RecomputeExamLocked();   /* 它带着"考试中"退出时，别把熔断一起带走（v0.6.39） */
     LeaveCriticalSection(&g_app.cs);
 
     DisconnectNamedPipe(pipe);

@@ -19,8 +19,8 @@
 //
 #define YZ_VERSION_MAJOR 0
 #define YZ_VERSION_MINOR 6
-#define YZ_VERSION_PATCH 38
+#define YZ_VERSION_PATCH 39
 #define YZ_VERSION_BUILD 0
 /* Must match the three numbers above - checked at compile time in yz_protocol.h. */
-#define YZ_VERSION_STR_NARROW "0.6.38"
+#define YZ_VERSION_STR_NARROW "0.6.39"
 #endif /* YZ_VERSION_H */
