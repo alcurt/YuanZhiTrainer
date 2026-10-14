@@ -43,7 +43,7 @@ YZTrainer/
   src/YZUnhookTest/         免注入拔钩验证工具（本进程加载远志 DLL 调其导出，不注入）
   src/YZSysRun/             以 SYSTEM 身份运行指定程序的启动器（复制当前会话 winlogon 令牌，不装服务）
   third_party/minhook/      MinHook（BSD-2-Clause，已内置源码）
-  tests/run_sim_test.ps1    本地自动回归脚本（二十五阶段 62 项断言，约 5.5 分钟（v0.6.35 实测 328.7 秒），需要管理员权限），
+  tests/run_sim_test.ps1    本地自动回归脚本（二十五阶段 62 项断言，约 5 分钟（v0.6.40 实测 296.2 秒；基线 383.6 秒），需要管理员权限），
                             阶段八是 P0"空过程替换"的回归闸门（v0.6.13，含负向 A/B 验证，
                             v0.6.15 起还覆盖 hMod=NULL 的线程内钩子），
                             阶段九看消息层钩子开关（v0.6.14），
