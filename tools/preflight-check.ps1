@@ -107,6 +107,36 @@ foreach ($pl in 'Win32', 'x64') {
     Check ("$pl 无 sim_*/*.bak* 残留") ($junk.Count -eq 0) ("发现 {0} 个" -f $junk.Count)
 }
 L ''
+L '---- 1c. 出厂 ini 良构性与两侧一致（v0.6.42 踩过：build.ps1 里字符串被插穿成多行，语法检查查不出来）----'
+foreach ($pl in 'Win32', 'x64') {
+    $ini2 = Join-Path (Get-PlatformDir $repo $pl) 'YZTrainer.ini'
+    if (-not (Test-Path -LiteralPath $ini2 -ErrorAction SilentlyContinue)) { Check "$pl ini 存在" $false '文件缺失'; continue }
+    $pfBadLines = @()
+    foreach ($pfLn in (Get-Content -LiteralPath $ini2 -Encoding UTF8)) {
+        $t2 = $pfLn.Trim()
+        if ($t2 -eq '') { continue }
+        if ($t2 -match '^[;#]') { continue }                 # 注释
+        if ($t2 -match '^\[[^\]]+\]$') { continue }           # 段
+        if ($t2 -match '^[A-Za-z][A-Za-z0-9_]*=.*$') { continue }   # 键值（键必须单行、无内嵌换行）
+        $pfBadLines += $t2
+    }
+    Check ("$pl ini 良构") ($pfBadLines.Count -eq 0) $(if ($pfBadLines.Count) { '可疑行: ' + (($pfBadLines | Select-Object -First 2) -join ' | ') } else { '每行都是 段/注释/键值' })
+    $need = @('Flags', 'TraceDesktopDuplication', 'InjectCaptureChild', 'CaptureScanIntervalMs')
+    $miss = @($need | Where-Object { -not (Select-String -LiteralPath $ini2 -Pattern "^$_=" -ErrorAction SilentlyContinue) })
+    Check ("$pl ini 含关键键") ($miss.Count -eq 0) $(if ($miss.Count) { '缺: ' + ($miss -join ', ') } else { '四个关键键都在' })
+    # "字符串被插穿成多行"那类损坏，在文件层面的真实特征是**同一个键出现两次**
+    # （坏元素里含嵌换行 ⇒ 展开成多行，同时原有的同名元素还在）。所以这里查重复键。
+    $pfKeys = @()
+    foreach ($pfLn in (Get-Content -LiteralPath $ini2 -Encoding UTF8)) {
+        $pfT = $pfLn.Trim()
+        if ($pfT -match '^([A-Za-z][A-Za-z0-9_]*)=(.*)$') { $pfKeys += $Matches[1] }
+    }
+    $pfDup = @($pfKeys | Group-Object | Where-Object { $_.Count -gt 1 } | ForEach-Object { "$($_.Name)×$($_.Count)" })
+    Check ("$pl ini 无重复键") ($pfDup.Count -eq 0) $(if ($pfDup.Count) { '重复: ' + ($pfDup -join ', ') } else { "$($pfKeys.Count) 个键各不相同" })
+}
+# exe 里必须真的内建了 v0.6.42 的出厂模板（宽字符串以 UTF-16LE 落在二进制里）
+Check 'exe 内建出厂模板含 CaptureScanIntervalMs' (HasStr (Join-Path (Get-PlatformDir $repo 'Win32') 'YZTrainer.exe') 'CaptureScanIntervalMs=30000') ''
+L ''
 L '---- 2. 内嵌钩子载荷是否为当前源码（v0.6.35 踩过旧载荷）----'
 $mainExe = Join-Path (Get-PlatformDir $repo 'Win32') 'YZTrainer.exe'
 Check '内嵌载荷含"补充状态通道"' (HasStr $mainExe '补充状态通道') ''
