@@ -46,6 +46,20 @@ $roots = @(
     (Split-Path -Parent $MyInvocation.MyCommand.Path)
 ) | Sort-Object -Unique
 
+# v0.6.40 修订（2026-10-15 现场教训）：只在"当前目录"扫是不够的——把工具放在 YZ\tools、
+# 从 YZ\ 里运行脚本时，诊断包与探针报告其实都在 YZ\Win32\ （exe 所在目录）⇒ 会把它们漏掉。
+# 所以这里再把**直接子目录**里"看起来像 exe 目录"的（含 YZTrainer.exe 或任何 diag-*）也纳入扫描。
+$subDirs = @()
+foreach ($sub in (Get-ChildItem -Directory -ErrorAction SilentlyContinue)) {
+    $looksLikeExeDir = (Test-Path -LiteralPath (Join-Path $sub.FullName 'YZTrainer.exe') -ErrorAction SilentlyContinue) -or
+                       (@(Get-ChildItem -LiteralPath $sub.FullName -Directory -Filter 'diag-*' -ErrorAction SilentlyContinue).Count -gt 0)
+    if ($looksLikeExeDir) { $subDirs += $sub.FullName }
+}
+if ($subDirs.Count -gt 0) {
+    M ("（自动补扫 {0} 个直接子目录：{1}）" -f $subDirs.Count, (($subDirs | ForEach-Object { Split-Path $_ -Leaf }) -join ', '))
+    $roots = @($roots + $subDirs) | Sort-Object -Unique
+}
+
 $copied = 0
 function Copy-Into([string]$src, [string]$sub) {
     if (-not (Test-Path -LiteralPath $src)) { return }

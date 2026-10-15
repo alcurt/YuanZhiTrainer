@@ -179,46 +179,46 @@ public static class YzInputProbe
 }
 '@
 }
-$P = [YzInputProbe]
+
 
 # ---------------------------------------------------------------- 目标窗口
 $targetHwnd = [IntPtr]::Zero
 if ($TargetProc) {
-    $p = Get-Process -Name ($TargetProc -replace '\.exe$', '') -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($p) {
-        $p.Refresh()
-        if ($p.MainWindowHandle -ne 0) { $targetHwnd = [IntPtr]$p.MainWindowHandle }
+    $tpObj = Get-Process -Name ($TargetProc -replace '\.exe$', '') -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($tpObj) {
+        $tpObj.Refresh()
+        if ($tpObj.MainWindowHandle -ne 0) { $targetHwnd = [IntPtr]$tpObj.MainWindowHandle }
         else {
             # 该进程没有主窗口（例如抓屏子进程 / 后台进程），退而找它的任意可见窗口
-            Say ("{0} 没有主窗口（pid={1}），B 试验将改用前台窗口" -f $TargetProc, $p.Id)
+            Say ("{0} 没有主窗口（pid={1}），B 试验将改用前台窗口" -f $TargetProc, $tpObj.Id)
         }
     } else {
         Say ("找不到进程 {0}，B 试验将改用前台窗口" -f $TargetProc)
     }
 }
-if ($targetHwnd -eq [IntPtr]::Zero) { $targetHwnd = $P::GetForegroundWindow() }
-Say ("B 试验的目标窗口: " + $P::DescribeWindow($targetHwnd))
+if ($targetHwnd -eq [IntPtr]::Zero) { $targetHwnd = [YzInputProbe]::GetForegroundWindow() }
+Say ("B 试验的目标窗口: " + [YzInputProbe]::DescribeWindow($targetHwnd))
 Say ''
 
 # ---------------------------------------------------------------- C：先装低层钩子
 Say ("---- C. 低层键盘钩子计数（{0} 秒）----" -f $HoldSeconds)
-$hookOk = $P::InstallKeyboardCounter()
+$hookOk = [YzInputProbe]::InstallKeyboardCounter()
 Say ("  SetWindowsHookEx(WH_KEYBOARD_LL) 结果: " + $hookOk)
 $cnt = 0
 if ($hookOk) {
     # ---- 自校准：脚本自己发一次合成按键，钩子必须看得到（否则"没收到"不能说明被拦）----
     Say '  [自校准] 脚本先发一次合成按键（SendInput，带 INJECTED 标记）…'
-    [void]$P::SendUnicodeText('Q')
-    $P::PumpFor(1)
-    $injCal = $P::InjectedCount
+    [void][YzInputProbe]::SendUnicodeText('Q')
+    [YzInputProbe]::PumpFor(1)
+    $injCal = [YzInputProbe]::InjectedCount
     Say ("  [自校准] 钩子收到合成事件 {0} 次 ⇒ 钩子{1}" -f $injCal, $(if ($injCal -gt 0) { '工作正常' } else { '**没工作**（下面的结论不可用）' }))
 
     Say ("  请在这 {0} 秒里**用物理键盘随便敲几个键**…" -f $HoldSeconds)
-    $P::PumpFor($HoldSeconds)
-    $cnt     = $P::KeyEventCount
-    $physCnt = $P::PhysicalCount
-    [void]$P::UninstallHook()
-    Say ("  低层钩子收到: 总计 {0} 次（合成 {1} / 物理 {2}）" -f $cnt, $P::InjectedCount, $physCnt)
+    [YzInputProbe]::PumpFor($HoldSeconds)
+    $cnt     = [YzInputProbe]::KeyEventCount
+    $physCnt = [YzInputProbe]::PhysicalCount
+    [void][YzInputProbe]::UninstallHook()
+    Say ("  低层钩子收到: 总计 {0} 次（合成 {1} / 物理 {2}）" -f $cnt, [YzInputProbe]::InjectedCount, $physCnt)
     # 关键的人工确认：没按键时的 0 次**不能**当作"被驱动拦了"——否则会得出错误结论。
     $answerC = Read-Host '  刚才那几秒你**确实用物理键盘按了键**吗？(y=按了 / n=没按)'
     Say ("  人工确认: " + $answerC)
@@ -240,8 +240,8 @@ Say ''
 Say '---- A. SendInput（标准输入队列）----'
 Say '  请先把光标点进**记事本**（或任意可输入文本的地方），10 秒内会向它发送字符串 YZPROBE 与一次鼠标微移。'
 for ($i = 10; $i -gt 0; $i--) { Write-Host ("   {0}…" -f $i) -NoNewline; Write-Host ''; Start-Sleep -Seconds 1 }
-$sentText = $P::SendUnicodeText('YZPROBE')
-$sentMouse = $P::SendMouseMove(20, 0)
+$sentText = [YzInputProbe]::SendUnicodeText('YZPROBE')
+$sentMouse = [YzInputProbe]::SendMouseMove(20, 0)
 Say ("  SendInput(文字) 返回 {0}（返回的事件数，0 表示被拒）；SendInput(鼠标) 返回 {1}" -f $sentText, $sentMouse)
 $answerA = Read-Host '  记事本里出现了 YZPROBE 吗？(y=出现 / n=没出现)'
 Say ("  人工观察: " + $answerA)
@@ -252,9 +252,9 @@ Say '---- B. PostMessage（绕过输入队列，直接投消息给目标窗口�
 $sentB = 0
 foreach ($ch in 'YZPROBE'.ToCharArray()) {
     $vk = [int][char]::ToUpper($ch)
-    if ($P::PostMessage($targetHwnd, $P::WM_KEYDOWN, [IntPtr]$vk, [IntPtr]0)) { $sentB++ }
-    if ($P::PostMessage($targetHwnd, $P::WM_CHAR, [IntPtr][int]$ch, [IntPtr]0)) { $sentB++ }
-    if ($P::PostMessage($targetHwnd, $P::WM_KEYUP, [IntPtr]$vk, [IntPtr]0)) { $sentB++ }
+    if ([YzInputProbe]::PostMessage($targetHwnd, [YzInputProbe]::WM_KEYDOWN, [IntPtr]$vk, [IntPtr]0)) { $sentB++ }
+    if ([YzInputProbe]::PostMessage($targetHwnd, [YzInputProbe]::WM_CHAR, [IntPtr][int]$ch, [IntPtr]0)) { $sentB++ }
+    if ([YzInputProbe]::PostMessage($targetHwnd, [YzInputProbe]::WM_KEYUP, [IntPtr]$vk, [IntPtr]0)) { $sentB++ }
     Start-Sleep -Milliseconds 60
 }
 Say ("  已向目标窗口投递 {0} 条按键消息" -f $sentB)
@@ -265,7 +265,7 @@ Say ''
 # ---------------------------------------------------------------- 结论
 Say '==== 结论（现场判读用）===='
 Say ("  A SendInput: " + $answerA + "    B PostMessage: " + $answerB)
-if ($hookOk) { Say ("  C 低层钩子事件数: 总计 {0} / 合成 {1} / 物理 {2}" -f $P::KeyEventCount, $P::InjectedCount, $P::PhysicalCount) }
+if ($hookOk) { Say ("  C 低层钩子事件数: 总计 {0} / 合成 {1} / 物理 {2}" -f [YzInputProbe]::KeyEventCount, [YzInputProbe]::InjectedCount, [YzInputProbe]::PhysicalCount) }
 Say '  组合判读：'
 Say '    A=y                      ⇒ 输入队列没被拦，问题只在目标程序的用户态钩子 → 用拔钩/消息层解'
 Say '    A=n, B=y                 ⇒ 队列被拦（用户态钩子或驱动），但目标程序认消息 → 用消息层解'

@@ -53,32 +53,55 @@ L ("==== YZTrainer 出发前检查 {0}（期望版本 {1}）====" -f (Get-Date -
 
 L ''
 L '---- 1. 交付产物 ----'
+# v0.6.40 修订（2026-10-15 现场教训）：用户是把 dist 里的两个平台目录直接放到 YZ\ 下的
+# （YZ\Win32、YZ\x64），不是 YZ\dist\Win32 ⇒ 两种布局都要认，否则"文件齐全却报缺失"。
+function Get-PlatformDir([string]$repo, [string]$pl) {
+    $a = Join-Path $repo ("dist\{0}" -f $pl)
+    if (Test-Path -LiteralPath (Join-Path $a 'YZTrainer.exe') -ErrorAction SilentlyContinue) { return $a }
+    $b = Join-Path $repo $pl
+    if (Test-Path -LiteralPath (Join-Path $b 'YZTrainer.exe') -ErrorAction SilentlyContinue) { return $b }
+    return $a   # 两个都没有时仍返回 dist 路径，让后面的检查报缺失
+}
 foreach ($pl in 'Win32', 'x64') {
-    $ex = Join-Path $repo ("dist\{0}\YZTrainer.exe" -f $pl)
+    $platDir = Get-PlatformDir $repo $pl
+    $ex = Join-Path $platDir 'YZTrainer.exe'
     $it = Get-Item -LiteralPath $ex -ErrorAction SilentlyContinue
     Check ("$pl YZTrainer.exe") ($it -and $it.VersionInfo.FileVersionRaw -eq ("$ExpectVersion.0")) `
           ("版本=" + $(if ($it) { $it.VersionInfo.FileVersionRaw } else { '缺失' }) + " " + $(if ($it) { "$($it.Length) 字节" }))
-    Check ("$pl YZProbe.exe") (Test-Path -LiteralPath (Join-Path $repo "dist\$pl\YZProbe.exe") -ErrorAction SilentlyContinue) ''
-    $ini = Join-Path $repo "dist\$pl\YZTrainer.ini"
+    Check ("$pl YZProbe.exe") (Test-Path -LiteralPath (Join-Path $platDir 'YZProbe.exe') -ErrorAction SilentlyContinue) ''
+    $ini = Join-Path $platDir 'YZTrainer.ini'
     # 开发机上是出厂值 Flags=5；U 盘/现场会把 tools\field-ini 的模板覆盖进来（Flags=45），两者都合格。
     $flags = (Select-String -LiteralPath $ini -Pattern '^Flags=(\d+)' -ErrorAction SilentlyContinue | Select-Object -First 1)
+    # 现场那份 ini 可能被产品按用户操作重写过（例如只开键鼠解锁+防监视 ⇒ Flags=12），
+    # 所以这里只确认"存在且 Flags 可读"，并把含义写出来供人核对，不把非 5/45 当失败。
     $fv = if ($flags) { $flags.Matches[0].Groups[1].Value } else { '' }
-    Check ("$pl ini") ($fv -eq '5' -or $fv -eq '45') `
-          ("Flags=$fv " + $(if ($fv -eq '5') { '（出厂值）' } elseif ($fv -eq '45') { '（现场模板：窗口化+键鼠解锁+防监视+假全屏）' } else { '（既不是 5 也不是 45，请确认）' }))
+    $meaning = ''
+    if ($fv -ne '') {
+        $v = [int]$fv
+        $parts = @()
+        if ($v -band 1)  { $parts += '窗口化' }
+        if ($v -band 4)  { $parts += '键鼠解锁' }
+        if ($v -band 8)  { $parts += '防监视' }
+        if ($v -band 16) { $parts += '拦遥控' }
+        if ($v -band 32) { $parts += '假全屏' }
+        $meaning = if ($parts.Count -gt 0) { '（' + ($parts -join '+') + '）' } else { '（无功能位）' }
+    }
+    Check ("$pl ini") ($fv -ne '') ("Flags=$fv $meaning" + $(if ($fv -eq '5') { ' 出厂值' } elseif ($fv -eq '45') { ' 现场模板' } else { '' }))
 }
 
 L ''
 L '---- 1b. dist 里不应有回归残留（否则会被一起拷进 U 盘，判读时干扰计数）----'
 foreach ($pl in 'Win32', 'x64') {
-    $dirs = @(Get-ChildItem -LiteralPath (Join-Path $repo "dist\$pl") -Directory -Filter 'diag-*' -ErrorAction SilentlyContinue)
-    $junk = @(Get-ChildItem -LiteralPath (Join-Path $repo "dist\$pl") -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -like 'sim_*' -or $_.Name -like '*.bak*' })
+    $dirs = @(Get-ChildItem -LiteralPath $platDir -Directory -Filter 'diag-*' -ErrorAction SilentlyContinue)
+    $junk = @(Get-ChildItem -LiteralPath $platDir -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -like 'sim_*' -or $_.Name -like '*.bak*' })
     Check ("$pl 无 diag-* 残留") ($dirs.Count -eq 0) ("发现 {0} 个诊断包目录（跑过回归就会有；拷走前清一下）" -f $dirs.Count)
     Check ("$pl 无 sim_*/*.bak* 残留") ($junk.Count -eq 0) ("发现 {0} 个" -f $junk.Count)
 }
 L ''
 L '---- 2. 内嵌钩子载荷是否为当前源码（v0.6.35 踩过旧载荷）----'
-Check '内嵌载荷含"补充状态通道"' (HasStr (Join-Path $repo 'dist\Win32\YZTrainer.exe') '补充状态通道') ''
-Check '内嵌载荷含"[DXGI 判定]"'   (HasStr (Join-Path $repo 'dist\Win32\YZTrainer.exe') '[DXGI 判定]') ''
+$mainExe = Join-Path (Get-PlatformDir $repo 'Win32') 'YZTrainer.exe'
+Check '内嵌载荷含"补充状态通道"' (HasStr $mainExe '补充状态通道') ''
+Check '内嵌载荷含"[DXGI 判定]"'   (HasStr $mainExe '[DXGI 判定]') ''
 
 L ''
 L '---- 3. 现场工具（pwsh7 与 5.1 都要能解析）----'

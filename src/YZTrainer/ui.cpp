@@ -289,6 +289,22 @@ void RemoveTrayIcon()
     }
 }
 
+/* v0.6.41：幂等重挂托盘图标。为什么需要（2026-10-15 现场实测）：用了一节课后托盘图标消失，
+   Ctrl+Alt+F12 只能把**窗口**显示回来、图标不会回来，用户只能重启程序才拿得回图标。
+   成因是 Explorer 把图标收进隐藏区/在窗口长时间隐藏后丢弃（我们的代码并没有调 RemoveTrayIcon——
+   它只在退出路径上）。NIM_ADD 本身幂等，所以这里"先删再挂"，挂在两个时机：用户主动显示窗口、
+   以及冻结解除（那时窗口刚被 ShowWindow 回来）。 */
+void ReAddTrayIcon()
+{
+    RemoveTrayIcon();
+    g_trayAdded = false;     /* RemoveTrayIcon 只在 g_trayAdded 为真时才清，这里保证处于可重挂状态 */
+    if (g_app.hwndMain != nullptr) AddTrayIcon(g_app.hwndMain);   /* v0.6.41：签名需要窗口句柄 */
+    if (g_trayAdded)
+        YZLOGI(L"托盘图标: 已重新挂上（现场反馈：图标曾消失而热键只能恢复窗口）");
+    else
+        YZLOGW(L"托盘图标: 重新挂载失败（原因见上面的两级注册日志）");
+}
+
 void Balloon(const wchar_t* title, const wchar_t* text)
 {
     if (!g_trayAdded)
@@ -599,6 +615,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             {
                 ShowWindow(hwnd, SW_SHOW);
                 SetForegroundWindow(hwnd);
+                ReAddTrayIcon();   /* v0.6.41：现场就是靠这条热键找回窗口的，图标一并补挂 */
             }
             break;
         default:
@@ -643,6 +660,7 @@ int TrayMenuCommand(int id)
     case IDM_TRAY_SHOW:
         ShowWindow(g_app.hwndMain, SW_SHOW);
         SetForegroundWindow(g_app.hwndMain);
+        ReAddTrayIcon();   /* v0.6.41：图标可能已被 Explorer 收走，这里补挂 */
         return 0;
     case IDM_TRAY_EXIT:
         ShowWindow(g_app.hwndMain, SW_HIDE);
@@ -888,6 +906,7 @@ void FreezePrepareMainWindow(bool arming)
            用户在冻结期间用 Ctrl+Alt+F12 自己拨过窗口状态时，不要强行覆盖他的选择。 */
         if (g_app.freezeWindowWasVisible && !IsWindowVisible(g_app.hwndMain))
             ShowWindow(g_app.hwndMain, SW_SHOW);
+        ReAddTrayIcon();   /* v0.6.41：冻结期间窗口被收进托盘，解除时把图标一并补挂 */
         g_app.freezeWindowPrepared   = false;
         g_app.freezeWindowWasVisible = false;
         YZLOGI(L"冻结画面关闭：主窗口亲和性已复位、主界面已按原样恢复");
