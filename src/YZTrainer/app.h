@@ -103,6 +103,8 @@ extern AppRuntime g_app;
 
 /* ---- config.cpp ---- */
 std::wstring ConfigPath();
+/* v0.6.42：没有 ini 时按内建出厂内容生成一份（键值齐全） */
+void ConfigEnsureExists(const std::wstring& iniPath);
 void ConfigLoad(AppConfig& cfg, const std::wstring& iniPath);
 void ConfigSave(const AppConfig& cfg, const std::wstring& iniPath);
 void ConfigApplyDefaults(AppConfig& cfg);

@@ -52,6 +52,50 @@ void SyncTraceDuplicationBit(AppConfig& cfg)
 }
 } /* namespace */
 
+/* v0.6.42：出厂 ini 内建在 exe 里——启动时若 exe 旁边没有 YZTrainer.ini，就按内建内容写一份。
+   起因（2026-10-15 现场）：用户忘了把现场 ini 拷进 exe 目录，程序只能从"什么都没有"的默认值起步，
+   于是 TraceDesktopDuplication=0、整趟没有 DXGI 取帧统计这类量化证据。
+   注意：内容里键值全是 ASCII，文件写成 **UTF-8 无 BOM**（带 BOM 会让 GetPrivateProfileInt 读不到 [General]）。 */
+void ConfigEnsureExists(const std::wstring& iniPath)
+{
+    const DWORD attr = GetFileAttributesW(iniPath.c_str());
+    if (attr != INVALID_FILE_ATTRIBUTES)
+        return;                                   /* 已有 ini：一个字都不动 */
+
+    static const wchar_t* kFactory =
+        L"[General]\n"
+        L"; YZTrainer 出厂配置（内建于 exe；v0.6.42 起若旁边没有本文件会自动生成这一份）\n"
+        L"; Flags = 窗口化(1) | 键鼠解锁(4) | 防监视(8) | 拦遥控(16) | 假全屏(32)\n"
+        L"Flags=5\n"
+        L"WindowPercent=60\n"
+        L"LogLevel=2\n"
+        L"AutoInject=1\n"
+        L"InjectMethod=0\n"
+        L"EnableExamGuard=1\n"
+        L"ExternalWindowFix=1\n"
+        L"AutoExportOnBroadcast=1\n"
+        L"AutoExportOnExit=1\n"
+        L"AutoExportOnCapture=1\n"
+        L"BlockMessageHooks=1\n"
+        L"; 现场要【取到帧/超时】这类量化证据时改成 1（只计数、不改行为），改完重启程序生效\n"
+        L"TraceDesktopDuplication=0\n"
+        L"InjectCaptureChild=1\n"
+        L"CaptureScanIntervalMs=30000\n"
+        L"TargetDir=\n"
+        L"HookDllPath=\n"
+        L"ProcessNames=Yistart.exe;TEACHCMD.exe;PlayerGUI.exe;ExdPaintHelper.exe\n";
+
+    const std::string utf8 = yz::WideToUtf8(kFactory);
+    HANDLE h = CreateFileW(iniPath.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr,
+                           CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE)
+        return;                                   /* 写不了就算了：ConfigLoad 会用内存默认值 */
+    DWORD written = 0;
+    WriteFile(h, utf8.data(), static_cast<DWORD>(utf8.size()), &written, nullptr);
+    CloseHandle(h);
+    YZLOGI(L"出厂配置: exe 旁边没有 ini，已自动生成一份（%u 字节，键值齐全；现场模板仍建议整个覆盖）",
+           written);
+}
 std::wstring ConfigPath()
 {
     return yz::JoinPath(yz::GetExeDir(), L"YZTrainer.ini");

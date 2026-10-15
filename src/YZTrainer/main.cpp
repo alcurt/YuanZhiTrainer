@@ -80,6 +80,7 @@ int WINAPI wWinMain(HINSTANCE hinst, HINSTANCE, LPWSTR, int)
     g_app.iniPath = ConfigPath();
 
     yz::LogInit(L"YZTrainer");
+    ConfigEnsureExists(g_app.iniPath);   /* v0.6.42：没有 ini 就按内建出厂内容先写一份 */
     ConfigLoad(g_app.cfg, g_app.iniPath);
     WriteCaptureStateFile();   /* v0.6.36：启动即把"是否要冻结"写进补充状态通道，避免读到上一次运行的陈旧值 */
     yz::LogSetLevel(g_app.cfg.logLevel);
