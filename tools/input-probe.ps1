@@ -176,6 +176,42 @@ public static class YzInputProbe
         return CallNextHookEx(_hook, nCode, wParam, lParam);
     }
 
+    // ---- 低层鼠标钩子：键盘与鼠标可能被**不同的**过滤驱动处理（2026-10-15 现场实测：键盘类
+    //      UpperFilters 里多了一个第三方的 kafe，鼠标类只有微软的 mouclass），所以两者要分开数。
+    public const int WH_MOUSE_LL = 14;
+    public static int MouseEventCount = 0;
+    public static int MouseInjectedCount = 0;
+    public static int MousePhysicalCount = 0;
+    [StructLayout(LayoutKind.Sequential)]
+    public struct MSLLHOOKSTRUCT { public int ptX; public int ptY; public uint mouseData; public uint flags; public uint time; public IntPtr dwExtraInfo; }
+    public const uint LLMHF_INJECTED = 0x00000001;
+    static HookProc _mproc;   // 同样必须保持引用
+    static IntPtr _mhook = IntPtr.Zero;
+    public static bool InstallMouseCounter()
+    {
+        _mproc = new HookProc(MouseCallback);
+        IntPtr h = SetWindowsHookExW(WH_MOUSE_LL, _mproc, GetModuleHandleW(null), 0);
+        if (h == IntPtr.Zero) return false;
+        _mhook = h;
+        return true;
+    }
+    static IntPtr MouseCallback(int nCode, IntPtr wParam, IntPtr lParam)
+    {
+        if (nCode >= 0)
+        {
+            MouseEventCount++;
+            MSLLHOOKSTRUCT ms = (MSLLHOOKSTRUCT)Marshal.PtrToStructure(lParam, typeof(MSLLHOOKSTRUCT));
+            if ((ms.flags & LLMHF_INJECTED) != 0) MouseInjectedCount++; else MousePhysicalCount++;
+        }
+        return CallNextHookEx(_mhook, nCode, wParam, lParam);
+    }
+    public static bool UninstallMouseHook()
+    {
+        if (_mhook == IntPtr.Zero) return true;
+        bool ok = UnhookWindowsHookEx(_mhook);
+        _mhook = IntPtr.Zero;
+        return ok;
+    }
     // 泵消息 HoldSeconds 秒（低层钩子必须有消息循环才会被回调）
     [DllImport("user32.dll")] public static extern bool PeekMessage(out MSG msg, IntPtr hWnd, uint min, uint max, uint remove);
     public const uint PM_REMOVE = 0x0001;
@@ -230,36 +266,54 @@ Say ''
 Say ("---- C. 低层键盘钩子计数（{0} 秒）----" -f $HoldSeconds)
 # 先记录"测试那一刻的封锁状态"——否则事后无法判断这些数字是"正常输入"还是"被拦时的输入"
 # （2026-10-15 下午那趟没记，数据因此无法定论）。
-$blockedNow = Ask '开始测试前：现在键盘/鼠标被远志屏蔽了吗？' '是=正在被屏蔽（按不动/点不动）/ 否=正常'
-Say ("  测试时的封锁状态（用户确认）: " + $(if ($blockedNow -eq 'y') { '正在被屏蔽' } else { '正常' }))
+$kbBlocked = Ask '开始测试前：现在**键盘**被远志屏蔽了吗？' '是=正在被屏蔽（按不动）/ 否=正常'
+Say ("  测试时的封锁状态：键盘=" + $(if ($kbBlocked -eq 'y') { '被屏蔽' } else { '正常' }))
+$msBlocked = Ask '（同一时刻）现在**鼠标**被远志屏蔽了吗？' '是=正在被屏蔽（点不动 / 光标被拽走）/ 否=正常'
+Say ("  测试时的封锁状态：鼠标=" + $(if ($msBlocked -eq 'y') { '被屏蔽' } else { '正常' }))
 $hookOk = [YzInputProbe]::InstallKeyboardCounter()
 Say ("  SetWindowsHookEx(WH_KEYBOARD_LL) 结果: " + $hookOk)
+$mhookOk = [YzInputProbe]::InstallMouseCounter()
+Say ("  SetWindowsHookEx(WH_MOUSE_LL) 结果: " + $mhookOk)
 $cnt = 0
 if ($hookOk) {
     # ---- 自校准：脚本自己发一次合成按键，钩子必须看得到（否则"没收到"不能说明被拦）----
     Say '  [自校准] 脚本先发一次合成按键（SendInput，带 INJECTED 标记）…'
     [void][YzInputProbe]::SendUnicodeText('Q')
+    [void][YzInputProbe]::SendMouseMove(5, 5)
     [YzInputProbe]::PumpFor(1)
     $injCal = [YzInputProbe]::InjectedCount
+    $injCalM = [YzInputProbe]::MouseInjectedCount
+    Say ("  [自校准] 鼠标钩子收到合成事件 {0} 次 ⇒ 鼠标钩子{1}" -f $injCalM, $(if ($injCalM -gt 0) { '工作正常' } else { '**没工作**（鼠标结论不可用）' }))
     Say ("  [自校准] 钩子收到合成事件 {0} 次 ⇒ 钩子{1}" -f $injCal, $(if ($injCal -gt 0) { '工作正常' } else { '**没工作**（下面的结论不可用）' }))
 
-    Say ("  请在这 {0} 秒里**用物理键盘随便敲几个键**…" -f $HoldSeconds)
+    Say ("  请在这 {0} 秒里做两件事：① **用物理键盘随便敲几个键**；② **动一动鼠标并点一两下**…" -f $HoldSeconds)
     [YzInputProbe]::PumpFor($HoldSeconds)
     $cnt     = [YzInputProbe]::KeyEventCount
     $physCnt = [YzInputProbe]::PhysicalCount
+    $mcnt     = [YzInputProbe]::MouseEventCount
+    $mphysCnt = [YzInputProbe]::MousePhysicalCount
     [void][YzInputProbe]::UninstallHook()
-    Say ("  低层钩子收到: 总计 {0} 次（合成 {1} / 物理 {2}）" -f $cnt, [YzInputProbe]::InjectedCount, $physCnt)
+    [void][YzInputProbe]::UninstallMouseHook()
+    Say ("  键盘低层钩子收到: 总计 {0} 次（合成 {1} / 物理 {2}）" -f $cnt, [YzInputProbe]::InjectedCount, $physCnt)
+    Say ("  鼠标低层钩子收到: 总计 {0} 次（合成 {1} / 物理 {2}）" -f $mcnt, [YzInputProbe]::MouseInjectedCount, $mphysCnt)
     # 关键的人工确认：没按键时的 0 次**不能**当作"被驱动拦了"——否则会得出错误结论。
     $answerC = Ask '刚才那几秒你确实用物理键盘按了键吗？' '是=按了 / 否=没按'
-    Say ("  人工确认: " + $answerC)
+    Say ("  人工确认（键盘）: " + $answerC)
+    $answerM = Ask '刚才那几秒你确实动过鼠标（移动或点击）吗？' '是=动过 / 否=没动'
+    Say ("  人工确认（鼠标）: " + $answerM)
     if ($injCal -eq 0) {
-        Say '  判读: 自校准就没通过 ⇒ C 试验无结论（别据此判断驱动拦截）'
-    } elseif ($answerC -ne 'y') {
-        Say '  判读: 你没有按物理键（或没确认）⇒ C 试验**无结论**，不要据此判断驱动拦截。'
-    } elseif ($physCnt -eq 0) {
-        Say '  判读: 你按了物理键、钩子也确认工作正常，却**一个物理按键都没收到** ⇒ 拦截点在会话之前的设备/驱动层。'
+        Say '  判读: 键盘自校准没通过 ⇒ 键盘部分无结论（别据此判断驱动拦截）'
     } else {
-        Say '  判读: 物理按键**仍然会派发**到会话 ⇒ 拦截点在用户态（钩子/消息层），我们的拔钩路径有机会解。'
+        if ($answerC -eq 'y') {
+            if ($physCnt -eq 0) { Say '  键盘判读: 按了物理键、钩子也正常，却**一个物理按键都没收到** ⇒ 拦截在会话之前的设备/驱动层。' }
+            else                { Say ('  键盘判读: 物理按键**仍然会派发**到会话（{0} 次）⇒ 拦截在用户态（钩子/消息层），我们的拔钩路径有机会解。' -f $physCnt) }
+        } else { Say '  键盘判读: 没确认按过物理键 ⇒ 键盘这一项无结论。' }
+        if ($injCalM -eq 0) { Say '  鼠标判读: 鼠标自校准没通过 ⇒ 鼠标部分无结论。' }
+        elseif ($answerM -eq 'y') {
+            if ($mphysCnt -eq 0) { Say '  鼠标判读: 动了鼠标、钩子也正常，却**一个物理鼠标事件都没收到** ⇒ 拦截在会话之前的设备/驱动层。' }
+            else                 { Say ('  鼠标判读: 物理鼠标事件**仍然会派发**到会话（{0} 次）⇒ 拦截在用户态（钩子/消息层）。' -f $mphysCnt) }
+        } else { Say '  鼠标判读: 没确认动过鼠标 ⇒ 鼠标这一项无结论。' }
+        Say '  （键盘与鼠标必须分开看：2026-10-15 现场键盘类 UpperFilters 里有第三方 kafe，鼠标类只有微软的 mouclass。）'
     }
 } else {
     Say ("  装钩失败（err={0}）——可能是权限或会话隔离问题，C 无结论" -f [Runtime.InteropServices.Marshal]::GetLastWin32Error())
@@ -296,7 +350,9 @@ Say ''
 Say '==== 结论（现场判读用）===='
 Say ("  A SendInput: {0}    B PostMessage: {1}" -f $answerA, $answerB)
 Say ("  （A 发出的字符串=YZPROBE；SendInput 返回事件数={0}，鼠标微移返回={1}）" -f $sentText, $sentMouse)
-if ($hookOk) { Say ("  C 低层钩子事件数: 总计 {0} / 合成 {1} / 物理 {2}" -f [YzInputProbe]::KeyEventCount, [YzInputProbe]::InjectedCount, [YzInputProbe]::PhysicalCount) }
+if ($hookOk)  { Say ("  C 键盘低层钩子: 总计 {0} / 合成 {1} / 物理 {2}" -f [YzInputProbe]::KeyEventCount, [YzInputProbe]::InjectedCount, [YzInputProbe]::PhysicalCount) }
+if ($mhookOk) { Say ("  C 鼠标低层钩子: 总计 {0} / 合成 {1} / 物理 {2}" -f [YzInputProbe]::MouseEventCount, [YzInputProbe]::MouseInjectedCount, [YzInputProbe]::MousePhysicalCount) }
+Say ("  测试时的封锁状态（用户确认）: 键盘={0}  鼠标={1}" -f $(if ($kbBlocked -eq 'y') { '被屏蔽' } else { '正常' }), $(if ($msBlocked -eq 'y') { '被屏蔽' } else { '正常' }))
 Say '  组合判读：'
 Say '    A=y                      ⇒ 输入队列没被拦，问题只在目标程序的用户态钩子 → 用拔钩/消息层解'
 Say '    A=n, B=y                 ⇒ 队列被拦（用户态钩子或驱动），但目标程序认消息 → 用消息层解'
@@ -360,6 +416,22 @@ if ($filterNames.Count -gt 0) {
         }
     }
 }
+# 非微软厂商的运行中内核驱动（用文件版本信息里的 CompanyName 判定，快且不需要签名模块）。
+# 2026-10-15 现场在键盘类上读到第三方的 kafe，但按名字模式扫运行驱动时它一条都没出现——
+# 这条能把"厂商装的、正在跑的"驱动直接列出来。
+Say '  非微软厂商的运行中内核驱动（CompanyName 里不含 Microsoft 的）：'
+try {
+    $nonMs = @()
+    foreach ($d in (Get-CimInstance Win32_SystemDriver -ErrorAction Stop | Where-Object { $_.State -eq 'Running' -and $_.PathName })) {
+        $dp = [string]$d.PathName -replace '^\\\?\?\\', '' -replace '^\\SystemRoot\\', ($env:SystemRoot + '\') -replace '^system32\\', ($env:SystemRoot + '\system32\')
+        if (-not (Test-Path -LiteralPath $dp -ErrorAction SilentlyContinue)) { continue }
+        $co = ''
+        try { $co = (Get-Item -LiteralPath $dp -ErrorAction SilentlyContinue).VersionInfo.CompanyName } catch { }
+        if ($co -and ($co -notmatch 'Microsoft')) { $nonMs += ("{0}（{1}）" -f $d.Name, $co) }
+    }
+    if ($nonMs.Count -eq 0) { Say '    （没有：运行中的驱动全部来自微软）' }
+    else { foreach ($x in ($nonMs | Sort-Object -Unique)) { Say ('    ' + $x) } }
+} catch { Say ('    读取失败（{0}）' -f $_.Exception.Message) }
 Say '  运行中的相关内核驱动（名字或路径命中 kbd/mou/hid/filter/hook/yz/exd/ks/teach/class）：'
 try {
     $drv = Get-CimInstance Win32_SystemDriver -ErrorAction Stop | Where-Object {
