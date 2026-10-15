@@ -1,4 +1,4 @@
-<#
+﻿<#
     YZTrainer 本地回归测试（不需要机房）：
     用 YZSimTarget 模拟远志学生端的全屏广播、键鼠封锁与定期抢回全屏的行为。
 
@@ -169,7 +169,8 @@
          探针产物也从"只认 report"放宽到 `YZProbe-*.*`，`--watch` 留下的
          `YZProbe-watch-<时间戳>.log` 现在也进包（前提是探针用 `-o` 指向该目录）
 
-    阶段二十五（抓屏子进程识别 + 按 PID 注入 + 多客户端连上，v0.6.32/v0.6.38）断言 3 条：
+    阶段二十五（抓屏子进程识别 + 按 PID 注入 + 多客户端连上，v0.6.32/v0.6.38）断言 3 条：
+阶段二十六（输入取证：周期性拽光标，v0.6.43）断言 2 条：用 YZSimTarget --yank 复现"鼠标能动几百毫秒就被拽回左上角"，断言学生端进程内的 SetCursorPos 调用被 [输入取证] 记录下来（有这行 ⇒ 拽光标是它自己干的 ⇒ 用户态可解）。
      58. 主程序认出厂商拉起的抓屏子进程（机房实测：教师监视/缩略图时**学生端自己**拉起
          `rundll32.exe "<...>\KsFiles\ExdDtDup.dll",RunCapture 0`，DXGI 桌面复制在子进程里）
      59. 主程序按 PID 注入并给出结论（"已注入"或"注入失败+原因"）——现场要判的第一件事就是
@@ -2480,6 +2481,64 @@ if ($ccConnects -ge 2) {
     $result.Add(('FAIL  只有 {0} 个客户端连上管道（多客户端未生效，抓屏子进程仍拿不到配置）' -f $ccConnects))
 }
 
+Start-Stage '==== 阶段二十六：输入取证（周期性拽光标，v0.6.43）===='
+
+# 目的：把"谁在拽光标"这条**现场判据**钉进回归。用户 2026-10-15 报告：全屏广播/锁键鼠时鼠标能动，
+# 但几百毫秒就被拽回左上角。v0.6.43 起 YZHook 会在学生端进程里记录（只记录、不拦截）
+# SetCursorPos / mouse_event / SendInput 的调用 —— 有这行就说明是学生端进程自己干的（用户态可解）。
+# 这里用 YZSimTarget --yank 复现该现象并断言取证真的落盘。
+$yankIni = @(
+    '[General]',
+    'Flags=1',
+    'WindowPercent=60',
+    'LogLevel=3',
+    'AutoInject=1',
+    'InjectMethod=0',
+    'EnableExamGuard=1',
+    'ExternalWindowFix=0',
+    'InjectCaptureChild=0',
+    'AutoExportOnBroadcast=0',
+    'AutoExportOnExit=0',
+    'AutoExportOnCapture=0',
+    'ProcessNames=YZSimTarget.exe'
+)
+Set-Content -LiteralPath $iniFile -Value $yankIni -Encoding utf8
+
+$mark26 = Get-LogLength $appLog
+$yankAppProc = $null
+$forensicLine = ''
+$injectSeen = $false
+
+try {
+    $yankSimProc = Start-Process -FilePath $sim -ArgumentList '--yank', '600' -PassThru
+    Start-Sleep -Seconds 1
+    $yankAppProc = Start-Trainer
+    for ($i = 0; $i -lt 40; $i++) {
+        Start-Sleep -Milliseconds 800
+        $seg26 = Read-LogTail $appLog $mark26
+        if ($seg26 -match '已注入目标进程') { $injectSeen = $true }
+        $m26 = [regex]::Match($seg26, '\[输入取证\][^\r\n]*SetCursorPos[^\r\n]*')
+        if ($m26.Success) { $forensicLine = $m26.Value.Trim(); break }
+    }
+}
+finally {
+    Get-Process -Name 'YZSimTarget' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Milliseconds 500
+    [void](Close-TrainerGracefully $yankAppProc 8)
+}
+
+Write-Host ("注入已发生=" + $injectSeen + " 取证行=" + $(if ($forensicLine) { $forensicLine } else { '(无)' }))
+
+if ($forensicLine) {
+    $result.Add('PASS  输入取证落盘：学生端进程自己调用 SetCursorPos 会被记录（只记录、不拦截）')
+} else {
+    $result.Add('FAIL  没有出现 [输入取证] 行——现场就无法回答"是谁在拽光标"（查 InputForensicsTick 与输入钩子是否装上）')
+}
+if ($forensicLine -match 'SetCursorPos\s+[1-9]\d*\s+次' -and $forensicLine -match '400,\s*300') {
+    $result.Add('PASS  取证内容正确：次数非零且记录了真实坐标（400,300）')
+} else {
+    $result.Add(('FAIL  取证行内容不对（次数或坐标）：{0}' -f $forensicLine))
+}
 if ($script:stageName -ne '(开始)') { Write-Host ('  [计时] {0} 用时 {1} 秒' -f $script:stageName, [Math]::Round(((Get-Date) - $script:stageStart).TotalSeconds,1)) }
 $script:sw.Stop()
 Write-Host ("==== 测试结果（总用时 " + [Math]::Round($script:sw.Elapsed.TotalSeconds, 1) + " 秒）====")
