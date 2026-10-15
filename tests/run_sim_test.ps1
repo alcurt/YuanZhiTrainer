@@ -1165,7 +1165,10 @@ function Invoke-ExamPhase([int]$Guard) {
 [void](Wait-SimFullscreen 6)   # v0.6.34 提速：等模拟目标真的进全屏，不再死等 3 秒
         $mark = Get-LogLength $appLog
         $a = Start-Trainer   # v0.6.34：启动并记录状态文件基线
-        [void](Wait-ToolActed 14)   # v0.6.34：条件一到就走，超时按 14 秒兜底
+        # v0.6.42 提速：按子用例等各自的"关键日志行"——守护开=熔断行（窗口本来就不该被窗口化），
+        # 守护关=守护位关闭行。原来一律 Wait-ToolActed（等窗口化转变），守护开的用例必然白等满 14 秒。
+        if ($Guard -eq 0) { [void](Wait-LogLine '考试模式检测已按配置关闭\(EnableExamGuard=0\)' 14 $mark) }
+        else               { [void](Wait-LogLine '检测到考试/测验模式' 14 $mark) }
         $state = Get-Content -LiteralPath $examState -ErrorAction SilentlyContinue
         return [pscustomobject]@{
             Seg      = (Read-LogTail $appLog $mark)
