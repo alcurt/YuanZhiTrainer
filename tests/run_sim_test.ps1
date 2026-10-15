@@ -203,6 +203,9 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+# 兜底：把本轮自己的 pid 传给模拟目标。模拟目标带 2 秒看门狗，发现父进程消失就自己退出，
+# 于是"脚本崩了/终端被关但模拟目标还在跑"这种孤儿不会再出现（2026-10-15 用户提问后加的）。
+$env:YZ_SIM_PARENT_PID = "$PID"
 
 $root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 if (-not $DistDir) { $DistDir = Join-Path $root 'dist\Win32' }
@@ -1769,7 +1772,10 @@ else {
             -ArgumentList '-o', $watchOut64, '--watch', '--duration', '10', '--interval', '2', '--no-pause'
         Start-Sleep -Seconds 4
         $load64 = Start-Process -FilePath $gzyzSim -ArgumentList '--load', $ddStub -PassThru
-        $watch64.WaitForExit()
+        if (-not $watch64.WaitForExit(30000)) {
+    Stop-Process -Id $watch64.Id -Force -ErrorAction SilentlyContinue
+    $result.Add('WARN  x64 探针 --watch 30 秒未退出，已强杀（原本是无超时的 WaitForExit，会挂死整轮）')
+}
         Start-Sleep -Seconds 1
     }
     finally {

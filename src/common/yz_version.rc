@@ -11,7 +11,11 @@
 //
 #include "yz_version.h"
 
-#if defined(YZ_TOOL_PROBE)
+#if defined(YZ_TOOL_SIMTARGET)
+  #define YZ_TOOL_DESC    "YZTrainer simulation target - local regression stand-in for the vendor client"
+  #define YZ_TOOL_INTERNAL "YZSimTarget"
+  #define YZ_TOOL_FILE    "YZSimTarget.exe"
+#elif defined(YZ_TOOL_PROBE)
   #define YZ_TOOL_DESC    "YZTrainer probe - read-only reconnaissance (processes/modules/windows/services/net)"
   #define YZ_TOOL_INTERNAL "YZProbe"
   #define YZ_TOOL_FILE    "YZProbe.exe"

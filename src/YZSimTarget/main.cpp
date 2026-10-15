@@ -35,6 +35,13 @@ bool  g_execRequested = false;
 bool  g_yankRequested = false;
 UINT  g_yankIntervalMs = 500;
 bool  g_yankAway = true;
+/* 兜底（2026-10-15 用户提问："模拟目标卡住过 200 帧还没结束控制，有兜底吗"）：
+   以前**没有任何自我终止机制** —— 跑起来只能靠关窗或被强杀，卡住就得等人手动处理或等红线。
+   现在：① 活过 g_maxSeconds（默认 600 秒，--max-seconds 可改，0=不限）自己退出；
+        ② 若环境变量 YZ_SIM_PARENT_PID 指向的进程已经消失，立即退出（防止父进程崩了留孤儿）。 */
+UINT  g_maxSeconds = 600;
+DWORD g_parentPid  = 0;
+ULONGLONG g_startTick = 0;      /* 进程启动时刻：时限从**启动**算，不从第一次定时器触发算 */
 /* --load <dll>：4 秒后再加载指定 DLL，用来验证"远志的钩子模块晚于注入出现"时
    主动拔钩的重试（NativeUnhookTick）会不会真的再试一次。模块名必须与被查的名字
    一致（例如把 ExdHooks.dll 复制出来单独放）。 */
@@ -466,6 +473,19 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             DumpState(L"timer-state");
         }
 
+        else if (wParam == 11)
+        {
+            const ULONGLONG elapsed = (GetTickCount64() - g_startTick) / 1000ull;
+            bool quit = false;
+            if (g_maxSeconds > 0 && elapsed >= g_maxSeconds) quit = true;
+            if (!quit && g_parentPid != 0)
+            {
+                HANDLE hParent = OpenProcess(SYNCHRONIZE, FALSE, g_parentPid);
+                if (hParent == nullptr) quit = true;                       /* 父进程没了 */
+                else { if (WaitForSingleObject(hParent, 0) == WAIT_OBJECT_0) quit = true; CloseHandle(hParent); }
+            }
+            if (quit) DestroyWindow(hwnd);                                  /* 走正常退出路径 */
+        }
         else if (wParam == 10)
         {
             /* --yank：一次"移开"、一次"拽回"，交替进行 ⇒ 制造被测的那段"自由窗口" */
@@ -553,6 +573,16 @@ int WINAPI wWinMain(HINSTANCE hinst, HINSTANCE, LPWSTR cmdLine, int)
 {
     g_exeDir = yz::GetExeDir();
     g_examRequested = (cmdLine != nullptr) && (wcsstr(cmdLine, L"--exam") != nullptr);
+if (cmdLine != nullptr && wcsstr(cmdLine, L"--max-seconds") != nullptr)
+{
+    const int s = _wtoi(wcsstr(cmdLine, L"--max-seconds") + 13);
+    if (s >= 0) g_maxSeconds = (UINT)s;
+}
+{
+    wchar_t pidBuf[32] = { 0 };
+    if (GetEnvironmentVariableW(L"YZ_SIM_PARENT_PID", pidBuf, 32) > 0)
+        g_parentPid = (DWORD)_wtoi(pidBuf);
+}
 if (cmdLine != nullptr && wcsstr(cmdLine, L"--yank") != nullptr)
 {
     g_yankRequested = true;
@@ -634,6 +664,8 @@ if (cmdLine != nullptr && wcsstr(cmdLine, L"--yank") != nullptr)
         SetTimer(g_main, 9, g_dupDelayMs, nullptr);   /* 默认 8 秒；--dup-delay 可推后（见上） */
     if (g_yankRequested)
         SetTimer(g_main, 10, g_yankIntervalMs, nullptr);   /* --yank：往复拽光标（验证输入取证用） */
+    g_startTick = GetTickCount64();
+    SetTimer(g_main, 11, 1000, nullptr);                   /* 兜底看门狗：超时/父进程消失即退出（1 秒轮询） */
 
     /* 一次性：4 秒后加载 --load 指定的 DLL（模拟"钩子模块晚于注入出现"） */
     if (cmdLine != nullptr)

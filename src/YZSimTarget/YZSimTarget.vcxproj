@@ -64,6 +64,11 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="main.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="..\common\yz_version.rc">
+      <PreprocessorDefinitions>YZ_TOOL_SIMTARGET;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ResourceCompile>
     <ClCompile Include="..\common\yz_util.cpp" />
   </ItemGroup>
   <ItemGroup>
