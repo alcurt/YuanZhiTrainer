@@ -90,5 +90,18 @@ foreach ($p in $platforms) {
     Write-Host "已写入默认配置: $ini"
 }
 
+# v0.6.42 补：把调试符号挪出 dist。现场习惯是"整个 dist 目录拷进 U 盘"，而 *.pdb 合计约 31 MB/平台，
+# 一点用没有（2026-10-15 现场就整目录拷，U 盘里塞了 6 个 pdb）。符号仍保留在 build\pdb\<Platform>\，
+# 本地调试需要时把该目录加进符号路径即可；交付目录从此只剩 exe/dll/ini。
+foreach ($pdbPlat in 'Win32', 'x64') {
+    $pdbDist = Join-Path $root ("dist\{0}" -f $pdbPlat)
+    if (-not (Test-Path -LiteralPath $pdbDist)) { continue }
+    $pdbFiles = @(Get-ChildItem -LiteralPath $pdbDist -Filter '*.pdb' -File -ErrorAction SilentlyContinue)
+    if ($pdbFiles.Count -eq 0) { continue }
+    $pdbDest = Join-Path $root ("build\pdb\{0}" -f $pdbPlat)
+    New-Item -ItemType Directory -Path $pdbDest -Force | Out-Null
+    foreach ($pdbFile in $pdbFiles) { Move-Item -LiteralPath $pdbFile.FullName -Destination (Join-Path $pdbDest $pdbFile.Name) -Force }
+    Write-Host ("已把 {0} 个调试符号移出 dist\{1} ⇒ build\pdb\{1}\（交付目录只留 exe/dll/ini）" -f $pdbFiles.Count, $pdbPlat)
+}
 Write-Host ''
 Write-Host '提示：YZHook.dll 已内嵌进 YZTrainer.exe，单文件即可运行（运行时释放到 %ProgramData%\YZTrainer\cache）；YZProbe.exe 建议单独带到机房运行。'
