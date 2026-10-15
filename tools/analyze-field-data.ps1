@@ -162,6 +162,31 @@ L '---- 1. 管道客户端（v0.6.38 起期望 >= 2：学生端 + 抓屏子进�
 }
 
 L ''
+L ''
+L '---- 7b. 输入取证（谁在拽光标，v0.6.43 起；只记录不拦截）----'
+$forensic = @([regex]::Matches($text, '\[输入取证\][^\r\n]*'))
+if ($forensic.Count -eq 0) {
+    L '  日志里没有 [输入取证] 行。两种可能：'
+    L '    1) 主程序不是 v0.6.43 及以后（该功能 v0.6.43 才有）；'
+    L '    2) 学生端进程在这段时间内没有调用过 SetCursorPos / mouse_event / SendInput。'
+    L '  => 若被锁期间光标确实被周期性拽回左上角、而这里一行都没有，则拽光标来自进程外'
+    L '     （另一个进程或驱动），请对照下面 D 节列出的非微软驱动清单。'
+} else {
+    L ("  共 {0} 行取证记录；最后 3 行：" -f $forensic.Count)
+    $forensic | Select-Object -Last 3 | ForEach-Object { L ('    ' + $_.Value.Trim()) }
+    $tot = 0
+    foreach ($m in $forensic) {
+        $mm = [regex]::Match($m.Value, 'SetCursorPos\s+(\d+)\s+次')
+        if ($mm.Success) { $tot += [int]$mm.Groups[1].Value }
+    }
+    L ("  记录的 SetCursorPos 调用合计 {0} 次" -f $tot)
+    if ($tot -gt 0) {
+        L '  判读：学生端进程自己（或它进程内的组件）在调用 SetCursorPos，'
+        L '        所以周期性把光标拽回左上角有用户态来源，可继续沿拔钩/拦截该调用这条路做（只用用户态手段）。'
+    } else {
+        L '  判读：有取证行但 SetCursorPos 计数为 0，这段时间它没调这个 API（可能走 mouse_event / SendInput）。'
+    }
+}
 L '---- 8. 键鼠探针（A/B/C/D）----'
 if ($probes.Count -eq 0) {
     L '  没有 input-probe-*.txt：现场没跑键鼠探针（或没放进回收目录）。'
