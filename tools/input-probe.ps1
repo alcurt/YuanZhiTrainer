@@ -309,13 +309,28 @@ if ($WatchMinutes -gt 0) {
     $wEnd = (Get-Date).AddMinutes($WatchMinutes)
     $wKb = 0; $wMs = 0; $wLastKeys = ''; $wEvents = @(); $wSamples = 0; $wZero = 0
     $wAsyncNoHook = 0; $wKeyChanges = 0; $wRefresh = 0; $wHeartbeat = (Get-Date).AddSeconds(30)
+    # 光标轨迹统计（用户 2026-10-15 描述的现场现象：被锁时鼠标能移动，但几百毫秒就被拽回左上角）
+    $wAwayStart = $null; $wAwaySpans = @(); $wAwayMax = 0; $wAwayMaxDist = 0
     try {
         while ((Get-Date) -lt $wEnd) {
             [void][YzInputProbe]::PumpOnce()
             $down = [YzInputProbe]::DownKeys()
             [YzInputProbe]::SampleCursor()
             $wSamples++
-            if ([YzInputProbe]::CursorX -eq 0 -and [YzInputProbe]::CursorY -eq 0) { $wZero++ }
+            $cx = [YzInputProbe]::CursorX; $cy = [YzInputProbe]::CursorY
+            if ($cx -eq 0 -and $cy -eq 0) {
+                $wZero++
+                if ($null -ne $wAwayStart) {          # 一段"离开左上角"到此结束 ⇒ 记下它有多久
+                    $dur = ((Get-Date) - $wAwayStart).TotalMilliseconds
+                    $wAwaySpans += [int]$dur
+                    if ($dur -gt $wAwayMax) { $wAwayMax = $dur }
+                    $wAwayStart = $null
+                }
+            } else {
+                if ($null -eq $wAwayStart) { $wAwayStart = Get-Date }
+                $dist = [Math]::Sqrt(($cx * $cx) + ($cy * $cy))
+                if ($dist -gt $wAwayMaxDist) { $wAwayMaxDist = $dist }
+            }
             $kb = [YzInputProbe]::KeyEventCount; $ms = [YzInputProbe]::MouseEventCount
             if ($down -ne $wLastKeys -and $down -ne '') {
                 $wKeyChanges++
@@ -335,18 +350,25 @@ if ($WatchMinutes -gt 0) {
             # 所以重装能让我们始终站在钩子链头 ⇒ 远志即使在自己进程里吞事件，我们也先看到它。
             # 这是本机唯一验证过能穿透"用户态钩子吞事件"的观测法（GetAsyncKeyState 与 Raw Input
             # 都在钩子链下游，实测都会被一起吞掉）。
-            if ((($wSamples) % 5) -eq 0) {
+            if ((($wSamples) % 20) -eq 0) {
                 [void][YzInputProbe]::UninstallHook()
                 [void][YzInputProbe]::UninstallMouseHook()
                 [void][YzInputProbe]::InstallKeyboardCounter()
                 [void][YzInputProbe]::InstallMouseCounter()
                 $wRefresh++
             }
-            Start-Sleep -Milliseconds 200
+            Start-Sleep -Milliseconds 50
         }
     } finally {
         [void][YzInputProbe]::UninstallHook()
         [void][YzInputProbe]::UninstallMouseHook()
+        # 收尾：采样结束时若光标仍在外面，把这一段也算上（否则"停(0,0)=0 次"却报"没离开过"这种自相矛盾）
+        if ($null -ne $wAwayStart) {
+            $dur = ((Get-Date) - $wAwayStart).TotalMilliseconds
+            $wAwaySpans += [int]$dur
+            if ($dur -gt $wAwayMax) { $wAwayMax = $dur }
+            $wAwayStart = $null
+        }
     }
     Say ''
     Say '  ---- 待锁观察汇总 ----'
@@ -356,6 +378,17 @@ if ($WatchMinutes -gt 0) {
          [YzInputProbe]::KeyEventCount, [YzInputProbe]::PhysicalCount, [YzInputProbe]::InjectedCount, `
          [YzInputProbe]::MouseEventCount, [YzInputProbe]::MousePhysicalCount, [YzInputProbe]::MouseInjectedCount)
     Say ("  光标停在 (0,0) 的比例: {0:P1}" -f $(if ($wSamples -gt 0) { $wZero / $wSamples } else { 0 }))
+    if ($wAwaySpans.Count -gt 0) {
+        $sorted = @($wAwaySpans | Sort-Object)
+        $median = $sorted[[int]($sorted.Count / 2)]
+        Say ("  光标「离开左上角」的自由段: {0} 段；最长 {1} ms、中位 {2} ms；最远离开 (0,0) 约 {3:N0} px" -f $wAwaySpans.Count, [int]$wAwayMax, $median, $wAwayMaxDist)
+        Say '    （现场现象：被锁时鼠标能动、但很快被拽回左上角——这段时长就是"能动的窗口"；若它只有几百毫秒，' 
+        Say '      说明有东西在**周期性**把光标拉回去。结合日志里"[输入取证] SetCursorPos"能判断它是不是学生端进程自己干的。）'
+    } elseif ($wZero -eq $wSamples -and $wSamples -gt 0) {
+        Say '  光标全程都停在 (0,0)（一次都没离开）——若有东西在周期性把它拽回去，就是这个形态。'
+    } else {
+        Say '  光标有离开 (0,0) 的采样，但没有形成完整自由段（采样过稀或刚离开就结束）。'
+    }
     if ($wEvents.Count -gt 0) {
         Say '  事件时间线（最多 40 条）：'
         $wEvents | Select-Object -First 40 | ForEach-Object { Say ('  ' + $_) }

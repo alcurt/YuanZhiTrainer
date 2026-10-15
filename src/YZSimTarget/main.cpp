@@ -29,6 +29,12 @@ HHOOK g_keyHook = nullptr;
 int   g_frame = 0;
 bool  g_examRequested = false;
 bool  g_execRequested = false;
+/* --yank [毫秒]：周期性把光标移到 (400,300)、随后拽回 (0,0)，模拟机房"全屏广播/锁键鼠时鼠标能动
+   几百毫秒就被拽回左上角"的现象（2026-10-15 用户描述）。用于**验证输入取证**（YZHook 的
+   [输入取证] 只记录不拦截）：学生端/模拟目标是被允许挂钩子的宿主，所以必须用它来验。 */
+bool  g_yankRequested = false;
+UINT  g_yankIntervalMs = 500;
+bool  g_yankAway = true;
 /* --load <dll>：4 秒后再加载指定 DLL，用来验证"远志的钩子模块晚于注入出现"时
    主动拔钩的重试（NativeUnhookTick）会不会真的再试一次。模块名必须与被查的名字
    一致（例如把 ExdHooks.dll 复制出来单独放）。 */
@@ -460,6 +466,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             DumpState(L"timer-state");
         }
 
+        else if (wParam == 10)
+        {
+            /* --yank：一次"移开"、一次"拽回"，交替进行 ⇒ 制造被测的那段"自由窗口" */
+            if (g_yankAway) { SetCursorPos(400, 300); g_yankAway = false; }
+            else            { SetCursorPos(0, 0);     g_yankAway = true; }
+        }
         else if (wParam == 5)
         {
             KillTimer(hwnd, 5);
@@ -541,6 +553,15 @@ int WINAPI wWinMain(HINSTANCE hinst, HINSTANCE, LPWSTR cmdLine, int)
 {
     g_exeDir = yz::GetExeDir();
     g_examRequested = (cmdLine != nullptr) && (wcsstr(cmdLine, L"--exam") != nullptr);
+if (cmdLine != nullptr && wcsstr(cmdLine, L"--yank") != nullptr)
+{
+    g_yankRequested = true;
+    if (const wchar_t* y = wcsstr(cmdLine, L"--yank "))
+    {
+        const UINT ms = (UINT)_wtoi(y + 7);
+        if (ms >= 100) g_yankIntervalMs = ms;
+    }
+}
     g_execRequested = (cmdLine != nullptr) && (wcsstr(cmdLine, L"--exec") != nullptr);
     if (cmdLine != nullptr)
     {
@@ -611,6 +632,8 @@ int WINAPI wWinMain(HINSTANCE hinst, HINSTANCE, LPWSTR cmdLine, int)
     /* 一次性：3 秒后跑一次 --dup 的桌面复制取证（此时注入与配置都已就绪） */
     if (g_dupFrames > 0)
         SetTimer(g_main, 9, g_dupDelayMs, nullptr);   /* 默认 8 秒；--dup-delay 可推后（见上） */
+    if (g_yankRequested)
+        SetTimer(g_main, 10, g_yankIntervalMs, nullptr);   /* --yank：往复拽光标（验证输入取证用） */
 
     /* 一次性：4 秒后加载 --load 指定的 DLL（模拟"钩子模块晚于注入出现"） */
     if (cmdLine != nullptr)

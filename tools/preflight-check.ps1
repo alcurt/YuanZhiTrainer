@@ -137,6 +137,23 @@ foreach ($pl in 'Win32', 'x64') {
 # exe 里必须真的内建了 v0.6.42 的出厂模板（宽字符串以 UTF-16LE 落在二进制里）
 Check 'exe 内建出厂模板含 CaptureScanIntervalMs' (HasStr (Join-Path (Get-PlatformDir $repo 'Win32') 'YZTrainer.exe') 'CaptureScanIntervalMs=30000') ''
 L ''
+L ''
+L '---- 1d. 载荷新鲜度：exe 里必须**完整包含**当前 DLL 的字节（RCDATA 原样嵌入）----'
+foreach ($pl in 'Win32', 'x64') {
+    $pdir = Get-PlatformDir $repo $pl
+    $exe = Join-Path $pdir 'YZTrainer.exe'
+    $dll = Join-Path $pdir 'YZHook.dll'
+    if (-not (Test-Path -LiteralPath $exe) -or -not (Test-Path -LiteralPath $dll)) {
+        Check ("$pl 载荷新鲜度") $false 'exe 或 dll 缺失'
+        continue
+    }
+    # 用 Latin1 做 1:1 字节→字符映射，再用字符串 IndexOf 搜索（比逐字节比较快几个数量级）
+    $enc1 = [System.Text.Encoding]::GetEncoding(28591)
+    $exeS = $enc1.GetString([System.IO.File]::ReadAllBytes($exe))
+    $dllS = $enc1.GetString([System.IO.File]::ReadAllBytes($dll))
+    $found = $exeS.IndexOf($dllS) -ge 0
+    Check ("$pl 载荷新鲜度（exe 完整含当前 DLL）") $found $(if ($found) { "DLL $([Math]::Round((Get-Item $dll).Length/1KB)) KB 已原样嵌入" } else { 'exe 里找不到当前 DLL ⇒ 嵌的是**旧载荷**！重跑 build.ps1 并复查' })
+}
 L '---- 2. 内嵌钩子载荷是否为当前源码（v0.6.35 踩过旧载荷）----'
 $mainExe = Join-Path (Get-PlatformDir $repo 'Win32') 'YZTrainer.exe'
 Check '内嵌载荷含"补充状态通道"' (HasStr $mainExe '补充状态通道') ''

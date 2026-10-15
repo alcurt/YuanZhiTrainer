@@ -389,12 +389,45 @@ void WINAPI Hook_keybd_event(BYTE vk, BYTE scan, DWORD flags, ULONG_PTR extra)
     yzhook::LeaveHook();
 }
 
+/* v0.6.43：输入取证（**只记录、不拦截**）。
+   背景（2026-10-15 用户现场描述）：全屏广播/锁键鼠时鼠标能动，但很快被"拽回左上角"、只有几百毫秒。
+   要判断这是不是**学生端进程自己**干的，就必须知道它有没有调用 SetCursorPos / mouse_event / SendInput。
+   下面每秒最多打一行汇总；拦截与否仍完全由 YZ_FLAG_BLOCK_REMOTE 决定，本设施不改变任何行为。 */
+static volatile LONG   g_yzCursorPosCalls = 0;
+static volatile LONG   g_yzCursorPosLastX = 0;
+static volatile LONG   g_yzCursorPosLastY = 0;
+static volatile LONG   g_yzMouseEventCalls = 0;
+static volatile LONG   g_yzSendInputMouseCalls = 0;
+static volatile LONG64 g_yzInputTraceTick = 0;
+
+static void InputForensicsTick()
+{
+    const ULONGLONG now = GetTickCount64();
+    const LONG64 last = InterlockedCompareExchange64(&g_yzInputTraceTick, 0, 0);
+    if (now - (ULONGLONG)last < 1000)
+        return;
+    if (InterlockedCompareExchange64(&g_yzInputTraceTick, (LONG64)now, last) != last)
+        return;                                   /* 别的线程已经打过这一秒了 */
+    const LONG sc = InterlockedExchange(&g_yzCursorPosCalls, 0);
+    const LONG me = InterlockedExchange(&g_yzMouseEventCalls, 0);
+    const LONG si = InterlockedExchange(&g_yzSendInputMouseCalls, 0);
+    if (sc == 0 && me == 0 && si == 0)
+        return;
+    YZLOGI(L"[输入取证] 本进程 1 秒内: SetCursorPos %ld 次（最后一次 %ld,%ld）  mouse_event %ld 次  SendInput(鼠标) %ld 次",
+           sc, (LONG)g_yzCursorPosLastX, (LONG)g_yzCursorPosLastY, me, si);
+}
+
 UINT WINAPI Hook_SendInput(UINT count, LPINPUT inputs, int size)
 {
     if (!yzhook::TryEnterHook())
         return g_realSendInput(count, inputs, size);
 
     UINT result = 0;
+    for (UINT i = 0; i < count; ++i)
+    {
+        if (inputs[i].type == INPUT_MOUSE)        /* 0 = 鼠标 */
+            InterlockedIncrement(&g_yzSendInputMouseCalls);
+    }
     if (yzhook::g_flags & YZ_FLAG_BLOCK_REMOTE)
     {
         InterlockedIncrement(&g_blockedRemoteCount);
@@ -408,6 +441,7 @@ UINT WINAPI Hook_SendInput(UINT count, LPINPUT inputs, int size)
     }
 
     yzhook::LeaveHook();
+    InputForensicsTick();
     return result;
 }
 
@@ -419,6 +453,7 @@ void WINAPI Hook_mouse_event(DWORD flags, DWORD dx, DWORD dy, DWORD data, ULONG_
         return;
     }
 
+    InterlockedIncrement(&g_yzMouseEventCalls);
     if (yzhook::g_flags & YZ_FLAG_BLOCK_REMOTE)
     {
         InterlockedIncrement(&g_blockedRemoteCount);
@@ -428,12 +463,17 @@ void WINAPI Hook_mouse_event(DWORD flags, DWORD dx, DWORD dy, DWORD data, ULONG_
         g_realmouse_event(flags, dx, dy, data, extra);
     }
     yzhook::LeaveHook();
+    InputForensicsTick();
 }
 
 BOOL WINAPI Hook_SetCursorPos(int x, int y)
 {
     if (!yzhook::TryEnterHook())
         return g_realSetCursorPos(x, y);
+
+    InterlockedIncrement(&g_yzCursorPosCalls);
+    InterlockedExchange(&g_yzCursorPosLastX, (LONG)x);
+    InterlockedExchange(&g_yzCursorPosLastY, (LONG)y);
 
     BOOL result = FALSE;
     if (yzhook::g_flags & YZ_FLAG_BLOCK_REMOTE)
@@ -447,6 +487,7 @@ BOOL WINAPI Hook_SetCursorPos(int x, int y)
     }
 
     yzhook::LeaveHook();
+    InputForensicsTick();
     return result;
 }
 
