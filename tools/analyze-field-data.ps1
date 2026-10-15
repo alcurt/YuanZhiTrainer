@@ -78,7 +78,29 @@ if ($logs.Count -eq 0) {
         return $m[$m.Count - 1].Value
     }
 
-    L '---- 1. 管道客户端（v0.6.38 起期望 >= 2：学生端 + 抓屏子进程）----'
+    L ''
+L '---- 0b. 配置文件（包内所有 YZTrainer.ini；判断"现场到底用的哪套开关"）----'
+$inis = @(Get-ChildItem -LiteralPath $work -Recurse -File -Filter '*YZTrainer.ini' -ErrorAction SilentlyContinue)
+if ($inis.Count -eq 0) {
+    L '  包内没有 YZTrainer.ini：无法确认现场开关，只能靠日志里的"应用配置: flags=0x…"。'
+} else {
+    foreach ($ini in $inis) {
+        $itxt = Get-Content -LiteralPath $ini.FullName -Raw -Encoding UTF8
+        $f = [regex]::Match($itxt, '(?m)^Flags=(\d+)')
+        $t = [regex]::Match($itxt, '(?m)^TraceDesktopDuplication=(\d+)')
+        $c = [regex]::Match($itxt, '(?m)^InjectCaptureChild=(\d+)')
+        $fv = if ($f.Success) { [int]$f.Groups[1].Value } else { -1 }
+        $names = @()
+        foreach ($bit in @(@(1,'窗口化'), @(4,'键鼠解锁'), @(8,'防监视'), @(16,'拦遥控'), @(32,'假全屏'))) {
+            if ($fv -ge 0 -and ($fv -band $bit[0])) { $names += $bit[1] }
+        }
+        L ("  {0}: Flags={1}{2}  TraceDesktopDuplication={3}  InjectCaptureChild={4}" -f `
+            $ini.Name, $(if ($fv -ge 0) { $fv } else { '?' }), $(if ($names.Count) { '（' + ($names -join '+') + '）' } else { '' }), `
+            $(if ($t.Success) { $t.Groups[1].Value } else { '?' }), $(if ($c.Success) { $c.Groups[1].Value } else { '?' }))
+    }
+    L '  提示：以日志里的"应用配置: flags=0x…"为准（进程真正在用的值）；ini 只是当时磁盘上的状态。'
+}
+L '---- 1. 管道客户端（v0.6.38 起期望 >= 2：学生端 + 抓屏子进程）----'
     $connects = [regex]::Matches($text, 'Hook DLL 已连接: pid=(\d+)')
     $pids = @()
     foreach ($m in $connects) { $pids += $m.Groups[1].Value }
@@ -147,8 +169,10 @@ if ($probes.Count -eq 0) {
     foreach ($p in $probes) {
         L ("  --- " + $p.Name + " ---")
         $pt = Get-Content -LiteralPath $p.FullName -Raw -Encoding UTF8
-        foreach ($pat in '\[自校准\][^\r\n]*', '低层钩子收到:[^\r\n]*', '人工确认:[^\r\n]*', 'A SendInput:[^\r\n]*',
-                         '判读:[^\r\n]*', '键盘类[^\r\n]*', '鼠标类[^\r\n]*', 'HID 类[^\r\n]*') {
+        foreach ($pat in '测试时的封锁状态[^\r\n]*', '\[自校准\][^\r\n]*', '低层钩子收到:[^\r\n]*', '人工确认:[^\r\n]*',
+                         '人工观察:[^\r\n]*', 'A SendInput:[^\r\n]*', '判读:[^\r\n]*',
+                         '[A-Za-z0-9_]+: Start=[^\r\n]*', '签名主体=[^\r\n]*',
+                         '键盘类[^\r\n]*', '鼠标类[^\r\n]*', 'HID 类[^\r\n]*') {
             $m = [regex]::Matches($pt, $pat)
             foreach ($x in $m) { L ('    ' + $x.Value.Trim()) }
         }
@@ -159,7 +183,10 @@ L ''
 L '==== 判读要点（人工确认）===='
 L '  1) 冻结是否真的生效：以教师端画面/缩略图是否还在动为准；日志里 DXGI 冻结: 已开启 + 取帧统计里"取到帧"不再增长是旁证。'
 L '  2) 抓屏子进程应自己连上（两条 Hook DLL 已连接）；只看到一条时看补充状态通道是否顶上。'
-L '  3) 键鼠结论看探针的 A/B/C/D：A 通 ⇒ 用户态可解；A 不通且 C 物理=0（自校准通过、你确认按过）⇒ 设备/驱动级，如实记录、不越界。'
+L '  3) 键鼠结论看探针的 A/B/C/D，但**先看报告里"测试时的封锁状态"**：若那一刻键盘鼠标本来就没被屏蔽，'
+L '     这些数字只能说明"链路正常"，不能据此判断封锁发生在哪一层（2026-10-15 下午那趟缺这一项，数据无法定论）。'
+L '     A 通 ⇒ 用户态可解；A 不通且 C 物理=0（自校准通过、你确认按过）⇒ 设备/驱动级，如实记录、不越界。'
+L '     D 节给出键盘/鼠标类上的过滤驱动及其文件/版本/签名——非微软的那一个就是首要怀疑对象。'
 L '  4) 有考试信号时先确认熔断生效，再看其它结论。'
 
 if ([string]::IsNullOrEmpty($OutFile)) {

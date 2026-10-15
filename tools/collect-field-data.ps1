@@ -52,6 +52,7 @@ $roots = @(
 $subDirs = @()
 foreach ($sub in (Get-ChildItem -Directory -ErrorAction SilentlyContinue)) {
     $looksLikeExeDir = (Test-Path -LiteralPath (Join-Path $sub.FullName 'YZTrainer.exe') -ErrorAction SilentlyContinue) -or
+                       (Test-Path -LiteralPath (Join-Path $sub.FullName 'YZTrainer.ini') -ErrorAction SilentlyContinue) -or
                        (@(Get-ChildItem -LiteralPath $sub.FullName -Directory -Filter 'diag-*' -ErrorAction SilentlyContinue).Count -gt 0)
     if ($looksLikeExeDir) { $subDirs += $sub.FullName }
 }
@@ -61,12 +62,14 @@ if ($subDirs.Count -gt 0) {
 }
 
 $copied = 0
-function Copy-Into([string]$src, [string]$sub) {
+function Copy-Into([string]$src, [string]$sub, [string]$asName = '') {
     if (-not (Test-Path -LiteralPath $src)) { return }
     $target = Join-Path $dest $sub
     New-Item -ItemType Directory -Path $target -Force | Out-Null
+    # $asName 非空时改用它作为目标文件名（用于同名文件加来源前缀，避免互相覆盖）
+    $dst = if ($asName) { Join-Path $target $asName } else { $target }
     try {
-        Copy-Item -LiteralPath $src -Destination $target -Recurse -Force -ErrorAction Stop
+        Copy-Item -LiteralPath $src -Destination $dst -Recurse -Force -ErrorAction Stop
         $script:copied++
         $item = Get-Item -LiteralPath $src
         M ("  + {0}  ({1})" -f $src, $(if ($item.PSIsContainer) { '目录' } else { "$($item.Length) 字节" }))
@@ -107,8 +110,13 @@ M ''
 M '---- 配置文件（判读上下文，必须有）----'
 foreach ($r in $roots) {
     if (-not (Test-DirSafe $r)) { M ("  （跳过，无权限或无此目录: {0}）" -f $r); continue }
-    Get-ChildItem -LiteralPath $r -Filter 'YZTrainer.ini' -File -ErrorAction SilentlyContinue |
-        ForEach-Object { Copy-Into $_.FullName 'ini' }
+    Get-ChildItem -LiteralPath $r -Filter 'YZTrainer.ini' -File -ErrorAction SilentlyContinue | ForEach-Object {
+        # v0.6.42 修订：两份同名 ini 扁平化会互相覆盖——2026-10-15 下午实测到 x64 的出厂 ini 把
+        # Win32 的现场 ini 盖掉了，判读里于是显示 Flags=5 而不是现场实际用的 Flags=45。
+        # 这里按来源目录加前缀，两份都留得住。
+        $tag = (Split-Path $r -Leaf) -replace '[^\w\.\-]', '_'
+        Copy-Into $_.FullName 'ini' ('{0}_YZTrainer.ini' -f $tag)
+    }
 }
 
 M ''

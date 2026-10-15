@@ -18,7 +18,8 @@
 param(
     [string]$TargetProc = '',
     [int]$HoldSeconds = 8,
-    [string]$OutDir = ''
+    [string]$OutDir = '',
+[switch]$NoUi            # 自动化测试用：不弹窗，退回控制台提问
 )
 
 $ErrorActionPreference = 'Stop'
@@ -27,7 +28,32 @@ $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $outFile = Join-Path $OutDir ("input-probe-{0}.txt" -f $stamp)
 
 $log = New-Object System.Collections.Generic.List[string]
-function Say([string]$s) { $log.Add($s); Write-Host $s }
+function Say([string]$s) {
+    $log.Add($s)
+    Write-Host $s
+    try { Add-Content -LiteralPath $outFile -Value $s -Encoding UTF8 -ErrorAction Stop } catch { }
+}
+
+# 提问一律走弹窗（是/否/取消），不再用 Read-Host 读控制台。
+# 原因（2026-10-15 现场）：C 节要求"用物理键盘敲几个键"，那些按键会落进同一个控制台缓冲区，
+# 随后 Read-Host 收到的就是 Q55555555fssdfsdfsdfy / Qy 这种串 ⇒ 两次都被判"无结论"。
+# 弹窗不受键盘缓冲影响。带 -NoUi 时退回控制台（自动化测试用），并按"含 y / 含 s"容错解析。
+function Ask([string]$prompt, [string]$map = '是=y / 否=n') {
+    if ($NoUi) {
+        $a = [string](Read-Host ('  ' + $prompt + '  (' + $map + ')'))
+        if ($a -match '[yY]') { return 'y' }
+        if ($a -match '[sS]') { return 's' }
+        return 'n'
+    }
+    Add-Type -AssemblyName System.Windows.Forms -ErrorAction SilentlyContinue
+    $r = [System.Windows.Forms.MessageBox]::Show(($prompt + "`r`n`r`n" + $map), 'YZTrainer 输入探针',
+                                                 [System.Windows.Forms.MessageBoxButtons]::YesNoCancel,
+                                                 [System.Windows.Forms.MessageBoxIcon]::Question)
+    if ($r -eq [System.Windows.Forms.DialogResult]::Yes) { return 'y' }
+    if ($r -eq [System.Windows.Forms.DialogResult]::No)  { return 'n' }
+    if ($map -match '取消=') { return 's' }
+    return 'n'
+}
 
 Say ("==== YZTrainer 输入路径探针 {0} ====" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'))
 Say ("管理员: " + ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator))
@@ -202,6 +228,10 @@ Say ''
 
 # ---------------------------------------------------------------- C：先装低层钩子
 Say ("---- C. 低层键盘钩子计数（{0} 秒）----" -f $HoldSeconds)
+# 先记录"测试那一刻的封锁状态"——否则事后无法判断这些数字是"正常输入"还是"被拦时的输入"
+# （2026-10-15 下午那趟没记，数据因此无法定论）。
+$blockedNow = Ask '开始测试前：现在键盘/鼠标被远志屏蔽了吗？' '是=正在被屏蔽（按不动/点不动）/ 否=正常'
+Say ("  测试时的封锁状态（用户确认）: " + $(if ($blockedNow -eq 'y') { '正在被屏蔽' } else { '正常' }))
 $hookOk = [YzInputProbe]::InstallKeyboardCounter()
 Say ("  SetWindowsHookEx(WH_KEYBOARD_LL) 结果: " + $hookOk)
 $cnt = 0
@@ -220,7 +250,7 @@ if ($hookOk) {
     [void][YzInputProbe]::UninstallHook()
     Say ("  低层钩子收到: 总计 {0} 次（合成 {1} / 物理 {2}）" -f $cnt, [YzInputProbe]::InjectedCount, $physCnt)
     # 关键的人工确认：没按键时的 0 次**不能**当作"被驱动拦了"——否则会得出错误结论。
-    $answerC = Read-Host '  刚才那几秒你**确实用物理键盘按了键**吗？(y=按了 / n=没按)'
+    $answerC = Ask '刚才那几秒你确实用物理键盘按了键吗？' '是=按了 / 否=没按'
     Say ("  人工确认: " + $answerC)
     if ($injCal -eq 0) {
         Say '  判读: 自校准就没通过 ⇒ C 试验无结论（别据此判断驱动拦截）'
@@ -243,7 +273,7 @@ for ($i = 10; $i -gt 0; $i--) { Write-Host ("   {0}…" -f $i) -NoNewline; Write
 $sentText = [YzInputProbe]::SendUnicodeText('YZPROBE')
 $sentMouse = [YzInputProbe]::SendMouseMove(20, 0)
 Say ("  SendInput(文字) 返回 {0}（返回的事件数，0 表示被拒）；SendInput(鼠标) 返回 {1}" -f $sentText, $sentMouse)
-$answerA = Read-Host '  记事本里出现了 YZPROBE 吗？(y=出现 / n=没出现)'
+$answerA = Ask '记事本里出现了 YZPROBE 吗？' '是=出现 / 否=没出现'
 Say ("  人工观察: " + $answerA)
 Say ''
 
@@ -258,13 +288,14 @@ foreach ($ch in 'YZPROBE'.ToCharArray()) {
     Start-Sleep -Milliseconds 60
 }
 Say ("  已向目标窗口投递 {0} 条按键消息" -f $sentB)
-$answerB = Read-Host '  目标窗口有任何反应吗（出现文字/被触发）？(y=有 / n=没有 / s=目标不是文本窗，无法判断)'
+$answerB = Ask '目标窗口有任何反应吗（出现文字/被触发）？' '是=有反应 / 否=没反应 / 取消=目标不是文本窗，无法判断'
 Say ("  人工观察: " + $answerB)
 Say ''
 
 # ---------------------------------------------------------------- 结论
 Say '==== 结论（现场判读用）===='
-Say ("  A SendInput: " + $answerA + "    B PostMessage: " + $answerB)
+Say ("  A SendInput: {0}    B PostMessage: {1}" -f $answerA, $answerB)
+Say ("  （A 发出的字符串=YZPROBE；SendInput 返回事件数={0}，鼠标微移返回={1}）" -f $sentText, $sentMouse)
 if ($hookOk) { Say ("  C 低层钩子事件数: 总计 {0} / 合成 {1} / 物理 {2}" -f [YzInputProbe]::KeyEventCount, [YzInputProbe]::InjectedCount, [YzInputProbe]::PhysicalCount) }
 Say '  组合判读：'
 Say '    A=y                      ⇒ 输入队列没被拦，问题只在目标程序的用户态钩子 → 用拔钩/消息层解'
@@ -294,6 +325,41 @@ foreach ($k in $classGuids.Keys) {
         Say ("  {0}: 读取失败（{1}）" -f $k, $_.Exception.Message)
     }
 }
+# 把上面列到的每个过滤驱动解析出来：服务 → 二进制路径 → 版本/签名。
+# 2026-10-15 现场在键盘类上读到 UpperFilters=[kbdclass, kafe]，其中 kafe 不是微软自带的名字，
+# 这种线索必须能落到"哪个文件、哪个厂商、还装不装"，否则现场只能凭名字猜。
+$filterNames = @()
+foreach ($k in $classGuids.Keys) {
+    $base = 'HKLM:\SYSTEM\CurrentControlSet\Control\Class\' + $classGuids[$k]
+    $up = (Get-ItemProperty -LiteralPath $base -Name UpperFilters -ErrorAction SilentlyContinue).UpperFilters
+    $lo = (Get-ItemProperty -LiteralPath $base -Name LowerFilters -ErrorAction SilentlyContinue).LowerFilters
+    foreach ($n in @($up) + @($lo)) { if ($n) { $filterNames += $n } }
+}
+$filterNames = @($filterNames | Sort-Object -Unique)
+if ($filterNames.Count -gt 0) {
+    $startMap = @{ 0 = 'Boot'; 1 = 'System'; 2 = 'Auto'; 3 = 'Manual'; 4 = 'Disabled' }
+    Say '  这些过滤驱动的解析（只读，逐个查服务与文件）：'
+    foreach ($n in $filterNames) {
+        $svc = Get-ItemProperty -LiteralPath ('HKLM:\SYSTEM\CurrentControlSet\Services\' + $n) -ErrorAction SilentlyContinue
+        if (-not $svc) { Say ("    {0}: 注册表里没有同名服务（可能是内置类驱动）" -f $n); continue }
+        $img  = [string]$svc.ImagePath
+        $path = $img -replace '^\\\?\?\\', '' -replace '^\\SystemRoot\\', ($env:SystemRoot + '\') -replace '^system32\\', ($env:SystemRoot + '\system32\')
+        $st   = if ($startMap.ContainsKey([int]$svc.Start)) { $startMap[[int]$svc.Start] } else { [string]$svc.Start }
+        Say ("    {0}: Start={1} Type={2} 文件={3}" -f $n, $st, $svc.Type, $(if ($path) { $path } else { '(空)' }))
+        if ($path -and (Test-Path -LiteralPath $path -ErrorAction SilentlyContinue)) {
+            $fi = Get-Item -LiteralPath $path -ErrorAction SilentlyContinue
+            if ($fi) { Say ("        版本={0}" -f $fi.VersionInfo.FileVersion) }
+            try {
+                if (Get-Command Get-AuthenticodeSignature -ErrorAction SilentlyContinue) {
+                    $sg = Get-AuthenticodeSignature -LiteralPath $path -ErrorAction SilentlyContinue
+                    if ($sg -and $sg.SignerCertificate) { Say ("        签名主体={0}" -f $sg.SignerCertificate.Subject) }
+                } else {
+                    Say '        （本机读不了 Authenticode 签名：Security 模块不可用，不影响其它判据）'
+                }
+            } catch { Say '        （读签名时出错，跳过）' }
+        }
+    }
+}
 Say '  运行中的相关内核驱动（名字或路径命中 kbd/mou/hid/filter/hook/yz/exd/ks/teach/class）：'
 try {
     $drv = Get-CimInstance Win32_SystemDriver -ErrorAction Stop | Where-Object {
@@ -311,7 +377,6 @@ try {
 }
 Say '  说明：本工具自身**不安装任何驱动**；上面这些若出现厂商名字，那才是"设备级拦截"的候选。'
 Say ''
-$log | Set-Content -LiteralPath $outFile -Encoding UTF8
 Write-Host ''
 Write-Host ("结果已写入: " + $outFile) -ForegroundColor Green
 
