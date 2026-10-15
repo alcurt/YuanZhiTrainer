@@ -13,7 +13,7 @@
 # 退出码：0 = 全绿；1 = 有 BAD 项（报告会写明是哪一项）
 
 param(
-    [string]$ExpectVersion = '0.6.40',
+    [string]$ExpectVersion = '',      # 留空＝自动从 src\common\yz_version.h 读（免得每次升版本都要改这个脚本）
     [string]$OutDir = ''
 )
 
@@ -49,7 +49,15 @@ function ParseErrors([string]$path) {
     return @($e).Count
 }
 
-L ("==== YZTrainer 出发前检查 {0}（期望版本 {1}）====" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $ExpectVersion)
+# 版本期望值：优先用参数，其次从源码读，读不到就跳过版本比较（以 dist 自身为准）。
+if ([string]::IsNullOrEmpty($ExpectVersion)) {
+    $vh = Join-Path $repo 'src\common\yz_version.h'
+    if (Test-Path -LiteralPath $vh -ErrorAction SilentlyContinue) {
+        $m = Select-String -LiteralPath $vh -Pattern 'YZ_VERSION_STR_NARROW\s+"([0-9.]+)"' -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($m) { $ExpectVersion = $m.Matches[0].Groups[1].Value }
+    }
+}
+L ("==== YZTrainer 出发前检查 {0}（期望版本 {1}）====" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $(if ($ExpectVersion) { $ExpectVersion } else { '（未能确定，按 dist 自身为准）' }))
 
 L ''
 L '---- 1. 交付产物 ----'
@@ -66,7 +74,8 @@ foreach ($pl in 'Win32', 'x64') {
     $platDir = Get-PlatformDir $repo $pl
     $ex = Join-Path $platDir 'YZTrainer.exe'
     $it = Get-Item -LiteralPath $ex -ErrorAction SilentlyContinue
-    Check ("$pl YZTrainer.exe") ($it -and $it.VersionInfo.FileVersionRaw -eq ("$ExpectVersion.0")) `
+    $verOk = if ($it -and $ExpectVersion) { $it.VersionInfo.FileVersionRaw -eq ("$ExpectVersion.0") } elseif ($it) { $true } else { $false }
+    Check ("$pl YZTrainer.exe") $verOk `
           ("版本=" + $(if ($it) { $it.VersionInfo.FileVersionRaw } else { '缺失' }) + " " + $(if ($it) { "$($it.Length) 字节" }))
     Check ("$pl YZProbe.exe") (Test-Path -LiteralPath (Join-Path $platDir 'YZProbe.exe') -ErrorAction SilentlyContinue) ''
     $ini = Join-Path $platDir 'YZTrainer.ini'
