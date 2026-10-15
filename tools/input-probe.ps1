@@ -19,7 +19,8 @@ param(
     [string]$TargetProc = '',
     [int]$HoldSeconds = 8,
     [string]$OutDir = '',
-[switch]$NoUi            # 自动化测试用：不弹窗，退回控制台提问
+[switch]$NoUi,           # 自动化测试用：不弹窗，退回控制台提问
+[int]$WatchMinutes = 0   # >0 ⇒ 待锁观察模式：被动采样这么久（锁屏期间不需要任何操作）
 )
 
 $ErrorActionPreference = 'Stop'
@@ -212,6 +213,37 @@ public static class YzInputProbe
         _mhook = IntPtr.Zero;
         return ok;
     }
+    // ---- 交叉判据（v0.6.42 补）：不经过用户态钩子链的第二条通路 ----
+    // 为什么要它：远志在自己进程里装的 WH_KEYBOARD_LL 只要不调 CallNextHookEx 就能把事件吞掉，
+    // 我们**同样收不到** ⇒ 单看"低层钩子 0 次"无法区分"设备层拦截"和"用户态钩子吞掉了"。
+    // 而按键状态（GetAsyncKeyState）与光标位置（GetCursorPos）来自操作系统的另一条路：
+    //   钩子有、状态有  ⇒ 事件确实到了会话（用户态可解）
+    //   钩子无、状态有  ⇒ 消息路径被用户态钩子吞了（同样用户态可解）
+    //   钩子无、状态无  ⇒ 事件根本没到操作系统（设备/驱动层）
+    [DllImport("user32.dll")] public static extern short GetAsyncKeyState(int vKey);
+    [DllImport("user32.dll")] public static extern bool GetCursorPos(out POINT pt);
+    [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X; public int Y; }
+    public static string DownKeys()   // 当前处于按下状态的虚拟键（含鼠标左右键 0x01/0x02），十六进制逗号分隔
+    {
+        StringBuilder sb = new StringBuilder();
+        for (int vk = 1; vk < 256; vk++)
+        {
+            if ((GetAsyncKeyState(vk) & 0x8000) != 0)
+            {
+                if (sb.Length > 0) sb.Append(',');
+                sb.Append(vk.ToString("X2"));
+            }
+        }
+        return sb.ToString();
+    }
+    public static int CursorX = -1, CursorY = -1;
+    public static void SampleCursor() { POINT p; if (GetCursorPos(out p)) { CursorX = p.X; CursorY = p.Y; } }
+    public static bool PumpOnce()     // 非阻塞泵一次（待锁模式要长时间轮询，不能用 PumpFor 卡住）
+    {
+        bool any = false; MSG msg;
+        while (PeekMessage(out msg, IntPtr.Zero, 0, 0, PM_REMOVE)) { TranslateMessage(ref msg); DispatchMessage(ref msg); any = true; }
+        return any;
+    }
     // 泵消息 HoldSeconds 秒（低层钩子必须有消息循环才会被回调）
     [DllImport("user32.dll")] public static extern bool PeekMessage(out MSG msg, IntPtr hWnd, uint min, uint max, uint remove);
     public const uint PM_REMOVE = 0x0001;
@@ -262,6 +294,89 @@ if ($targetHwnd -eq [IntPtr]::Zero) { $targetHwnd = [YzInputProbe]::GetForegroun
 Say ("B 试验的目标窗口: " + [YzInputProbe]::DescribeWindow($targetHwnd))
 Say ''
 
+# ---------------------------------------------------------------- W：待锁观察（可选，提前分支）
+# 为什么要有这个模式（2026-10-15 用户指出）：键鼠被锁住的那一刻，人**没法点弹窗、没法敲命令**，
+# 所以"在被锁的瞬间手动跑探针"这个要求本身是自相矛盾的。正确做法是上课前先挂上，让它被动等锁：
+# 锁屏期间人只要随手按几下物理键、动几下鼠标（物理动作不受锁影响），其余全靠它自己采样。
+if ($WatchMinutes -gt 0) {
+    Say ''
+    Say ("---- W. 待锁观察模式（最长 {0} 分钟；**被锁期间你不需要操作这个界面**）----" -f $WatchMinutes)
+    Say '  现在别关这个窗口。老师一开始锁屏，你就随手：① 敲几下物理键；② 动几下鼠标、点两下。'
+    Say '  到时间（或你按 Ctrl+C）它会把这段时间的判据打成一张表，并问你两个问题。'
+    $whookKb = [YzInputProbe]::InstallKeyboardCounter()
+    $whookMs = [YzInputProbe]::InstallMouseCounter()
+    Say ("  钩子就绪: 键盘={0} 鼠标={1}" -f $whookKb, $whookMs)
+    $wEnd = (Get-Date).AddMinutes($WatchMinutes)
+    $wKb = 0; $wMs = 0; $wLastKeys = ''; $wEvents = @(); $wSamples = 0; $wZero = 0
+    $wAsyncNoHook = 0; $wKeyChanges = 0; $wRefresh = 0; $wHeartbeat = (Get-Date).AddSeconds(30)
+    try {
+        while ((Get-Date) -lt $wEnd) {
+            [void][YzInputProbe]::PumpOnce()
+            $down = [YzInputProbe]::DownKeys()
+            [YzInputProbe]::SampleCursor()
+            $wSamples++
+            if ([YzInputProbe]::CursorX -eq 0 -and [YzInputProbe]::CursorY -eq 0) { $wZero++ }
+            $kb = [YzInputProbe]::KeyEventCount; $ms = [YzInputProbe]::MouseEventCount
+            if ($down -ne $wLastKeys -and $down -ne '') {
+                $wKeyChanges++
+                $llNew = ($kb - $wKb) + ($ms - $wMs)
+                if ($llNew -eq 0) { $wAsyncNoHook++ }
+                $wEvents += ("  t={0} 按键状态变为 [{1}]，期间低层钩子新增事件 {2}，光标={3},{4}" -f (Get-Date -Format 'HH:mm:ss'), $down, $llNew, [YzInputProbe]::CursorX, [YzInputProbe]::CursorY)
+            }
+            if ($kb -ne $wKb -or $ms -ne $wMs) {
+                $wEvents += ("  t={0} 低层钩子新增：键盘 {1}→{2} 鼠标 {3}→{4}（keys=[{5}] 光标={6},{7}）" -f (Get-Date -Format 'HH:mm:ss'), $wKb, $kb, $wMs, $ms, $down, [YzInputProbe]::CursorX, [YzInputProbe]::CursorY)
+            }
+            $wKb = $kb; $wMs = $ms; $wLastKeys = $down
+            if ((Get-Date) -gt $wHeartbeat) {
+                $wHeartbeat = (Get-Date).AddSeconds(30)
+                Say ("  [心跳 {0}] 采样 {1} 次；按键变化 {2} 次（其中钩子全无 {3} 次）；钩子累计 键盘 {4} / 鼠标 {5}；光标停(0,0) {6} 次" -f (Get-Date -Format 'HH:mm:ss'), $wSamples, $wKeyChanges, $wAsyncNoHook, $wKb, $wMs, $wZero)
+            }
+            # 每秒重装一次自己的低层钩子：本机实测"**后装的钩子先被调用**"（顺序是 B 先 A 后），
+            # 所以重装能让我们始终站在钩子链头 ⇒ 远志即使在自己进程里吞事件，我们也先看到它。
+            # 这是本机唯一验证过能穿透"用户态钩子吞事件"的观测法（GetAsyncKeyState 与 Raw Input
+            # 都在钩子链下游，实测都会被一起吞掉）。
+            if ((($wSamples) % 5) -eq 0) {
+                [void][YzInputProbe]::UninstallHook()
+                [void][YzInputProbe]::UninstallMouseHook()
+                [void][YzInputProbe]::InstallKeyboardCounter()
+                [void][YzInputProbe]::InstallMouseCounter()
+                $wRefresh++
+            }
+            Start-Sleep -Milliseconds 200
+        }
+    } finally {
+        [void][YzInputProbe]::UninstallHook()
+        [void][YzInputProbe]::UninstallMouseHook()
+    }
+    Say ''
+    Say '  ---- 待锁观察汇总 ----'
+    Say ("  采样 {0} 次（约 {1} 分钟）；按键状态变化 {2} 次" -f $wSamples, $WatchMinutes, $wKeyChanges)
+    Say ("  （参考，不作判据：GetAsyncKeyState 与低层钩子对不上 {0} 次——本机实测钩子吞事件时它同样为 0，两者都在钩子链下游）" -f $wAsyncNoHook)
+    Say ("  低层钩子累计: 键盘 {0} 次（物理 {1} / 合成 {2}）  鼠标 {3} 次（物理 {4} / 合成 {5}）" -f `
+         [YzInputProbe]::KeyEventCount, [YzInputProbe]::PhysicalCount, [YzInputProbe]::InjectedCount, `
+         [YzInputProbe]::MouseEventCount, [YzInputProbe]::MousePhysicalCount, [YzInputProbe]::MouseInjectedCount)
+    Say ("  光标停在 (0,0) 的比例: {0:P1}" -f $(if ($wSamples -gt 0) { $wZero / $wSamples } else { 0 }))
+    if ($wEvents.Count -gt 0) {
+        Say '  事件时间线（最多 40 条）：'
+        $wEvents | Select-Object -First 40 | ForEach-Object { Say ('  ' + $_) }
+    } else { Say '  这段时间没有任何按键/鼠标活动（可能老师没锁、你也没按）。' }
+    Say ''
+    Say '  现在回答两个问题（此时输入已恢复，弹窗能点了）：'
+    $wLocked  = Ask '刚才这段时间里，键鼠有没有被远志屏蔽过？' '是=有被锁过 / 否=没有被锁'
+    $wPressed = Ask '这段时间里你有没有真的按过键、动过鼠标？' '是=有 / 否=没有'
+    Say ("  人工确认: 期间被锁={0}  期间操作过={1}" -f $(if ($wLocked -eq 'y') { '是' } else { '否' }), $(if ($wPressed -eq 'y') { '是' } else { '否' }))
+    Say ("  钩子重装 {0} 次（每次重装后我们是链头，远志的钩子吞不掉我们能看到的事件）" -f $wRefresh)
+    if ($wLocked -eq 'y' -and $wPressed -eq 'y') {
+        if (([YzInputProbe]::KeyEventCount + [YzInputProbe]::MouseEventCount) -gt 0) {
+            Say '  判读: 被锁期间事件**照样被我们看到了**（我们始终在钩子链头）⇒ 事件确实到了用户态 ⇒ 拦截在用户态（钩子/消息层），拔钩路径有机会解。'
+        } else {
+            Say '  判读: 我们全程站在钩子链头、却**一个事件都没看到** ⇒ 事件没进用户态 ⇒ 强指向设备/驱动层拦截（如实记录，不越界；D 节里的非微软驱动是旁证）。'
+        }
+    } else { Say '  判读: 缺少"确实被锁过 + 确实操作过"这两个前提 ⇒ 这趟不作结论（这正是 2026-10-15 下午那趟的问题）。' }
+    Say ''
+    Write-Host ("结果已写入: " + $outFile) -ForegroundColor Green
+    exit 0
+}
 # ---------------------------------------------------------------- C：先装低层钩子
 Say ("---- C. 低层键盘钩子计数（{0} 秒）----" -f $HoldSeconds)
 # 先记录"测试那一刻的封锁状态"——否则事后无法判断这些数字是"正常输入"还是"被拦时的输入"
@@ -287,7 +402,28 @@ if ($hookOk) {
     Say ("  [自校准] 钩子收到合成事件 {0} 次 ⇒ 钩子{1}" -f $injCal, $(if ($injCal -gt 0) { '工作正常' } else { '**没工作**（下面的结论不可用）' }))
 
     Say ("  请在这 {0} 秒里做两件事：① **用物理键盘随便敲几个键**；② **动一动鼠标并点一两下**…" -f $HoldSeconds)
-    [YzInputProbe]::PumpFor($HoldSeconds)
+    # 采样循环（替代一次性 PumpFor）：一边泵消息让低层钩子回调，一边用 GetAsyncKeyState/GetCursorPos
+    # 走"不经过用户态钩子链"的那条路做交叉判据 —— 只看钩子计数无法区分"设备层拦截"与"用户态钩子吞事件"。
+    $seenKeys = @(); $asyncNoHook = 0; $cursorSamples = 0; $cursorZero = 0
+    $kbBefore = [YzInputProbe]::KeyEventCount; $msBefore = [YzInputProbe]::MouseEventCount
+    $holdEnd = (Get-Date).AddSeconds($HoldSeconds); $lastDown = ''
+    # 采样前重装一次钩子：本机实测"后装的先被调用" ⇒ 重装后我们站在链头，
+    # 远志的钩子（即使会吞事件）也吞不掉我们能看到的那一份。
+    [void][YzInputProbe]::UninstallHook(); [void][YzInputProbe]::UninstallMouseHook()
+    [void][YzInputProbe]::InstallKeyboardCounter(); [void][YzInputProbe]::InstallMouseCounter()
+    while ((Get-Date) -lt $holdEnd) {
+        [void][YzInputProbe]::PumpOnce()
+        $down = [YzInputProbe]::DownKeys()
+        [YzInputProbe]::SampleCursor()
+        $cursorSamples++
+        if ([YzInputProbe]::CursorX -eq 0 -and [YzInputProbe]::CursorY -eq 0) { $cursorZero++ }
+        if ($down -ne '' -and $down -ne $lastDown) {
+            $seenKeys += $down
+            if ((([YzInputProbe]::KeyEventCount - $kbBefore) + ([YzInputProbe]::MouseEventCount - $msBefore)) -eq 0) { $asyncNoHook++ }
+        }
+        $lastDown = $down
+        Start-Sleep -Milliseconds 50
+    }
     $cnt     = [YzInputProbe]::KeyEventCount
     $physCnt = [YzInputProbe]::PhysicalCount
     $mcnt     = [YzInputProbe]::MouseEventCount
@@ -296,6 +432,9 @@ if ($hookOk) {
     [void][YzInputProbe]::UninstallMouseHook()
     Say ("  键盘低层钩子收到: 总计 {0} 次（合成 {1} / 物理 {2}）" -f $cnt, [YzInputProbe]::InjectedCount, $physCnt)
     Say ("  鼠标低层钩子收到: 总计 {0} 次（合成 {1} / 物理 {2}）" -f $mcnt, [YzInputProbe]::MouseInjectedCount, $mphysCnt)
+    Say ("  参考（不作判据）: GetAsyncKeyState 采到 {0} 次按键状态变化；它与低层钩子对不上 {1} 次" -f $seenKeys.Count, $asyncNoHook)
+    Say '    —— 本机实测：钩子把事件吞掉时 GetAsyncKeyState 同样收不到（两者都在钩子链下游），所以判据是"我们已站上链头却什么都没看到"。'
+    Say ("  光标采样 {0} 次，其中停在 (0,0) 的 {1} 次" -f $cursorSamples, $cursorZero)
     # 关键的人工确认：没按键时的 0 次**不能**当作"被驱动拦了"——否则会得出错误结论。
     $answerC = Ask '刚才那几秒你确实用物理键盘按了键吗？' '是=按了 / 否=没按'
     Say ("  人工确认（键盘）: " + $answerC)
@@ -305,13 +444,19 @@ if ($hookOk) {
         Say '  判读: 键盘自校准没通过 ⇒ 键盘部分无结论（别据此判断驱动拦截）'
     } else {
         if ($answerC -eq 'y') {
-            if ($physCnt -eq 0) { Say '  键盘判读: 按了物理键、钩子也正常，却**一个物理按键都没收到** ⇒ 拦截在会话之前的设备/驱动层。' }
-            else                { Say ('  键盘判读: 物理按键**仍然会派发**到会话（{0} 次）⇒ 拦截在用户态（钩子/消息层），我们的拔钩路径有机会解。' -f $physCnt) }
+            if ($physCnt -gt 0) {
+                Say ('  键盘判读: 物理按键**确实到了会话**（低层钩子收到 {0} 次）⇒ 若当时被锁，拦截在用户态，拔钩/消息层有机会解。' -f $physCnt)
+            } else {
+                Say ('  键盘判读: 采样前我们已重装钩子站上链头，却**一个事件都没看到**（GetAsyncKeyState 另采到 {0} 次状态变化，但本机实测它在钩子吞事件时同样为 0，不作判据）⇒ 强指向设备/驱动层拦截。' -f $seenKeys.Count)
+            }
         } else { Say '  键盘判读: 没确认按过物理键 ⇒ 键盘这一项无结论。' }
         if ($injCalM -eq 0) { Say '  鼠标判读: 鼠标自校准没通过 ⇒ 鼠标部分无结论。' }
         elseif ($answerM -eq 'y') {
-            if ($mphysCnt -eq 0) { Say '  鼠标判读: 动了鼠标、钩子也正常，却**一个物理鼠标事件都没收到** ⇒ 拦截在会话之前的设备/驱动层。' }
-            else                 { Say ('  鼠标判读: 物理鼠标事件**仍然会派发**到会话（{0} 次）⇒ 拦截在用户态（钩子/消息层）。' -f $mphysCnt) }
+            if ($mphysCnt -gt 0) {
+                Say ('  鼠标判读: 物理鼠标事件**确实到了会话**（{0} 次）⇒ 若当时被锁，拦截在用户态。' -f $mphysCnt)
+            } elseif ($cursorSamples -gt 0) {
+                Say ('  鼠标判读: 我们已在钩子链头却没收到鼠标事件；光标位置仍可读（采 {0} 次、其中停在 (0,0) 的 {1} 次）——光标被反复拽回 (0,0) 本身就是"有人在管光标"的证据，把它连同 D 节驱动清单一起记下来。' -f $cursorSamples, $cursorZero)
+            } else { Say '  鼠标判读: 无可用读数 ⇒ 鼠标这一项无结论。' }
         } else { Say '  鼠标判读: 没确认动过鼠标 ⇒ 鼠标这一项无结论。' }
         Say '  （键盘与鼠标必须分开看：2026-10-15 现场键盘类 UpperFilters 里有第三方 kafe，鼠标类只有微软的 mouclass。）'
     }
