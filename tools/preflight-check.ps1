@@ -95,7 +95,7 @@ foreach ($pl in 'Win32', 'x64') {
         if ($v -band 32) { $parts += '假全屏' }
         $meaning = if ($parts.Count -gt 0) { '（' + ($parts -join '+') + '）' } else { '（无功能位）' }
     }
-    Check ("$pl ini") ($fv -ne '') ("Flags=$fv $meaning" + $(if ($fv -eq '5') { ' 出厂值' } elseif ($fv -eq '45') { ' 现场模板' } else { '' }))
+    Check ("$pl ini") ($fv -ne '') ("Flags=$fv $meaning" + $(if ($fv -eq '5') { ' 出厂值' } elseif ($fv -eq '45') { ' 现场模板' } else { ' ——注意：既不是出厂 5 也不是现场模板 45，多半被跑过的程序/回归改写过，拷 U 盘前先重建恢复' }))
 }
 
 L ''
@@ -151,7 +151,10 @@ foreach ($pl in 'Win32', 'x64') {
     $enc1 = [System.Text.Encoding]::GetEncoding(28591)
     $exeS = $enc1.GetString([System.IO.File]::ReadAllBytes($exe))
     $dllS = $enc1.GetString([System.IO.File]::ReadAllBytes($dll))
-    $found = $exeS.IndexOf($dllS) -ge 0
+    # 必须用 Ordinal：默认的 IndexOf 是"区分区域性"比较，会忽略 U+0000 这类码点，
+    # 在 pwsh7 下对 230 KB 的 DLL 会假阴性（2026-10-15 实测：默认=False、Ordinal=True），
+    # 而 5.1 下默认恰好为 True ⇒ 同一份产物两种宿主给出不同结论。
+    $found = $exeS.IndexOf($dllS, [System.StringComparison]::Ordinal) -ge 0
     Check ("$pl 载荷新鲜度（exe 完整含当前 DLL）") $found $(if ($found) { "DLL $([Math]::Round((Get-Item $dll).Length/1KB)) KB 已原样嵌入" } else { 'exe 里找不到当前 DLL ⇒ 嵌的是**旧载荷**！重跑 build.ps1 并复查' })
 }
 L '---- 2. 内嵌钩子载荷是否为当前源码（v0.6.35 踩过旧载荷）----'
