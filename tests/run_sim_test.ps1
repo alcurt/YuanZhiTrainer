@@ -440,7 +440,11 @@ function Get-LogLength([string]$Path) {
     $snap = @()
     foreach ($f in (Get-RelatedLogPaths $Path)) {
         $len = -1
-        if (Test-Path -LiteralPath $f) { $len = (Get-Item -LiteralPath $f).Length }
+        # v0.6.47（测试侧）：某个来源日志读不到（典型：SYSTEM 的 C:\Windows\Temp\YZTrainer 对非管理员拒绝访问）
+        # 不该让整轮测试崩在一个 Test-Path 上——取不到就记 -1，Read-LogTail 会把它当空。
+        try {
+            if (Test-Path -LiteralPath $f -ErrorAction Stop) { $len = (Get-Item -LiteralPath $f -ErrorAction Stop).Length }
+        } catch { $len = -1 }
         $snap += ("{0}={1}" -f $f, $len)
     }
     return ($snap -join ';')
@@ -457,8 +461,11 @@ function Read-LogTail([string]$Path, [string]$Mark) {
     }
     $out = New-Object System.Text.StringBuilder
     foreach ($f in (Get-RelatedLogPaths $Path)) {
-        if (-not (Test-Path -LiteralPath $f)) { continue }
-        $len = (Get-Item -LiteralPath $f).Length
+        # v0.6.47（测试侧）：同上——单个来源不可读（拒绝访问）时跳过它，不要整轮中止。
+        try {
+            if (-not (Test-Path -LiteralPath $f -ErrorAction Stop)) { continue }
+            $len = (Get-Item -LiteralPath $f -ErrorAction Stop).Length
+        } catch { continue }
         $from = 0
         if ($marks.ContainsKey($f) -and $marks[$f] -ge 0 -and $marks[$f] -le $len) { $from = $marks[$f] }
         if ($len -le $from) { continue }
