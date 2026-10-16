@@ -67,7 +67,7 @@ static void BlockedStatsTick()
     const LONG kb = InterlockedExchange(&g_yzBlockedKeybdEvent, 0);
     if (sc == 0 && me == 0 && si == 0 && kb == 0)
         return;
-    YZLOGW(L"[输入拦截] 本进程 1 秒内丢弃: SetCursorPos %ld 次（最后一次 %ld,%ld）  mouse_event %ld 次  SendInput(鼠标) %ld 次  keybd_event %ld 次",
+    YZLOGW(L"[输入拦截] 本进程最近 10 秒内丢弃: SetCursorPos %ld 次（最后一次 %ld,%ld）  mouse_event %ld 次  SendInput(鼠标) %ld 次  keybd_event %ld 次",
            sc, (LONG)g_yzBlockedLastX, (LONG)g_yzBlockedLastY, me, si, kb);
 }
 volatile LONG g_blockedHotkeyCount = 0;
