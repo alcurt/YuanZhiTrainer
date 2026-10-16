@@ -52,9 +52,12 @@ static volatile LONG64 g_yzBlockedTraceTick = 0;
 
 static void BlockedStatsTick()
 {
+    /* 节流 10 秒（不是 [输入取证] 那样的 1 秒）：本条是 WRN 级的“状态指示”，锁键鼠期间每秒一条会在
+       一小时里灌进约 3600 行（~600 KB），把 2 MB 上限的日志加速轮转、挤掉别的现场证据。
+       10 秒一条既能证明“拦截在跑”，一小时也只多 ~100 KB。 */
     const ULONGLONG now = GetTickCount64();
     const LONG64 last = InterlockedCompareExchange64(&g_yzBlockedTraceTick, 0, 0);
-    if (now - (ULONGLONG)last < 1000)
+    if (now - (ULONGLONG)last < 10000)
         return;
     if (InterlockedCompareExchange64(&g_yzBlockedTraceTick, (LONG64)now, last) != last)
         return;
