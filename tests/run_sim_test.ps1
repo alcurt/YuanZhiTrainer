@@ -172,7 +172,7 @@
     阶段二十五（抓屏子进程识别 + 按 PID 注入 + 多客户端连上，v0.6.32/v0.6.38）断言 3 条：
 阶段二十六（输入取证：周期性拽光标，v0.6.43）断言 2 条：用 YZSimTarget --yank 复现"鼠标能动几百毫秒就被拽回左上角"，断言学生端进程内的 SetCursorPos 调用被 [输入取证] 记录下来（有这行 ⇒ 拽光标是它自己干的 ⇒ 用户态可解）。
 阶段二十七（宿主闸门认下抓屏子进程，v0.6.45）断言 4 条（含 1 条负向）：
-阶段二十八（拦截"丢弃"可见，v0.6.46）断言 2 条：Flags=17（窗口化|0x10）打开拦截 + 模拟目标 --yank 持续触发 ⇒ 日志必须出现 `[输入拦截] … 丢弃: SetCursorPos N 次` 且 N>0（此前只计数不打印，现场只能靠"光标仍被拽"倒推开关没开）。把替身放到**不含 GZYZ/YZinfo 字样**的路径、名字也不叫 YZSimTarget.exe，只在命令行里带上 `"ExdDtDup.dll",RunCapture` 痕迹并加载一个叫 ExdDtDup.dll 的模块 ⇒ 必须被识别、注入、且进程内钩子真的装上（旧判据会在这里失败，这正是 2026-10-16 机房"冻结没生效"的根因）。
+阶段二十八（拦截"丢弃"可见，v0.6.46）断言 3 条：Flags=17（窗口化|0x10）打开拦截 + 模拟目标 --yank 持续触发 ⇒ 日志必须出现 `[输入拦截] … 丢弃: SetCursorPos N 次` 且 N>0（此前只计数不打印，现场只能靠"光标仍被拽"倒推开关没开）。把替身放到**不含 GZYZ/YZinfo 字样**的路径、名字也不叫 YZSimTarget.exe，只在命令行里带上 `"ExdDtDup.dll",RunCapture` 痕迹并加载一个叫 ExdDtDup.dll 的模块 ⇒ 必须被识别、注入、且进程内钩子真的装上（旧判据会在这里失败，这正是 2026-10-16 机房"冻结没生效"的根因）。
      58. 主程序认出厂商拉起的抓屏子进程（机房实测：教师监视/缩略图时**学生端自己**拉起
          `rundll32.exe "<...>\KsFiles\ExdDtDup.dll",RunCapture 0`，DXGI 桌面复制在子进程里）
      59. 主程序按 PID 注入并给出结论（"已注入"或"注入失败+原因"）——现场要判的第一件事就是
@@ -2688,8 +2688,14 @@ try {
     for ($i = 0; $i -lt 40; $i++) {
         Start-Sleep -Milliseconds 800
         $seg28 = Read-LogTail $appLog $mark28
-        $m28 = [regex]::Match($seg28, '\[输入拦截\][^\r\n]*丢弃[^\r\n]*SetCursorPos\s+(\d+)\s+次')
-        if ($m28.Success) { $blockedLine = $m28.Value.Trim(); $blockedCount = [int]$m28.Groups[1].Value; break }
+        # 现场客户端是 SetCursorPos 与 mouse_event 并用（机房日志两者都是每秒 10 次），所以两个计数都要抓
+        $m28 = [regex]::Match($seg28, '\[输入拦截\][^\r\n]*丢弃[^\r\n]*SetCursorPos\s+(\d+)\s+次[^\r\n]*mouse_event\s+(\d+)\s+次')
+        if ($m28.Success) {
+            $blockedLine  = $m28.Value.Trim()
+            $blockedCount = [int]$m28.Groups[1].Value
+            $blockedMouse = [int]$m28.Groups[2].Value
+            if ($blockedMouse -gt 0) { break }
+        }
     }
 }
 finally {
@@ -2706,9 +2712,14 @@ if ($blockedLine) {
     $result.Add('FAIL  开了 0x10 也没有 [输入拦截] 行 ⇒ 现场仍无法确认拦截是否生效')
 }
 if ($blockedCount -gt 0) {
-    $result.Add(('PASS  丢弃计数非零（{0} 次/秒）⇒ 与 [输入取证] 的调用计数可对照' -f $blockedCount))
+    $result.Add(('PASS  SetCursorPos 丢弃计数非零（{0} 次/秒）⇒ 与 [输入取证] 的调用计数可对照' -f $blockedCount))
 } else {
     $result.Add('FAIL  丢弃计数为 0（拦截没真的丢，或统计没接上）')
+}
+if ($blockedMouse -gt 0) {
+    $result.Add(('PASS  mouse_event 丢弃也被统计到（{0} 次/秒）⇒ 现场"两个 API 并用"的情形可判' -f $blockedMouse))
+} else {
+    $result.Add('FAIL  mouse_event 丢弃没被统计到（现场客户端正是 SetCursorPos + mouse_event 并用）')
 }
 if ($script:stageName -ne '(开始)') { Write-Host ('  [计时] {0} 用时 {1} 秒' -f $script:stageName, [Math]::Round(((Get-Date) - $script:stageStart).TotalSeconds,1)) }
 $script:sw.Stop()

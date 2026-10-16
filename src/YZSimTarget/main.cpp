@@ -489,8 +489,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         else if (wParam == 10)
         {
             /* --yank：一次"移开"、一次"拽回"，交替进行 ⇒ 制造被测的那段"自由窗口" */
-            if (g_yankAway) { SetCursorPos(400, 300); g_yankAway = false; }
-            else            { SetCursorPos(0, 0);     g_yankAway = true; }
+            /* v0.6.46：现场客户端是 SetCursorPos 与 mouse_event **并用**（机房日志里两者都是每秒 10 次），
+               所以这里两个 API 都发，才能把 [输入取证]/[输入拦截] 里 mouse_event 那一路也覆盖到。 */
+            if (g_yankAway) { SetCursorPos(400, 300); mouse_event(MOUSEEVENTF_MOVE, 1, 0, 0, 0); g_yankAway = false; }
+            else            { SetCursorPos(0, 0);     mouse_event(MOUSEEVENTF_MOVE, 0, 1, 0, 0); g_yankAway = true; }
         }
         else if (wParam == 5)
         {
