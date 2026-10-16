@@ -68,6 +68,21 @@ function Copy-Into([string]$src, [string]$sub, [string]$asName = '') {
     New-Item -ItemType Directory -Path $target -Force | Out-Null
     # $asName 非空时改用它作为目标文件名（用于同名文件加来源前缀，避免互相覆盖）
     $dst = if ($asName) { Join-Path $target $asName } else { $target }
+    # v0.6.47（工具）：按内容哈希去重。同一份产物（探针报告、快照等）常常同时躺在 <U 盘根>、
+    #   <平台子目录> 与 diag-* 诊断包里，逐一收进来会让包膨胀、清单也显得“有很多份”。
+    #   只跳过逐字节相同的文件；目录不参与。被跳过的条数在清单末尾汇总。
+    if ($null -eq $script:seenHashes) { $script:seenHashes = @{}; $script:dupSkipped = 0 }
+    if (-not (Get-Item -LiteralPath $src).PSIsContainer) {
+        $h = (Get-FileHash -LiteralPath $src -Algorithm SHA256 -ErrorAction SilentlyContinue).Hash
+        if ($h) {
+            if ($script:seenHashes.ContainsKey($h)) {
+                $script:dupSkipped++
+                M ("  = 跳过重复内容: {0}（与已收的 {1} 逐字节相同）" -f $src, $script:seenHashes[$h])
+                return
+            }
+            $script:seenHashes[$h] = $src
+        }
+    }
     try {
         Copy-Item -LiteralPath $src -Destination $dst -Recurse -Force -ErrorAction Stop
         $script:copied++
@@ -128,6 +143,7 @@ foreach ($f in (Get-ChildItem -LiteralPath $dest -Recurse -Filter 'yzt*.log' -Fi
 
 M ''
 M ("共复制 {0} 项 ⇒ {1}" -f $copied, $dest)
+M ("（另有 {0} 项因内容逐字节相同被跳过——同一份产物在多个来源目录里各有一份，清单里不再重复列）" -f $script:dupSkipped)
 $manifest | Set-Content -LiteralPath (Join-Path $dest 'manifest.txt') -Encoding UTF8
 
 if (-not $NoZip) {
