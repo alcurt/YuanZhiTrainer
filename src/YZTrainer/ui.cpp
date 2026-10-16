@@ -139,6 +139,14 @@ void AppendLogLine(int level, const std::wstring& text)
 
     std::wstring line = yz::Format(L"%s %s\r\n", tag, text.c_str());
     int len = GetWindowTextLengthW(g_logEdit);
+    /* v0.6.47：抬掉上限之后不能让控件无限长（一节课下来几十 MB 会拖慢重绘）。
+       超过 20 万字符就把最前面的一段删掉、只留最近的——现场要看的内容都在尾部。 */
+    if (len > 200000)
+    {
+        SendMessageW(g_logEdit, EM_SETSEL, 0, len - 200000);
+        SendMessageW(g_logEdit, EM_REPLACESEL, FALSE, reinterpret_cast<LPARAM>(L""));
+        len = GetWindowTextLengthW(g_logEdit);
+    }
     SendMessageW(g_logEdit, EM_SETSEL, len, len);
     SendMessageW(g_logEdit, EM_REPLACESEL, FALSE, reinterpret_cast<LPARAM>(line.c_str()));
 }
@@ -483,6 +491,16 @@ void CreateChildren(HWND hwnd, HINSTANCE hinst)
                                     ES_AUTOVSCROLL | ES_READONLY,
                                 Dp(12), y, Dp(520), Dp(180), hwnd,
                                 reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_EDIT_LOG)), hinst, nullptr);
+
+    /* v0.6.47：显式抬掉日志控件的文本上限（本机 A/B 实测的结论，别删）。
+       现象：2026-10-16 机房那台主程序**界面**日志停在 08:50:22，而日志文件一路写到 10:14。
+       实测（2026-10-17 本机，noelev 构建 + 模拟目标每秒 10 次 SetCursorPos 制造刷屏）：
+       · 修复前：控件文本**精确停在 30000 字符**（再 EM_REPLACESEL 就静默无效）；
+       · 加下面这一行后：同样条件涨到 50880 字符并继续。
+       注意两个坑：① `AppendLogLine` 自己**没有**任何裁剪逻辑（所以只能是控件上限）；
+       ② `EM_GETLIMITTEXT` 在这里读出 0，看着像"无上限"——**别信那个读数**，要用实验判断。
+       控件是 ES_MULTILINE，所以这不是"单行默认 30000"那条规则能解释的，但实测如此。 */
+    SendMessageW(g_logEdit, EM_SETLIMITTEXT, static_cast<WPARAM>(0x7FFFFFFE), 0);
     SendMessageW(g_logEdit, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
 
     SyncControls();
