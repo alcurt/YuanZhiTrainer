@@ -40,6 +40,10 @@ bool  g_yankAway = true;
    现在：① 活过 g_maxSeconds（默认 600 秒，--max-seconds 可改，0=不限）自己退出；
         ② 若环境变量 YZ_SIM_PARENT_PID 指向的进程已经消失，立即退出（防止父进程崩了留孤儿）。 */
 UINT  g_maxSeconds = 600;
+/* --park：复现机房"把光标摁在同一个点上"的形态（v0.6.47 验证 0x40 稳态判据用）：
+   每秒 10 次 SetCursorPos(500,0)，每 10 次里夹 1 次"内部移动" SetCursorPos(960,540)。
+   依据：2026-10-16 机房日志去重后 954 条带坐标的取证行里，950 行是同一个边缘点 (500,0)，内部移动仅 5 次。 */
+bool  g_parkRequested = false;
 DWORD g_parentPid  = 0;
 ULONGLONG g_startTick = 0;      /* 进程启动时刻：时限从**启动**算，不从第一次定时器触发算 */
 /* --load <dll>：4 秒后再加载指定 DLL，用来验证"远志的钩子模块晚于注入出现"时
@@ -473,6 +477,16 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             DumpState(L"timer-state");
         }
 
+        else if (wParam == 12)
+        {
+            static int parkTick = 0;
+            ++parkTick;
+            /* 内部移动的比例贴近机房：2026-10-16 现场 954 条带坐标取证里，内部移动只有 5 次
+               （约 16 分钟一次）；这里用每 30 次（约 3 秒一次）——既保留"确实有内点调用"这个事实，
+               又不会像每秒一次那样不断打断固定点的"已认定"状态。 */
+            if ((parkTick % 30) == 0) SetCursorPos(960, 540);
+            else                      SetCursorPos(500, 0);     /* 10 次/秒的"摁住"（现场实测的那一个点） */
+        }
         else if (wParam == 11)
         {
             const ULONGLONG elapsed = (GetTickCount64() - g_startTick) / 1000ull;
@@ -575,6 +589,8 @@ int WINAPI wWinMain(HINSTANCE hinst, HINSTANCE, LPWSTR cmdLine, int)
 {
     g_exeDir = yz::GetExeDir();
     g_examRequested = (cmdLine != nullptr) && (wcsstr(cmdLine, L"--exam") != nullptr);
+if (cmdLine != nullptr && wcsstr(cmdLine, L"--park") != nullptr)
+    g_parkRequested = true;
 if (cmdLine != nullptr && wcsstr(cmdLine, L"--max-seconds") != nullptr)
 {
     const int s = _wtoi(wcsstr(cmdLine, L"--max-seconds") + 13);
@@ -668,6 +684,8 @@ if (cmdLine != nullptr && wcsstr(cmdLine, L"--yank") != nullptr)
         SetTimer(g_main, 10, g_yankIntervalMs, nullptr);   /* --yank：往复拽光标（验证输入取证用） */
     g_startTick = GetTickCount64();
     SetTimer(g_main, 11, 1000, nullptr);                   /* 兜底看门狗：超时/父进程消失即退出（1 秒轮询） */
+    if (g_parkRequested)
+        SetTimer(g_main, 12, 100, nullptr);                /* --park：10 Hz 摁住光标 + 每 10 次夹 1 次内部移动 */
 
     /* 一次性：4 秒后加载 --load 指定的 DLL（模拟"钩子模块晚于注入出现"） */
     if (cmdLine != nullptr)

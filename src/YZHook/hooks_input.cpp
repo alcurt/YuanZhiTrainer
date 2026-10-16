@@ -49,6 +49,63 @@ static volatile LONG   g_yzBlockedKeybdEvent = 0;
 static volatile LONG   g_yzBlockedLastX = 0;
 static volatile LONG   g_yzBlockedLastY = 0;
 static volatile LONG64 g_yzBlockedTraceTick = 0;
+/* v0.6.47：**归位类**（parking）判定 —— 只拦截"把光标摁在同一个点上反复调用"。
+   依据（2026-10-16 机房日志，去重后 954 条带坐标的取证行）：950 行落在**同一个**边缘点 (500,0)、
+   每秒 10~14 次；真正的"内部移动"只有 5 次（1~2 次/秒）⇒ 以"同一目标点 1 秒内 ≥5 次"为线即可分开。
+   好处：不依赖"必须落在屏幕边缘"这个经验假设（厂商换固定点也照样命中），
+        也**不会**动到 0x10 的语义（0x10 仍是"全部丢弃"）；本判据只在 0x40 打开时生效。 */
+static volatile LONG   g_yzBlockedParking = 0;
+static volatile LONG64 g_yzParkWindowStart = 0;
+static volatile LONG   g_yzParkLastX = 0;
+static volatile LONG   g_yzParkLastY = 0;
+static volatile LONG   g_yzParkCount = 0;
+/* 已经**认定**过的"被摁住的点"：在有效期内（默认 5 秒）该点再来就直接丢。
+   为什么需要它：光靠"1 秒窗口内 ≥5 次"这条线，每个窗口的**头 4 次**仍会放行
+   （本机实测：10 次/秒 ⇒ 每秒只丢 5~6 次），光标每秒还是会被拽动几次。
+   记下这个点之后，第二秒起就是 100% 抑制；点变了或有效期过了就重新学习。 */
+static volatile LONG   g_yzParkKnownX = 0;
+static volatile LONG   g_yzParkKnownY = 0;
+static volatile LONG64 g_yzParkKnownUntil = 0;
+#define YZ_PARK_KNOWN_TTL_MS 5000
+
+static bool IsParkingCall(int x, int y)
+{
+    const ULONGLONG now = GetTickCount64();
+    const ULONGLONG knownUntil = (ULONGLONG)InterlockedCompareExchange64(&g_yzParkKnownUntil, 0, 0);
+    if (knownUntil > now &&
+        InterlockedCompareExchange(&g_yzParkKnownX, 0, 0) == (LONG)x &&
+        InterlockedCompareExchange(&g_yzParkKnownY, 0, 0) == (LONG)y)
+    {
+        /* 命中即续期（滑动 TTL）：只要这个点还在被反复摁，就一直丢；
+           否则 TTL 一到期就要重新"学习"一遍，每轮又漏掉窗口头几次（本机实测 5 秒 TTL 下漏了约 26%）。 */
+        InterlockedExchange64(&g_yzParkKnownUntil, (LONG64)(now + YZ_PARK_KNOWN_TTL_MS));
+        return true;
+    }
+    const ULONGLONG start = (ULONGLONG)InterlockedCompareExchange64(&g_yzParkWindowStart, 0, 0);
+    const LONG lastX = InterlockedCompareExchange(&g_yzParkLastX, 0, 0);
+    const LONG lastY = InterlockedCompareExchange(&g_yzParkLastY, 0, 0);
+    if (start == 0 || (now - start) > 1000 || lastX != (LONG)x || lastY != (LONG)y)
+    {
+        InterlockedExchange64(&g_yzParkWindowStart, (LONG64)now);   /* 换点或过窗 ⇒ 重新开窗 */
+        InterlockedExchange(&g_yzParkLastX, (LONG)x);
+        InterlockedExchange(&g_yzParkLastY, (LONG)y);
+        InterlockedExchange(&g_yzParkCount, 1);
+        return false;
+    }
+    const LONG n = InterlockedIncrement(&g_yzParkCount);
+    /* 学习门槛用 8（不是 5）：现场"摁住"是 10~14 次/秒 ⇒ 第一秒内必然过线；
+       而每秒才 1~2 次的"内部移动"永远够不到 8。用 5 会出事——本机实测：
+       内部移动的间隔正好 1000ms，计时漂移积累后它也能攒够 5 次，把单槽的"认定点"顶掉
+       （认定点被内部点覆盖 ⇒ 固定点丢失已认定状态 ⇒ 每秒重新学习，白白放行 ~20%）。 */
+    if (n >= 8 && (now - start) <= 1200)
+    {
+        InterlockedExchange(&g_yzParkKnownX, (LONG)x);               /* 记下这个点，后续窗口全丢 */
+        InterlockedExchange(&g_yzParkKnownY, (LONG)y);
+        InterlockedExchange64(&g_yzParkKnownUntil, (LONG64)(now + YZ_PARK_KNOWN_TTL_MS));
+        return true;                                                /* 1 秒窗口内第 5 次起 ⇒ 视为摁住 */
+    }
+    return false;
+}
 
 static void BlockedStatsTick()
 {
@@ -65,10 +122,11 @@ static void BlockedStatsTick()
     const LONG me = InterlockedExchange(&g_yzBlockedMouseEvent, 0);
     const LONG si = InterlockedExchange(&g_yzBlockedSendInput, 0);
     const LONG kb = InterlockedExchange(&g_yzBlockedKeybdEvent, 0);
-    if (sc == 0 && me == 0 && si == 0 && kb == 0)
+    const LONG pk = InterlockedExchange(&g_yzBlockedParking, 0);
+    if (sc == 0 && me == 0 && si == 0 && kb == 0 && pk == 0)
         return;
-    YZLOGW(L"[输入拦截] 本进程最近 10 秒内丢弃: SetCursorPos %ld 次（最后一次 %ld,%ld）  mouse_event %ld 次  SendInput(鼠标) %ld 次  keybd_event %ld 次",
-           sc, (LONG)g_yzBlockedLastX, (LONG)g_yzBlockedLastY, me, si, kb);
+    YZLOGW(L"[输入拦截] 本进程最近 10 秒内丢弃: SetCursorPos %ld 次（最后一次 %ld,%ld）  mouse_event %ld 次  SendInput(鼠标) %ld 次  keybd_event %ld 次（其中归位类 %ld 次，v0.6.47）",
+           sc, (LONG)g_yzBlockedLastX, (LONG)g_yzBlockedLastY, me, si, kb, pk);
 }
 volatile LONG g_blockedHotkeyCount = 0;
 volatile LONG g_blockedHookLogged = 0;
@@ -515,10 +573,15 @@ BOOL WINAPI Hook_SetCursorPos(int x, int y)
     InterlockedExchange(&g_yzCursorPosLastY, (LONG)y);
 
     BOOL result = FALSE;
-    if (yzhook::g_flags & YZ_FLAG_BLOCK_REMOTE)
+    const bool wantAll = (yzhook::g_flags & YZ_FLAG_BLOCK_REMOTE) != 0;
+    /* 0x40（v0.6.47）：只丢"同一目标点 1 秒内重复 ≥5 次"的调用；0x10 优先级更高（全丢），两者互不干扰。 */
+    const bool wantParking = (!wantAll) && ((yzhook::g_flags & YZ_FLAG_BLOCK_PARKING) != 0) && IsParkingCall(x, y);
+    if (wantAll || wantParking)
     {
         InterlockedIncrement(&g_blockedRemoteCount);
         InterlockedIncrement(&g_yzBlockedCursorPos);
+        if (wantParking)
+            InterlockedIncrement(&g_yzBlockedParking);
         InterlockedExchange(&g_yzBlockedLastX, (LONG)x);
         InterlockedExchange(&g_yzBlockedLastY, (LONG)y);
         result = TRUE;

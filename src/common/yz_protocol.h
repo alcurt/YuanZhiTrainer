@@ -53,6 +53,7 @@ static_assert(SameString(YZ_VERSION_STR_DERIVED_NARROW, YZ_VERSION_STR_NARROW),
 #define YZ_FLAG_ANTI_MONITOR 0x00000008u  /* 冻结教师端看到的画面 */
 #define YZ_FLAG_BLOCK_REMOTE 0x00000010u  /* 拦截教师端遥控输入 */
 #define YZ_FLAG_FAKE_FULLSCREEN 0x00000020u /* 假全屏：保持全屏外观，只取消置顶（优先于 WINDOWIZE） */
+#define YZ_FLAG_BLOCK_PARKING 0x00000040u /* v0.6.47：只拦截“把光标摁在同一个点上反复调用”（稳态判据，见 hooks_input.cpp） */
 
 /* 控制位：不属于"功能开关"，不参与 g_flags 上报，只影响引擎行为 */
 #define YZ_CFG_EXAM_GUARD    0x00010000u  /* 1=启用考试模式强信号熔断，0=完全跳过检测 */

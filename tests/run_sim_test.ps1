@@ -1,4 +1,4 @@
-<#
+﻿<#
     YZTrainer 本地回归测试（不需要机房）：
     用 YZSimTarget 模拟远志学生端的全屏广播、键鼠封锁与定期抢回全屏的行为。
 
@@ -169,10 +169,12 @@
          探针产物也从"只认 report"放宽到 `YZProbe-*.*`，`--watch` 留下的
          `YZProbe-watch-<时间戳>.log` 现在也进包（前提是探针用 `-o` 指向该目录）
 
-    阶段二十五（抓屏子进程识别 + 按 PID 注入 + 多客户端连上，v0.6.32/v0.6.38）断言 3 条：
+    阶段二十五（抓屏子进程识别 + 按 PID 注入 + 多客户端连上，v0.6.32/v0.6.38）断言 3 条：
+
 阶段二十六（输入取证：周期性拽光标，v0.6.43）断言 2 条：用 YZSimTarget --yank 复现"鼠标能动几百毫秒就被拽回左上角"，断言学生端进程内的 SetCursorPos 调用被 [输入取证] 记录下来（有这行 ⇒ 拽光标是它自己干的 ⇒ 用户态可解）。
 阶段二十七（宿主闸门认下抓屏子进程，v0.6.45）断言 4 条（含 1 条负向）：
-阶段二十八（拦截"丢弃"可见，v0.6.46）断言 3 条：Flags=17（窗口化|0x10）打开拦截 + 模拟目标 --yank 持续触发 ⇒ 日志必须出现 `[输入拦截] … 丢弃: SetCursorPos N 次` 且 N>0（此前只计数不打印，现场只能靠"光标仍被拽"倒推开关没开）。把替身放到**不含 GZYZ/YZinfo 字样**的路径、名字也不叫 YZSimTarget.exe，只在命令行里带上 `"ExdDtDup.dll",RunCapture` 痕迹并加载一个叫 ExdDtDup.dll 的模块 ⇒ 必须被识别、注入、且进程内钩子真的装上（旧判据会在这里失败，这正是 2026-10-16 机房"冻结没生效"的根因）。
+阶段二十八（拦截"丢弃"可见，v0.6.46）断言 3 条：
+阶段二十九（0x40 只拦"归位类"调用 + 本轮不许强杀，v0.6.47）断言 4 条：Flags=65（窗口化|0x40）+ 模拟目标 --park（10Hz 固定点、每 3 秒 1 次内部移动）⇒ 必须出现"归位类 N 次"且 N>0、且丢弃数小于同期调用数（证明内点放行）；另断言本轮回归"改强杀"次数为 0（强杀会让托盘死图标残留）。Flags=17（窗口化|0x10）打开拦截 + 模拟目标 --yank 持续触发 ⇒ 日志必须出现 `[输入拦截] … 丢弃: SetCursorPos N 次` 且 N>0（此前只计数不打印，现场只能靠"光标仍被拽"倒推开关没开）。把替身放到**不含 GZYZ/YZinfo 字样**的路径、名字也不叫 YZSimTarget.exe，只在命令行里带上 `"ExdDtDup.dll",RunCapture` 痕迹并加载一个叫 ExdDtDup.dll 的模块 ⇒ 必须被识别、注入、且进程内钩子真的装上（旧判据会在这里失败，这正是 2026-10-16 机房"冻结没生效"的根因）。
      58. 主程序认出厂商拉起的抓屏子进程（机房实测：教师监视/缩略图时**学生端自己**拉起
          `rundll32.exe "<...>\KsFiles\ExdDtDup.dll",RunCapture 0`，DXGI 桌面复制在子进程里）
      59. 主程序按 PID 注入并给出结论（"已注入"或"注入失败+原因"）——现场要判的第一件事就是
@@ -286,29 +288,51 @@ $result  = New-Object System.Collections.Generic.List[string]
 # 时还会导出退出诊断包）。等不到就强杀兜底，绝不把进程留在那儿。
 # 为什么值得这么麻烦：被 Stop-Process 强杀的进程永远不会调 NIM_DELETE，一轮回归下来能在
 # 4K 175% 缩放的任务栏上堆出几十个同样的死图标（用户实测截图），而且退出导出那条路径也测不到。
+$script:hardKilled = 0   # v0.6.47：本轮回归里"改强杀"的次数（>0 就会留下托盘死图标）
 function Close-TrainerGracefully($proc, [int]$WaitSec = 8) {
     if ($null -eq $proc) { return $false }
     $proc.Refresh()
     if ($proc.HasExited) { return $true }
     if (-not ('TrayExitSend' -as [type])) {
         Add-Type -TypeDefinition @"
-using System; using System.Runtime.InteropServices;
+using System; using System.Collections.Generic; using System.Runtime.InteropServices;
 public class TrayExitSend {
     [DllImport("user32.dll")] public static extern IntPtr SendMessage(IntPtr h, uint m, IntPtr w, IntPtr l);
     public static void TrayExit(IntPtr hwnd) { SendMessage(hwnd, 0x0111 /*WM_COMMAND*/, (IntPtr)3002 /*IDM_TRAY_EXIT*/, IntPtr.Zero); }
+    /* v0.6.47（测试侧）：按 PID 枚举**顶层**窗口（隐藏窗口同样枚举得到）并逐个发退出命令。
+       为什么需要：开了防监视时主界面收进托盘，MainWindowHandle 返回 0，旧实现直接强杀
+       => 被强杀的进程永远不调 NIM_DELETE => 一轮回归下来任务栏堆 6~9 个死图标（用户 2026-10-17 报告）。 */
+    private delegate bool EnumProc(IntPtr h, IntPtr l);
+    [DllImport("user32.dll")] private static extern bool EnumWindows(EnumProc cb, IntPtr l);
+    [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+    public static int SendTrayExitToPid(int pid) {
+        var hits = new List<IntPtr>();
+        EnumWindows((h, l) => { uint p; GetWindowThreadProcessId(h, out p); if (p == (uint)pid) { hits.Add(h); } return true; }, IntPtr.Zero);
+        foreach (var h in hits) { TrayExit(h); }
+        return hits.Count;
+    }
 }
 "@
     }
     $hwnd = $proc.MainWindowHandle
     if ($hwnd -eq 0) {
-        # 没有主窗口（已收托盘/尚未建窗）就没法发托盘退出命令，直接强杀，不白等 8 秒
-        Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
-        return $false
+        # v0.6.47：没有"主窗口句柄"不等于没有窗口——开了防监视时主界面是**隐藏**的，MainWindowHandle 给 0。
+        # 旧实现在这里直接强杀 => 进程来不及调 NIM_DELETE => 托盘死图标残留（用户实测一轮 6~9 个）。
+        # 现在按 PID 枚举顶层窗口（隐藏的也枚举得到）逐个发退出命令；一个都没找到才退回强杀（并记账）。
+        $sent = 0
+        try { $sent = [TrayExitSend]::SendTrayExitToPid($proc.Id) } catch { $sent = 0 }
+        if ($sent -eq 0) {
+            $script:hardKilled++
+            Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+            return $false
+        }
+    } else {
+        [TrayExitSend]::TrayExit([IntPtr]$hwnd)
     }
-    [TrayExitSend]::TrayExit([IntPtr]$hwnd)
     try { $ok = $proc.WaitForExit($WaitSec * 1000) } catch { $ok = $false }
     if (-not $ok) {
         Write-Host ("  优雅退出超时（{0} 秒），改强杀 pid={1}" -f $WaitSec, $proc.Id)
+        $script:hardKilled++
         Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
         return $false
     }
@@ -2720,6 +2744,81 @@ if ($blockedMouse -gt 0) {
     $result.Add(('PASS  mouse_event 丢弃也被统计到（{0} 次/秒）⇒ 现场"两个 API 并用"的情形可判' -f $blockedMouse))
 } else {
     $result.Add('FAIL  mouse_event 丢弃没被统计到（现场客户端正是 SetCursorPos + mouse_event 并用）')
+}
+Start-Stage '==== 阶段二十九：0x40 只丢"把光标摁在同一个点上"的调用（v0.6.47）===='
+
+# 背景（2026-10-17，用户选的方案 b）：0x10 是"把进程内所有输入调用全丢"，代价是教师端遥控/协助也失效。
+# 0x40 换一条更细的判据：**同一个目标点在 1 秒内被调用 ≥8 次** ⇒ 认定为"摁住" ⇒ 丢弃；
+# 并把它记成"认定点"，有效期内（滑动 TTL 5 秒）同点再来直接丢 ⇒ 第二秒起接近 100% 抑制。
+# 依据：2026-10-16 机房日志（去重后 954 条带坐标取证）里 950 行是同一个边缘点 (500,0)、每秒 10~14 次，
+# 而"内部移动"只有 5 次（16 分钟）⇒ 两者在"同点重复频率"这个维度上分得开。
+$parkIni = @(
+    '[General]',
+    'CaptureScanIntervalMs=3000',
+    'Flags=65',                     # 窗口化 | 0x40（只拦归位），**不含** 0x10
+    'WindowPercent=60',
+    'LogLevel=3',
+    'AutoInject=1',
+    'InjectMethod=0',
+    'EnableExamGuard=1',
+    'ExternalWindowFix=0',
+    'InjectCaptureChild=0',
+    'AutoExportOnBroadcast=0',
+    'AutoExportOnExit=0',
+    'AutoExportOnCapture=0',
+    'ProcessNames=YZSimTarget.exe'
+)
+Set-Content -LiteralPath $iniFile -Value $parkIni -Encoding utf8
+
+$mark29 = Get-LogLength $appLog
+$parkSimProc = $null
+$parkAppProc = $null
+$parkLine = ''
+$parkDropped = 0
+try {
+    $parkSimProc = Start-Process -FilePath $sim -ArgumentList '--park' -PassThru
+    Start-Sleep -Seconds 1
+    $parkAppProc = Start-Trainer
+    for ($i = 0; $i -lt 45; $i++) {
+        Start-Sleep -Milliseconds 800
+        $seg29 = Read-LogTail $appLog $mark29
+        $m29 = [regex]::Match($seg29, '\[输入拦截\][^\r\n]*归位类\s+(\d+)\s+次')
+        if ($m29.Success) { $parkLine = $m29.Value.Trim(); $parkDropped = [int]$m29.Groups[1].Value; if ($parkDropped -gt 0) { break } }
+    }
+}
+finally {
+    Get-Process -Name 'YZSimTarget' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Milliseconds 500
+    [void](Close-TrainerGracefully $parkAppProc 8)
+}
+
+$parkCalls = 0
+foreach ($m in [regex]::Matches($seg29, '\[输入取证\][^\r\n]*SetCursorPos\s+(\d+)\s+次')) { $parkCalls += [int]$m.Groups[1].Value }
+Write-Host ("0x40 归位类丢弃={0} 次；同段 [输入取证] 的 SetCursorPos 调用合计≈{1} 次" -f $parkDropped, $parkCalls)
+
+if ($parkLine) {
+    $result.Add('PASS  0x40 生效：日志出现"[输入拦截] … 归位类 N 次"（只拦归位、不动 0x10 语义）')
+} else {
+    $result.Add('FAIL  开了 0x40 也没出现"归位类"统计行 ⇒ 稳态判据没生效')
+}
+if ($parkDropped -gt 0) {
+    $result.Add(('PASS  固定点被丢弃（{0} 次）⇒ "把光标摁在同一个点上"确实被拦下' -f $parkDropped))
+} else {
+    $result.Add('FAIL  归位类计数为 0 ⇒ 固定点没被拦下')
+}
+if ($parkCalls -gt 0 -and $parkDropped -lt $parkCalls) {
+    $result.Add(('PASS  丢弃数（{0}）小于同期调用数（≈{1}）⇒ 内部移动那类调用被放行，不是"全丢"' -f $parkDropped, $parkCalls))
+} else {
+    $result.Add(('FAIL  丢弃数（{0}）不小于调用数（≈{1}）⇒ 可能退化成"全丢"，或取证行没取到' -f $parkDropped, $parkCalls))
+}
+
+# v0.6.47：本轮回归不许出现"改强杀"——被强杀的进程永远不调 NIM_DELETE，会在任务栏留下死图标
+# （用户 2026-10-17 实测一轮 6~9 个）。这条断言就是那个缺陷的回归闸门。
+Write-Host ('本轮回归里改强杀次数 = ' + $script:hardKilled)
+if ($script:hardKilled -eq 0) {
+    $result.Add('PASS  全程没有"改强杀"（隐藏窗口也发得进托盘退出命令）⇒ 不会残留托盘死图标')
+} else {
+    $result.Add(('FAIL  本轮有 {0} 次"改强杀" ⇒ 任务栏会留下同等数量的死图标（查 Close-TrainerGracefully 的窗口枚举）' -f $script:hardKilled))
 }
 if ($script:stageName -ne '(开始)') { Write-Host ('  [计时] {0} 用时 {1} 秒' -f $script:stageName, [Math]::Round(((Get-Date) - $script:stageStart).TotalSeconds,1)) }
 $script:sw.Stop()
