@@ -171,7 +171,8 @@
 
     阶段二十五（抓屏子进程识别 + 按 PID 注入 + 多客户端连上，v0.6.32/v0.6.38）断言 3 条：
 阶段二十六（输入取证：周期性拽光标，v0.6.43）断言 2 条：用 YZSimTarget --yank 复现"鼠标能动几百毫秒就被拽回左上角"，断言学生端进程内的 SetCursorPos 调用被 [输入取证] 记录下来（有这行 ⇒ 拽光标是它自己干的 ⇒ 用户态可解）。
-阶段二十七（宿主闸门认下抓屏子进程，v0.6.45）断言 4 条（含 1 条负向）：把替身放到**不含 GZYZ/YZinfo 字样**的路径、名字也不叫 YZSimTarget.exe，只在命令行里带上 `"ExdDtDup.dll",RunCapture` 痕迹并加载一个叫 ExdDtDup.dll 的模块 ⇒ 必须被识别、注入、且进程内钩子真的装上（旧判据会在这里失败，这正是 2026-10-16 机房"冻结没生效"的根因）。
+阶段二十七（宿主闸门认下抓屏子进程，v0.6.45）断言 4 条（含 1 条负向）：
+阶段二十八（拦截"丢弃"可见，v0.6.46）断言 2 条：Flags=17（窗口化|0x10）打开拦截 + 模拟目标 --yank 持续触发 ⇒ 日志必须出现 `[输入拦截] … 丢弃: SetCursorPos N 次` 且 N>0（此前只计数不打印，现场只能靠"光标仍被拽"倒推开关没开）。把替身放到**不含 GZYZ/YZinfo 字样**的路径、名字也不叫 YZSimTarget.exe，只在命令行里带上 `"ExdDtDup.dll",RunCapture` 痕迹并加载一个叫 ExdDtDup.dll 的模块 ⇒ 必须被识别、注入、且进程内钩子真的装上（旧判据会在这里失败，这正是 2026-10-16 机房"冻结没生效"的根因）。
      58. 主程序认出厂商拉起的抓屏子进程（机房实测：教师监视/缩略图时**学生端自己**拉起
          `rundll32.exe "<...>\KsFiles\ExdDtDup.dll",RunCapture 0`，DXGI 桌面复制在子进程里）
      59. 主程序按 PID 注入并给出结论（"已注入"或"注入失败+原因"）——现场要判的第一件事就是
@@ -2651,6 +2652,63 @@ if ($plainRefused -and -not $plainHooked) {
     $result.Add('PASS  不带采集痕迹的同名替身被闸门拒绝（判据是"采集痕迹"而不是"进程名"）')
 } else {
     $result.Add(('FAIL  闸门过宽：同名但无采集痕迹的替身也被放行了（被拒绝={0} 被挂钩子={1}）' -f $plainRefused, $plainHooked))
+}
+Start-Stage '==== 阶段二十八：拦截"丢弃"必须能在日志里看见（v0.6.46）===='
+
+# 背景：0x10（拦截教师端遥控输入）开着时，四个输入钩子会把进程内的调用直接吞掉，但此前**只计数不打印**
+# ⇒ 2026-10-16 现场无法确认"拦截到底有没有在跑"，只能靠"光标仍被拽回"这个现象倒推是开关没开。
+# 本阶段用 --yank 制造持续调用 + Flags=17（窗口化|0x10）打开拦截，断言日志里出现丢弃统计行。
+$blkIni = @(
+    '[General]',
+    'CaptureScanIntervalMs=3000',
+    'Flags=17',
+    'WindowPercent=60',
+    'LogLevel=3',
+    'AutoInject=1',
+    'InjectMethod=0',
+    'EnableExamGuard=1',
+    'ExternalWindowFix=0',
+    'InjectCaptureChild=0',
+    'AutoExportOnBroadcast=0',
+    'AutoExportOnExit=0',
+    'AutoExportOnCapture=0',
+    'ProcessNames=YZSimTarget.exe'
+)
+Set-Content -LiteralPath $iniFile -Value $blkIni -Encoding utf8
+
+$mark28 = Get-LogLength $appLog
+$blkSimProc = $null
+$blkAppProc = $null
+$blockedLine = ''
+$blockedCount = 0
+try {
+    $blkSimProc = Start-Process -FilePath $sim -ArgumentList '--yank', '600' -PassThru
+    Start-Sleep -Seconds 1
+    $blkAppProc = Start-Trainer
+    for ($i = 0; $i -lt 40; $i++) {
+        Start-Sleep -Milliseconds 800
+        $seg28 = Read-LogTail $appLog $mark28
+        $m28 = [regex]::Match($seg28, '\[输入拦截\][^\r\n]*丢弃[^\r\n]*SetCursorPos\s+(\d+)\s+次')
+        if ($m28.Success) { $blockedLine = $m28.Value.Trim(); $blockedCount = [int]$m28.Groups[1].Value; break }
+    }
+}
+finally {
+    Get-Process -Name 'YZSimTarget' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Milliseconds 500
+    [void](Close-TrainerGracefully $blkAppProc 8)
+}
+
+Write-Host ("拦截行=" + $(if ($blockedLine) { $blockedLine } else { '(无)' }))
+
+if ($blockedLine) {
+    $result.Add('PASS  0x10 生效时"丢弃"能在日志里看见（[输入拦截] … 丢弃: SetCursorPos N 次）')
+} else {
+    $result.Add('FAIL  开了 0x10 也没有 [输入拦截] 行 ⇒ 现场仍无法确认拦截是否生效')
+}
+if ($blockedCount -gt 0) {
+    $result.Add(('PASS  丢弃计数非零（{0} 次/秒）⇒ 与 [输入取证] 的调用计数可对照' -f $blockedCount))
+} else {
+    $result.Add('FAIL  丢弃计数为 0（拦截没真的丢，或统计没接上）')
 }
 if ($script:stageName -ne '(开始)') { Write-Host ('  [计时] {0} 用时 {1} 秒' -f $script:stageName, [Math]::Round(((Get-Date) - $script:stageStart).TotalSeconds,1)) }
 $script:sw.Stop()

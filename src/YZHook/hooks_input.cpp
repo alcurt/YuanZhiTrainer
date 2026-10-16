@@ -38,6 +38,35 @@ PFN_SetCursorPos           g_realSetCursorPos           = nullptr;
 
 volatile LONG g_blockedHookCount = 0;
 volatile LONG g_blockedRemoteCount = 0;
+/* v0.6.46：**丢弃**统计。0x10（拦截教师端遥控输入）开着时，上面四个钩子会把进程内的调用直接吞掉；
+   但此前只累加 g_blockedRemoteCount、不打印任何一行 ⇒ 现场没法确认"拦截到底有没有在生效"。
+   2026-10-16 机房就是这样：现场 ini 是 Flags=45（不含 0x10），光标仍被学生端自己每秒 10~14 次
+   SetCursorPos 摁住；事后只能靠"光标被拽"这个现象倒推。下面每秒最多打一行，只在真有丢弃时打。 */
+static volatile LONG   g_yzBlockedCursorPos = 0;
+static volatile LONG   g_yzBlockedMouseEvent = 0;
+static volatile LONG   g_yzBlockedSendInput = 0;
+static volatile LONG   g_yzBlockedKeybdEvent = 0;
+static volatile LONG   g_yzBlockedLastX = 0;
+static volatile LONG   g_yzBlockedLastY = 0;
+static volatile LONG64 g_yzBlockedTraceTick = 0;
+
+static void BlockedStatsTick()
+{
+    const ULONGLONG now = GetTickCount64();
+    const LONG64 last = InterlockedCompareExchange64(&g_yzBlockedTraceTick, 0, 0);
+    if (now - (ULONGLONG)last < 1000)
+        return;
+    if (InterlockedCompareExchange64(&g_yzBlockedTraceTick, (LONG64)now, last) != last)
+        return;
+    const LONG sc = InterlockedExchange(&g_yzBlockedCursorPos, 0);
+    const LONG me = InterlockedExchange(&g_yzBlockedMouseEvent, 0);
+    const LONG si = InterlockedExchange(&g_yzBlockedSendInput, 0);
+    const LONG kb = InterlockedExchange(&g_yzBlockedKeybdEvent, 0);
+    if (sc == 0 && me == 0 && si == 0 && kb == 0)
+        return;
+    YZLOGW(L"[输入拦截] 本进程 1 秒内丢弃: SetCursorPos %ld 次（最后一次 %ld,%ld）  mouse_event %ld 次  SendInput(鼠标) %ld 次  keybd_event %ld 次",
+           sc, (LONG)g_yzBlockedLastX, (LONG)g_yzBlockedLastY, me, si, kb);
+}
 volatile LONG g_blockedHotkeyCount = 0;
 volatile LONG g_blockedHookLogged = 0;
 volatile LONG g_unattributedHookCount = 0;
@@ -381,12 +410,14 @@ void WINAPI Hook_keybd_event(BYTE vk, BYTE scan, DWORD flags, ULONG_PTR extra)
     if (yzhook::g_flags & YZ_FLAG_BLOCK_REMOTE)
     {
         InterlockedIncrement(&g_blockedRemoteCount);
+        InterlockedIncrement(&g_yzBlockedKeybdEvent);
     }
     else
     {
         g_realkeybd_event(vk, scan, flags, extra);
     }
     yzhook::LeaveHook();
+    BlockedStatsTick();
 }
 
 /* v0.6.43：输入取证（**只记录、不拦截**）。
@@ -417,6 +448,7 @@ static void InputForensicsTick()
            sc, (LONG)g_yzCursorPosLastX, (LONG)g_yzCursorPosLastY, me, si);
 }
 
+
 UINT WINAPI Hook_SendInput(UINT count, LPINPUT inputs, int size)
 {
     if (!yzhook::TryEnterHook())
@@ -431,6 +463,7 @@ UINT WINAPI Hook_SendInput(UINT count, LPINPUT inputs, int size)
     if (yzhook::g_flags & YZ_FLAG_BLOCK_REMOTE)
     {
         InterlockedIncrement(&g_blockedRemoteCount);
+        InterlockedIncrement(&g_yzBlockedSendInput);
         /* 返回"全部投递成功"而不是 0：调用方（教师端遥控的落地代码）拿不到
            失败信号，就不会去重试或降级到别的输入通道。JiYuTrainer 同样这么做。 */
         result = count;
@@ -442,6 +475,7 @@ UINT WINAPI Hook_SendInput(UINT count, LPINPUT inputs, int size)
 
     yzhook::LeaveHook();
     InputForensicsTick();
+    BlockedStatsTick();
     return result;
 }
 
@@ -457,6 +491,7 @@ void WINAPI Hook_mouse_event(DWORD flags, DWORD dx, DWORD dy, DWORD data, ULONG_
     if (yzhook::g_flags & YZ_FLAG_BLOCK_REMOTE)
     {
         InterlockedIncrement(&g_blockedRemoteCount);
+        InterlockedIncrement(&g_yzBlockedMouseEvent);
     }
     else
     {
@@ -464,6 +499,7 @@ void WINAPI Hook_mouse_event(DWORD flags, DWORD dx, DWORD dy, DWORD data, ULONG_
     }
     yzhook::LeaveHook();
     InputForensicsTick();
+    BlockedStatsTick();
 }
 
 BOOL WINAPI Hook_SetCursorPos(int x, int y)
@@ -479,6 +515,9 @@ BOOL WINAPI Hook_SetCursorPos(int x, int y)
     if (yzhook::g_flags & YZ_FLAG_BLOCK_REMOTE)
     {
         InterlockedIncrement(&g_blockedRemoteCount);
+        InterlockedIncrement(&g_yzBlockedCursorPos);
+        InterlockedExchange(&g_yzBlockedLastX, (LONG)x);
+        InterlockedExchange(&g_yzBlockedLastY, (LONG)y);
         result = TRUE;
     }
     else
@@ -488,6 +527,7 @@ BOOL WINAPI Hook_SetCursorPos(int x, int y)
 
     yzhook::LeaveHook();
     InputForensicsTick();
+    BlockedStatsTick();
     return result;
 }
 
