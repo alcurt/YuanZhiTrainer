@@ -2191,7 +2191,12 @@ finally {
 
 Write-Host ("托盘防监视生效=" + $trayFroze + "（ini Flags=" + $flags22 + "） 冻结后主界面被收起=" + $hidByFreeze +
             " 托盘恢复界面且仍冻结=" + $showBack + "（句柄=" + $hwndAfter22 + "）")
-if ($trayFroze) {
+if ($app22Proc -and $app22Proc.HasExited) {
+    # v0.6.47（测试侧）：主程序被**外部**杀掉了（例如同时有人在跑清理命令）时，
+    # 下面两条断言会以"防监视没生效/恢复异常"的形式失败——那是误导。
+    # 这里先判死因，给出一句明确的诊断，免得下次又花半小时去怀疑产品。
+    $result.Add('FAIL  阶段二十二的主程序已被外部杀掉（不是防监视失效）——请检查是否有别的命令在清理 YZ 进程')
+} elseif ($trayFroze) {
     $result.Add('PASS  托盘菜单能打开防监视（ini 出现防监视位且抓帧哈希停住）')
 } else {
     $result.Add('FAIL  托盘菜单的防监视没生效（冻结期间用户就没有图形入口了）')
