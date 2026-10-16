@@ -633,6 +633,39 @@ void LogHooked(const wchar_t* fmt, ...)
     (void)fmt;
 }
 
+/* 采集组件的名字标记：抓屏子进程（真实形态 C:\Windows\SysWOW64\rundll32.exe "…\ExdDtDup.dll",RunCapture 0）、
+   以及可能的其它采集实现。命令行与已加载模块两处都用它。 */
+static const wchar_t* const kCaptureMarks[] = { L"ExdDtDup", L"ExdElite", L"ExdPaint", L"ScreenRecoder" };
+
+/* 本进程的**命令行**里有没有采集组件标记。
+   用途见 EngineIsTargetHost：抓屏子进程的自身路径既不在远志目录下、也不叫 YZSimTarget，
+   只能靠它命令行上挂着 "…\ExdDtDup.dll",RunCapture 0 这类痕迹认出来。 */
+/* 自身进程名像"采集宿主"：抓屏子进程在机房里就是 rundll32.exe；厂商另一种采集实现在 ScreenRecoder.exe。
+   这个判据**不单独成立**，必须与"命令行带采集痕迹"合起来用——否则我们自己的工具
+   （命令行里可能恰好提到 ExdDtDup.dll 的路径）也会被钩上。 */
+static bool LooksLikeCaptureHostName(const std::wstring& exe)
+{
+    return yz::ContainsNoCase(exe, L"rundll32") ||
+           yz::ContainsNoCase(exe, L"ScreenRecoder") ||
+           yz::ContainsNoCase(exe, L"Yistart");
+}
+
+static bool CommandLineHasCaptureMark()
+{
+    const wchar_t* cl = GetCommandLineW();
+    if (cl == nullptr)
+        return false;
+    const std::wstring cmd = cl;
+    for (const wchar_t* m : kCaptureMarks)
+    {
+        if (yz::ContainsNoCase(cmd, m))
+            return true;
+    }
+    return false;
+}
+
+bool ProcessLoadedCaptureComponent();   /* 定义在本文件后面，这里先用 */
+
 bool EngineIsTargetHost()
 {
     std::wstring exe = yz::GetSelfPath();
@@ -646,6 +679,15 @@ bool EngineIsTargetHost()
         return true;
     if (GetModuleHandleW(L"PlayerGUI.dll") != nullptr)
         return true;
+    /* v0.6.45：认下**抓屏子进程**。2026-10-16 机房实测：注入到 pid=6868（rundll32.exe 跑
+       ExdDtDup.dll,RunCapture 0）后，日志里一行 [Hook pid=6868] 都没有——因为上面四条它全不满足，
+       引擎打完"宿主进程不是远志学生端/模拟目标"就退出了，于是 DXGI 冻结与取证钩子都没装上，
+       教师端看到的画面始终是实时的。判据保持**窄**：只认采集组件痕迹（命令行或已加载模块），
+       **不按进程名放行**——否则任何 rundll32 都会被我们挂钩子。 */
+    if (ProcessLoadedCaptureComponent())
+        return true;                    /* 已加载采集组件：最硬的判据 */
+    if (CommandLineHasCaptureMark() && LooksLikeCaptureHostName(exe))
+        return true;                    /* 命令行挂着采集痕迹，且自身是那种宿主（rundll32 / ScreenRecoder 等） */
     return false;
 }
 
@@ -653,7 +695,6 @@ bool EngineIsTargetHost()
    才加载 ExdDtDup.dll，而我们收到配置的时机说不定更早）。 */
 bool ProcessLoadedCaptureComponent()
 {
-    static const wchar_t* kMarks[] = { L"ExdDtDup", L"ExdElite", L"ExdPaint", L"ScreenRecoder" };
     HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, GetCurrentProcessId());
     if (snap == INVALID_HANDLE_VALUE)
         return false;
@@ -665,7 +706,7 @@ bool ProcessLoadedCaptureComponent()
     {
         do
         {
-            for (const wchar_t* m : kMarks)
+            for (const wchar_t* m : kCaptureMarks)
             {
                 std::wstring name = me.szModule;
                 std::wstring mark = m;

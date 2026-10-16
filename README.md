@@ -53,7 +53,7 @@ YZTrainer/
   src/YZUnhookTest/         免注入拔钩验证工具（本进程加载远志 DLL 调其导出，不注入）
   src/YZSysRun/             以 SYSTEM 身份运行指定程序的启动器（复制当前会话 winlogon 令牌，不装服务）
   third_party/minhook/      MinHook（BSD-2-Clause，已内置源码）
-  tests/run_sim_test.ps1    本地自动回归脚本（二十六个阶段 64 项断言，约 4.3 分钟（v0.6.44 实测 260.2 秒；基线 383.6 秒，-32.1%），需要管理员权限），
+  tests/run_sim_test.ps1    本地自动回归脚本（二十七个阶段 68 项断言，约 4.3 分钟（v0.6.45 实测 256.9 秒；基线 383.6 秒，-33.0%），需要管理员权限），
                             阶段八是 P0"空过程替换"的回归闸门（v0.6.13，含负向 A/B 验证，
                             v0.6.15 起还覆盖 hMod=NULL 的线程内钩子），
                             阶段九看消息层钩子开关（v0.6.14），
@@ -110,7 +110,7 @@ pwsh -File build.ps1 -Both
 pwsh -File build.ps1 -Both          # 交付构建：dist\Win32 与 dist\x64（两平台版本一致）
 pwsh -File build.ps1 -NoElevate     # 免提权测试构建：只写 build\noelev\（asInvoker，方便本地调试宿主侧）
 
-# 本地回归（需要管理员；26 个阶段 / 64 项断言 / 约 4.3 分钟）
+# 本地回归（需要管理员；27 个阶段 / 68 项断言 / 约 4.3 分钟）
 pwsh -File tests\run_sim_test.ps1
 ```
 
@@ -159,7 +159,7 @@ pwsh -File tests\run_sim_test.ps1
 
 ## 回归测试
 
-`tests\run_sim_test.ps1`：**26 个阶段 / 64 项断言**，本机实测约 **4.3 分钟**（v0.6.44 为 260.2 秒；
+`tests\run_sim_test.ps1`：**27 个阶段 / 68 项断言**，本机实测约 **4.3 分钟**（v0.6.45 为 256.9 秒；
 优化前基线 383.6 秒）。它用自带的模拟目标复现机房现象（全屏广播、考试窗口、抓屏子进程、晚加载钩子、
 反横跳、身份不足、DXGI 取证、输入取证等），逐阶段打印 `[计时] 阶段X 用时 N 秒` 便于定位回归。
 **逐阶段断言清单见 [`docs/原理与开发史.md`](docs/原理与开发史.md)。**

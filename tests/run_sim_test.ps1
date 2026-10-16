@@ -1,4 +1,4 @@
-﻿<#
+<#
     YZTrainer 本地回归测试（不需要机房）：
     用 YZSimTarget 模拟远志学生端的全屏广播、键鼠封锁与定期抢回全屏的行为。
 
@@ -171,6 +171,7 @@
 
     阶段二十五（抓屏子进程识别 + 按 PID 注入 + 多客户端连上，v0.6.32/v0.6.38）断言 3 条：
 阶段二十六（输入取证：周期性拽光标，v0.6.43）断言 2 条：用 YZSimTarget --yank 复现"鼠标能动几百毫秒就被拽回左上角"，断言学生端进程内的 SetCursorPos 调用被 [输入取证] 记录下来（有这行 ⇒ 拽光标是它自己干的 ⇒ 用户态可解）。
+阶段二十七（宿主闸门认下抓屏子进程，v0.6.45）断言 3 条：把替身放到**不含 GZYZ/YZinfo 字样**的路径、名字也不叫 YZSimTarget.exe，只在命令行里带上 `"ExdDtDup.dll",RunCapture` 痕迹并加载一个叫 ExdDtDup.dll 的模块 ⇒ 必须被识别、注入、且进程内钩子真的装上（旧判据会在这里失败，这正是 2026-10-16 机房"冻结没生效"的根因）。
      58. 主程序认出厂商拉起的抓屏子进程（机房实测：教师监视/缩略图时**学生端自己**拉起
          `rundll32.exe "<...>\KsFiles\ExdDtDup.dll",RunCapture 0`，DXGI 桌面复制在子进程里）
      59. 主程序按 PID 注入并给出结论（"已注入"或"注入失败+原因"）——现场要判的第一件事就是
@@ -2538,6 +2539,118 @@ if ($forensicLine -match 'SetCursorPos\s+[1-9]\d*\s+次' -and $forensicLine -mat
     $result.Add('PASS  取证内容正确：次数非零且记录了真实坐标（400,300）')
 } else {
     $result.Add(('FAIL  取证行内容不对（次数或坐标）：{0}' -f $forensicLine))
+}
+Start-Stage '==== 阶段二十七：宿主闸门必须认下"抓屏子进程的真实形态"（v0.6.45）===='
+
+# 背景（2026-10-16 机房实测）：抓屏子进程是 C:\Windows\SysWOW64\rundll32.exe "…\ExdDtDup.dll",RunCapture 0，
+# 它的自身路径既不在远志安装目录下、也不叫 YZSimTarget.exe ⇒ EngineIsTargetHost() 的四条旧判据全不满足，
+# 引擎打一行"宿主进程不是远志学生端/模拟目标"就退出 ⇒ 子进程里一个钩子都没装 ⇒ DXGI 冻结与取证全失效
+# （现场表现为"教师端画面始终实时"）。而阶段二十五的替身放在 %TEMP%\GZYZ-capture-child\，靠路径里的
+# GZYZ **碰巧**通过闸门 ⇒ 回归给不出保护。本阶段构造**不含厂商字样**的路径 + 命令行带采集痕迹的替身，
+# 只有 v0.6.45 新增的两条判据（命令行标记 / 已加载采集模块）能让它通过。
+$capGateDir = Join-Path $env:TEMP 'yzt-capgate'
+if (Test-Path $capGateDir) { Remove-Item $capGateDir -Recurse -Force -ErrorAction SilentlyContinue }
+New-Item -ItemType Directory -Path $capGateDir -Force | Out-Null
+$capGateSim = Join-Path $capGateDir 'Yistart.exe'
+Copy-Item -LiteralPath $sim -Destination $capGateSim -Force
+$capGateDll = Join-Path $capGateDir 'ExdDtDup.dll'
+Copy-Item -LiteralPath (Join-Path $DistDir 'YZHook.dll') -Destination $capGateDll -Force
+"  替身路径（不含 GZYZ/YZinfo）: $capGateSim"
+
+$capGateIni = @(
+    '[General]',
+    'CaptureScanIntervalMs=3000',
+    'Flags=1',
+    'WindowPercent=60',
+    'LogLevel=3',
+    'AutoInject=1',
+    'InjectMethod=0',
+    'EnableExamGuard=1',
+    'ExternalWindowFix=0',
+    'InjectCaptureChild=1',
+    'AutoExportOnBroadcast=0',
+    'AutoExportOnExit=0',
+    'AutoExportOnCapture=0',
+    'ProcessNames=Yistart.exe'
+)
+Set-Content -LiteralPath $iniFile -Value $capGateIni -Encoding utf8
+
+$mark27 = Get-LogLength $appLog
+$capSimProc = $null
+$capAppProc = $null
+$capPid = 0
+$capHookLine = ''
+$capGateRefused = $false
+try {
+    # 命令行里额外塞入厂商那串痕迹（模拟 "ExdDtDup.dll",RunCapture 0）；模拟目标会忽略不认识的参数
+    $capSimProc = Start-Process -FilePath $capGateSim -PassThru `
+        -ArgumentList '--load', $capGateDll, '"ExdDtDup.dll",RunCapture', '0'
+    Start-Sleep -Seconds 1
+    $capAppProc = Start-Trainer
+    for ($i = 0; $i -lt 40; $i++) {
+        Start-Sleep -Milliseconds 800
+        $seg27 = Read-LogTail $appLog $mark27
+        if ($seg27 -match '宿主进程不是远志学生端/模拟目标') { $capGateRefused = $true }
+        if ($capPid -eq 0 -and $seg27 -match '目标进程 pid=(\d+)\s*\(Yistart\.exe\)[^\r\n]*命中') { $capPid = [int]$Matches[1] }
+        if ($capPid -ne 0 -and $seg27 -match ("\[Hook pid=" + $capPid + "\][^\r\n]*Hook 安装完成")) { $capHookLine = $Matches[0].Trim(); break }
+    }
+}
+finally {
+    Get-Process -Name 'Yistart' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Milliseconds 500
+    [void](Close-TrainerGracefully $capAppProc 8)
+    Remove-Item Env:\YZ_TEST_LOAD_DLL -ErrorAction SilentlyContinue
+}
+
+Write-Host ("钳门: 替身 pid=" + $capPid + " 拒绝=" + $capGateRefused + " 钩子行=" + $(if ($capHookLine) { $capHookLine } else { '(无)' }))
+
+if ($capPid -ne 0) {
+    $result.Add('PASS  主程序识别并注入了"不含厂商路径字样"的抓屏替身（进程名匹配）')
+} else {
+    $result.Add('FAIL  没识别到替身进程——阶段本身没跑起来（查 ProcessNames 与替身启动）')
+}
+if ($capHookLine) {
+    $result.Add('PASS  替身进程内钩子真的装上了（[Hook pid=N] Hook 安装完成）⇒ 宿主闸门认下了抓屏子进程')
+} else {
+    $result.Add('FAIL  替身进程内没有任何 [Hook pid=N] 日志 ⇒ 闸门仍然把它挡在外面，DXGI 冻结无从谈起')
+}
+if ($capGateRefused) {
+    $result.Add('FAIL  日志里出现了"宿主进程不是远志学生端/模拟目标"⇒ 闸门仍在拒绝抓屏子进程')
+} else {
+    $result.Add('PASS  日志里没有"宿主进程不是远志学生端"⇒ 新判据生效')
+}
+
+# 负向对照（v0.6.45）：同样的替身、同样的非厂商路径，但**命令行不带采集痕迹**、也不加载采集模块
+# ⇒ 闸门必须拒绝它（否则说明我们是在"按进程名放行"，而不是"按采集痕迹放行"）。
+$mark27b = Get-LogLength $appLog
+$plainSimProc = $null
+$plainAppProc = $null
+$plainPid = 0
+$plainRefused = $false
+$plainHooked = $false
+try {
+    $plainSimProc = Start-Process -FilePath $capGateSim -PassThru    # 注意：不带任何采集痕迹参数
+    Start-Sleep -Seconds 1
+    $plainAppProc = Start-Trainer
+    for ($i = 0; $i -lt 25; $i++) {
+        Start-Sleep -Milliseconds 800
+        $seg27b = Read-LogTail $appLog $mark27b
+        if ($seg27b -match '宿主进程不是远志学生端/模拟目标') { $plainRefused = $true }
+        if ($plainPid -eq 0 -and $seg27b -match '目标进程 pid=(\d+)\s*\(Yistart\.exe\)[^\r\n]*命中') { $plainPid = [int]$Matches[1] }
+        if ($plainPid -ne 0 -and $seg27b -match ("\[Hook pid=" + $plainPid + "\][^\r\n]*Hook 安装完成")) { $plainHooked = $true }
+        if ($plainRefused) { break }
+    }
+}
+finally {
+    Get-Process -Name 'Yistart' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Milliseconds 500
+    [void](Close-TrainerGracefully $plainAppProc 8)
+}
+Write-Host ("钳门负向: 替身 pid=" + $plainPid + " 被拒绝=" + $plainRefused + " 被挂钩子=" + $plainHooked)
+if ($plainRefused -and -not $plainHooked) {
+    $result.Add('PASS  不带采集痕迹的同名替身被闸门拒绝（判据是"采集痕迹"而不是"进程名"）')
+} else {
+    $result.Add(('FAIL  闸门过宽：同名但无采集痕迹的替身也被放行了（被拒绝={0} 被挂钩子={1}）' -f $plainRefused, $plainHooked))
 }
 if ($script:stageName -ne '(开始)') { Write-Host ('  [计时] {0} 用时 {1} 秒' -f $script:stageName, [Math]::Round(((Get-Date) - $script:stageStart).TotalSeconds,1)) }
 $script:sw.Stop()
