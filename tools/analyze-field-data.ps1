@@ -69,7 +69,25 @@ if ($logs.Count -eq 0) {
     L '没找到 yzt*.log —— 数据不完整（现场是否没起主程序？或回收目录选错了？）。'
 } else {
     $text = ''
-    foreach ($f in $logs) { $text += (Get-Content -LiteralPath $f.FullName -Raw -Encoding UTF8) + "`r`n" }
+    # v0.6.47（工具）：**去重**。同一个事件会在多个日志副本里各出现一次：
+#   ① 钩子侧自己落盘的那份（yzt-<身份>.log / logs\ 下的副本）；
+#   ② 主程序日志里带 "[Hook pid=N] …" 前缀的转发副本；
+#   ③ 诊断包里的再一份。
+# 2026-10-16 教训：不去重时 954 行取证会被算成 5720 行（6 份副本相加），我把这个虚高的数字
+# 写进了 README/开发史。去重键 = 行首时间戳 + **去掉所有 [..] 前缀组之后的正文**，
+# 上述三种副本因此折叠成一条（不同秒的事件仍各自计数）。
+$seen = New-Object 'System.Collections.Generic.HashSet[string]'
+$dupDropped = 0
+foreach ($f in $logs) {
+    foreach ($line in (Get-Content -LiteralPath $f.FullName -Encoding UTF8)) {
+        if ([string]::IsNullOrWhiteSpace($line)) { continue }
+        $tsm = [regex]::Match($line, '\d{2}:\d{2}:\d{2}\.\d{3}')
+        $body = [regex]::Replace($line, '\[[^\]]*\]', ' ')
+        $key = $(if ($tsm.Success) { $tsm.Value } else { '' }) + '|' + $body.Trim()
+        if ($seen.Add($key)) { $text += $line + "`r`n" } else { $dupDropped++ }
+    }
+}
+L ("  （日志去重：丢弃重复行 {0} 条——同一事件在钩子侧副本/主程序转发副本/诊断包里各一份）" -f $dupDropped)
 
     function Count-Of([string]$pattern) { return @([regex]::Matches($text, $pattern)).Count }
     function Last-Of([string]$pattern) {
