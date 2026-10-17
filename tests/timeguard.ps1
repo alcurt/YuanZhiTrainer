@@ -1,24 +1,42 @@
-﻿# 运行时间红线守门（用户 2026-10-12 设定）
+﻿# 运行时间红线守门（用户 2026-10-12 设定；2026-10-17 改为**仅工作日**生效）
 #   中午场：13:55 必须停工，之后等用户说"复工"再继续
 #   晚间场：22:45 必须停工，没跑完的留到第二天
+#   **仅周一~周五生效**：周末（周六/周日）不设红线，检查恒为 OK、-Watch 不启动清理
+#   注意：只按星期判断，不含法定节假日表 —— 若某个工作日放假，请临时按用户指令办
 # 用法：
-#   pwsh -File tests\timeguard.ps1                 # 检查一次，打印剩余时间与档位
-#   pwsh -File tests\timeguard.ps1 -Watch          # 守护：睡到红线后杀掉所有 YZ* 进程并留标记
+#   pwsh -File tests/timeguard.ps1                 # 检查一次，打印剩余时间与档位
+#   pwsh -File tests/timeguard.ps1 -Watch          # 守护：睡到红线后杀掉所有 YZ* 进程并留标记（仅工作日）
 # 退出码：0=OK（可跑长任务） 1=SHORT-ONLY（只做短操作） 2=STOP（已过红线，立刻停工）
 param(
     [switch]$Watch,
     [int]$MinMinutes = 12
 )
 
+function Test-Workday([datetime]$d) {
+    return ($d.DayOfWeek -ne [System.DayOfWeek]::Saturday) -and ($d.DayOfWeek -ne [System.DayOfWeek]::Sunday)
+}
+
+# 下一条红线的日期：若今天已过 22:45，就从**下一个工作日**的中午算起（跳过周末）
 function Get-Deadline([datetime]$now) {
     $noon  = Get-Date -Year $now.Year -Month $now.Month -Day $now.Day -Hour 13 -Minute 55 -Second 0
     $night = Get-Date -Year $now.Year -Month $now.Month -Day $now.Day -Hour 22 -Minute 45 -Second 0
     if ($now -lt $noon)  { return $noon }
     if ($now -lt $night) { return $night }
-    return $noon.AddDays(1)      # 过了 22:45 → 下一条红线是明天中午
+    $next = $now.Date.AddDays(1)
+    while (-not (Test-Workday $next)) { $next = $next.AddDays(1) }
+    return $next.AddHours(13).AddMinutes(55)
 }
 
 $now = Get-Date
+
+if (-not (Test-Workday $now)) {
+    # 周末：不设红线。检查恒 OK；-Watch 直接退出（不挂守护、不清理进程）
+    "现在 $($now.ToString('HH:mm:ss'))（$($now.ToString('dddd'))，周末）｜周末不设红线"
+    if ($Watch) { 'timeguard: 周末不需要守护，直接退出' }
+    'OK：现在是周末，红线不生效，可以按自己节奏干'
+    exit 0
+}
+
 $dl  = Get-Deadline $now
 $left = [int][Math]::Floor(($dl - $now).TotalMinutes)
 
