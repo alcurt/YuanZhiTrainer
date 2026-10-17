@@ -290,11 +290,28 @@ void AddTrayIcon(HWND hwnd)
 
 void RemoveTrayIcon()
 {
-    if (g_trayAdded)
-    {
-        Shell_NotifyIconW(NIM_DELETE, &g_nid);
-        g_trayAdded = false;
-    }
+    if (!g_trayAdded)
+        return;
+
+    /* v0.6.48：**两种身份各删一次**，并把两次结果都写日志。
+       为什么（2026-10-17 用户实测）：一轮回归里"改强杀次数=0"（每个实例都走托盘退出），
+       任务栏却仍留下图标残影，要用鼠标划过才消失。NIM_DELETE 只按 g_nid 里**当前那一种**身份删，
+       而同一个进程可能先后以 GUID / uID 两种身份注册过（AddTrayIcon 的两级尝试、ReAddTrayIcon 的"先删再挂"），
+       只要有一次身份不匹配就会删不掉，Explorer 就把那个槽位当"死图标"留着。
+       两个都删一遍是幂等的：删不到的返回 FALSE，无害；删到了就干净。 */
+    NOTIFYICONDATAW nidGuid = g_nid;
+    nidGuid.uFlags  = NIF_GUID;
+    nidGuid.guidItem = kTrayGuid;
+    const BOOL okGuid = Shell_NotifyIconW(NIM_DELETE, &nidGuid);
+
+    NOTIFYICONDATAW nidUid = g_nid;
+    nidUid.uFlags = 0;
+    nidUid.uID    = 1;
+    const BOOL okUid = Shell_NotifyIconW(NIM_DELETE, &nidUid);
+
+    YZLOGI(L"托盘图标: 退出前清理（GUID 身份=%s / uID 身份=%s）",
+           okGuid ? L"成功" : L"失败", okUid ? L"成功" : L"失败");
+    g_trayAdded = false;
 }
 
 /* v0.6.41：幂等重挂托盘图标。为什么需要（2026-10-15 现场实测）：用了一节课后托盘图标消失，
