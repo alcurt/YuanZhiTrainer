@@ -451,6 +451,21 @@ function Get-RelatedLogPaths([string]$Path) {
     }
     return $pairs
 }
+function Copy-StubWithRetry([string]$Src, [string]$Dst, [int]$Tries = 24) {
+    # v0.6.48（测试侧）：替身 DLL 会被**上一个阶段还在退出**的模拟目标继续映射，
+    # 实测报 "being used by another process" 并让整轮直接中止（2026-10-17 06:22、14:11 各一次）。
+    # 所有拷替身的地方统一走这个函数：重试一会儿（模拟目标退出后锁自然释放），拿不到才抛。
+    for ($i = 1; $i -le $Tries; $i++) {
+        try {
+            Copy-Item -LiteralPath $Src -Destination $Dst -Force -ErrorAction Stop
+            return
+        } catch {
+            if ($i -eq 1) { Write-Host ('  替身 DLL 暂时被占用，重试中 …') }
+            Start-Sleep -Milliseconds 250
+        }
+    }
+    throw ('替身 DLL 一直被占用、拷不进去：' + $Dst)
+}
 function Get-LogLength([string]$Path) {
     $snap = @()
     foreach ($f in (Get-RelatedLogPaths $Path)) {
@@ -899,7 +914,7 @@ try {
     }
     else {
         New-Item -ItemType Directory -Force -Path $ddStubDir | Out-Null
-        Copy-Item -LiteralPath $ddStubSrc -Destination $ddStub -Force
+        Copy-StubWithRetry $ddStubSrc $ddStub
 
         $stage7Start = Get-Date
         $sim7Proc = Start-Process -FilePath $sim -ArgumentList '--load', $ddStub -PassThru
@@ -1130,7 +1145,7 @@ else {
     $watchOut = Join-Path $env:TEMP 'yzt-watch-regress'
     New-Item -ItemType Directory -Force -Path $watchOut | Out-Null
     New-Item -ItemType Directory -Force -Path $ddStubDir | Out-Null
-    Copy-Item -LiteralPath $ddStubSrc -Destination $ddStub -Force
+    Copy-StubWithRetry $ddStubSrc $ddStub
 
     $watchProc = $null
     $loadProc  = $null
@@ -1686,7 +1701,7 @@ else {
     $archOut = Join-Path $env:TEMP 'yzt-probe-arch'
     New-Item -ItemType Directory -Force -Path $archOut | Out-Null
     New-Item -ItemType Directory -Force -Path $ddStubDir | Out-Null
-    Copy-Item -LiteralPath $ddStubSrc -Destination $ddStub -Force      # 32 位替身（与 $DistDir 同位数）
+    Copy-StubWithRetry $ddStubSrc $ddStub      # 32 位替身（与 $DistDir 同位数）
 
     $archSim = $null
     try {
@@ -1750,7 +1765,7 @@ $nonVendorSim = Join-Path $nonVendorDir 'YZSimTarget.exe'
 New-Item -ItemType Directory -Force -Path $nonVendorDir | Out-Null
 New-Item -ItemType Directory -Force -Path $ddStubDir | Out-Null
 Copy-Item -LiteralPath $sim -Destination $nonVendorSim -Force
-Copy-Item -LiteralPath $ddStubSrc -Destination $ddStub -Force
+Copy-StubWithRetry $ddStubSrc $ddStub
 
 $protOut = Join-Path $env:TEMP 'yzt-probe-prot'
 New-Item -ItemType Directory -Force -Path $protOut | Out-Null
@@ -1812,7 +1827,7 @@ else {
     New-Item -ItemType Directory -Force -Path $gzyzDir | Out-Null
     Copy-Item -LiteralPath $sim -Destination $gzyzSim -Force
     New-Item -ItemType Directory -Force -Path $ddStubDir | Out-Null
-    Copy-Item -LiteralPath $ddStubSrc -Destination $ddStub -Force
+    Copy-StubWithRetry $ddStubSrc $ddStub
 
     $watch64 = $null
     $load64  = $null
