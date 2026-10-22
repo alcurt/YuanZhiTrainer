@@ -59,54 +59,75 @@ static volatile LONG64 g_yzParkWindowStart = 0;
 static volatile LONG   g_yzParkLastX = 0;
 static volatile LONG   g_yzParkLastY = 0;
 static volatile LONG   g_yzParkCount = 0;
-/* 已经**认定**过的"被摁住的点"：在有效期内（默认 5 秒）该点再来就直接丢。
-   为什么需要它：光靠"1 秒窗口内 ≥5 次"这条线，每个窗口的**头 4 次**仍会放行
-   （本机实测：10 次/秒 ⇒ 每秒只丢 5~6 次），光标每秒还是会被拽动几次。
-   记下这个点之后，第二秒起就是 100% 抑制；点变了或有效期过了就重新学习。 */
-static volatile LONG   g_yzParkKnownX = 0;
-static volatile LONG   g_yzParkKnownY = 0;
-static volatile LONG64 g_yzParkKnownUntil = 0;
+/* v0.6.49：**按点计数**（多槽），不再用"只认上一个点"的单槽窗口。
+   为什么改（2026-10-22 机房实测 + 本机 --park2 复现）：
+   现场客户端在 (500,0) 与 (960,540) 之间 **1:1 交替**、每秒 10 次；旧实现只要"这次的点 ≠ 上一次的点"
+   就重置窗口 ⇒ 交替形态下永远攒不到 8 次 ⇒ 0x40 一次都没生效（日志里"丢弃"是 0 行）。
+   本机用 --park2（1:1 交替）复现：旧代码 0 丢弃；改成按点计数后两种形态都应丢弃。
+   注：取证行只报"最后一次坐标"，所以光看现场日志**看不出**秒内交替 —— 这就是当初判错的直接原因。 */
+#define YZ_PARK_SLOTS 8
+/* v0.6.49：门槛用 **4 次/点/秒**（不是 8）。
+   依据（2026-10-22 机房 + 本机 --park2 复现）：现场总调用 10 次/秒，但客户端在 (500,0) 与 (960,540)
+   两个点之间 1:1 交替 ⇒ **每个点只有 5 次/秒** ⇒ 门槛 8 时单点永远达不到 ⇒ 0x40 一次都没生效。
+   4 这个线的安全性：现场"内部移动"是 1~2 次/秒；双击也就 2 次/秒 ⇒ 4 不会误伤。
+   滑动 TTL 5 秒 + 命中即续期，所以第二秒起该点仍 100% 丢弃。 */
+#define YZ_PARK_MIN_CALLS 4
+static volatile LONG   g_yzParkSlotX[YZ_PARK_SLOTS];
+static volatile LONG   g_yzParkSlotY[YZ_PARK_SLOTS];
+static volatile LONG   g_yzParkSlotCount[YZ_PARK_SLOTS];
+static volatile LONG64 g_yzParkSlotStart[YZ_PARK_SLOTS];
+static volatile LONG   g_yzParkNextSlot = 0;
 #define YZ_PARK_KNOWN_TTL_MS 5000
 
 static bool IsParkingCall(int x, int y)
 {
     const ULONGLONG now = GetTickCount64();
-    const ULONGLONG knownUntil = (ULONGLONG)InterlockedCompareExchange64(&g_yzParkKnownUntil, 0, 0);
-    if (knownUntil > now &&
-        InterlockedCompareExchange(&g_yzParkKnownX, 0, 0) == (LONG)x &&
-        InterlockedCompareExchange(&g_yzParkKnownY, 0, 0) == (LONG)y)
+
+    /* 1) 已认定点（count>=8 且在 TTL 内）：命中即续期后直接丢 */
+    for (int i = 0; i < YZ_PARK_SLOTS; ++i)
     {
-        /* 命中即续期（滑动 TTL）：只要这个点还在被反复摁，就一直丢；
-           否则 TTL 一到期就要重新"学习"一遍，每轮又漏掉窗口头几次（本机实测 5 秒 TTL 下漏了约 26%）。 */
-        InterlockedExchange64(&g_yzParkKnownUntil, (LONG64)(now + YZ_PARK_KNOWN_TTL_MS));
-        return true;
+        if (g_yzParkSlotX[i] != x || g_yzParkSlotY[i] != y)
+            continue;
+        const ULONGLONG start = (ULONGLONG)g_yzParkSlotStart[i];
+        if (start == 0)
+            continue;
+        if (g_yzParkSlotCount[i] >= YZ_PARK_MIN_CALLS && (now - start) <= YZ_PARK_KNOWN_TTL_MS)
+        {
+            g_yzParkSlotStart[i] = (LONG64)now;   /* 滑动续期 */
+            return true;
+        }
     }
-    const ULONGLONG start = (ULONGLONG)InterlockedCompareExchange64(&g_yzParkWindowStart, 0, 0);
-    const LONG lastX = InterlockedCompareExchange(&g_yzParkLastX, 0, 0);
-    const LONG lastY = InterlockedCompareExchange(&g_yzParkLastY, 0, 0);
-    if (start == 0 || (now - start) > 1000 || lastX != (LONG)x || lastY != (LONG)y)
+
+    /* 2) 找这个点的槽（按点独立计时，交替点互不干扰） */
+    int slot = -1;
+    for (int i = 0; i < YZ_PARK_SLOTS; ++i)
     {
-        InterlockedExchange64(&g_yzParkWindowStart, (LONG64)now);   /* 换点或过窗 ⇒ 重新开窗 */
-        InterlockedExchange(&g_yzParkLastX, (LONG)x);
-        InterlockedExchange(&g_yzParkLastY, (LONG)y);
-        InterlockedExchange(&g_yzParkCount, 1);
+        if (g_yzParkSlotX[i] == x && g_yzParkSlotY[i] == y) { slot = i; break; }
+    }
+    if (slot < 0)
+    {
+        for (int i = 0; i < YZ_PARK_SLOTS; ++i) { if (g_yzParkSlotStart[i] == 0) { slot = i; break; } }
+        if (slot < 0) { slot = (int)((ULONG)InterlockedIncrement(&g_yzParkNextSlot) % YZ_PARK_SLOTS); }
+        g_yzParkSlotX[slot] = (LONG)x;
+        g_yzParkSlotY[slot] = (LONG)y;
+        g_yzParkSlotCount[slot] = 1;
+        g_yzParkSlotStart[slot] = (LONG64)now;
         return false;
     }
-    const LONG n = InterlockedIncrement(&g_yzParkCount);
-    /* 学习门槛用 8（不是 5）：现场"摁住"是 10~14 次/秒 ⇒ 第一秒内必然过线；
-       而每秒才 1~2 次的"内部移动"永远够不到 8。用 5 会出事——本机实测：
-       内部移动的间隔正好 1000ms，计时漂移积累后它也能攒够 5 次，把单槽的"认定点"顶掉
-       （认定点被内部点覆盖 ⇒ 固定点丢失已认定状态 ⇒ 每秒重新学习，白白放行 ~20%）。 */
-    if (n >= 8 && (now - start) <= 1200)
+    if ((now - (ULONGLONG)g_yzParkSlotStart[slot]) > 1000)
     {
-        InterlockedExchange(&g_yzParkKnownX, (LONG)x);               /* 记下这个点，后续窗口全丢 */
-        InterlockedExchange(&g_yzParkKnownY, (LONG)y);
-        InterlockedExchange64(&g_yzParkKnownUntil, (LONG64)(now + YZ_PARK_KNOWN_TTL_MS));
-        return true;                                                /* 1 秒窗口内第 5 次起 ⇒ 视为摁住 */
+        g_yzParkSlotCount[slot] = 1;                 /* 过窗 ⇒ 重开 */
+        g_yzParkSlotStart[slot] = (LONG64)now;
+        return false;
+    }
+    const LONG n = InterlockedIncrement(&g_yzParkSlotCount[slot]);
+    if (n >= YZ_PARK_MIN_CALLS && (now - (ULONGLONG)g_yzParkSlotStart[slot]) <= 1200)
+    {
+        g_yzParkSlotStart[slot] = (LONG64)now;       /* 认定 + 续期 */
+        return true;
     }
     return false;
 }
-
 static void BlockedStatsTick()
 {
     /* 节流 10 秒（不是 [输入取证] 那样的 1 秒）：本条是 WRN 级的“状态指示”，锁键鼠期间每秒一条会在

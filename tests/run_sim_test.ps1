@@ -174,7 +174,7 @@
 阶段二十六（输入取证：周期性拽光标，v0.6.43）断言 2 条：用 YZSimTarget --yank 复现"鼠标能动几百毫秒就被拽回左上角"，断言学生端进程内的 SetCursorPos 调用被 [输入取证] 记录下来（有这行 ⇒ 拽光标是它自己干的 ⇒ 用户态可解）。
 阶段二十七（宿主闸门认下抓屏子进程，v0.6.45）断言 4 条（含 1 条负向）：
 阶段二十八（拦截"丢弃"可见，v0.6.46）断言 3 条：
-阶段二十九（0x40 只拦"归位类"调用 + 本轮不许强杀，v0.6.47）断言 4 条：Flags=65（窗口化|0x40）+ 模拟目标 --park（10Hz 固定点、每 3 秒 1 次内部移动）⇒ 必须出现"归位类 N 次"且 N>0、且丢弃数小于同期调用数（证明内点放行）；另断言本轮回归"改强杀"次数为 0（强杀会让托盘死图标残留）。Flags=17（窗口化|0x10）打开拦截 + 模拟目标 --yank 持续触发 ⇒ 日志必须出现 `[输入拦截] … 丢弃: SetCursorPos N 次` 且 N>0（此前只计数不打印，现场只能靠"光标仍被拽"倒推开关没开）。把替身放到**不含 GZYZ/YZinfo 字样**的路径、名字也不叫 YZSimTarget.exe，只在命令行里带上 `"ExdDtDup.dll",RunCapture` 痕迹并加载一个叫 ExdDtDup.dll 的模块 ⇒ 必须被识别、注入、且进程内钩子真的装上（旧判据会在这里失败，这正是 2026-10-16 机房"冻结没生效"的根因）。
+阶段二十九（0x40 只拦"归位类"调用 + 本轮不许强杀）断言 4 条：Flags=109（含 0x40 与假全屏）+ 模拟目标 --park2（**1:1 交替两个点、10Hz**，即 2026-10-22 机房实测形态 —— 旧代码在这个形态下 0 丢弃，v0.6.49 改成按点计数后 ~90%）⇒ 必须出现"归位类 N 次"且 N>0、且丢弃数小于同期调用数（证明内点放行）；另断言本轮回归"改强杀"次数为 0（强杀会让托盘死图标残留）。Flags=17（窗口化|0x10）打开拦截 + 模拟目标 --yank 持续触发 ⇒ 日志必须出现 `[输入拦截] … 丢弃: SetCursorPos N 次` 且 N>0（此前只计数不打印，现场只能靠"光标仍被拽"倒推开关没开）。把替身放到**不含 GZYZ/YZinfo 字样**的路径、名字也不叫 YZSimTarget.exe，只在命令行里带上 `"ExdDtDup.dll",RunCapture` 痕迹并加载一个叫 ExdDtDup.dll 的模块 ⇒ 必须被识别、注入、且进程内钩子真的装上（旧判据会在这里失败，这正是 2026-10-16 机房"冻结没生效"的根因）。
      58. 主程序认出厂商拉起的抓屏子进程（机房实测：教师监视/缩略图时**学生端自己**拉起
          `rundll32.exe "<...>\KsFiles\ExdDtDup.dll",RunCapture 0`，DXGI 桌面复制在子进程里）
      59. 主程序按 PID 注入并给出结论（"已注入"或"注入失败+原因"）——现场要判的第一件事就是
@@ -2825,7 +2825,7 @@ $parkAppProc = $null
 $parkLine = ''
 $parkDropped = 0
 try {
-    $parkSimProc = Start-Process -FilePath $sim -ArgumentList '--park' -PassThru
+    $parkSimProc = Start-Process -FilePath $sim -ArgumentList '--park2' -PassThru
     Start-Sleep -Seconds 1
     $parkAppProc = Start-Trainer
     for ($i = 0; $i -lt 45; $i++) {

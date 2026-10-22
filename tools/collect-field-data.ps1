@@ -1,4 +1,4 @@
-﻿# YZTrainer 现场数据回收（v0.6.40 起随现场清单使用）
+﻿  ✗ [warn] 0 次 # YZTrainer 现场数据回收（v0.6.40 起随现场清单使用）
 #
 # 目的：从机房回来时**别漏东西**。踩过的坑：
 #   1) 只看 yzt.log 会漏掉真正活跃的那份——产品按 2MB 顺延编号（yzt.log / yzt-1.log / yzt-2.log …），
@@ -115,7 +115,7 @@ M ''
 M '---- 探针产物（watch / report / 输入探针）----'
 foreach ($r in $roots) {
     if (-not (Test-DirSafe $r)) { M ("  （跳过，无权限或无此目录: {0}）" -f $r); continue }
-    foreach ($pat in 'YZProbe-report-*.*', 'YZProbe-watch-*.log', 'input-probe-*.txt', 'probe-*.log') {
+    foreach ($pat in 'YZProbe-report-*.*', 'YZProbe-watch-*.log', 'input-probe-*.txt', 'probe-*.log', '现场备注*.*', '备注*.*', '清单*.txt') {
         Get-ChildItem -LiteralPath $r -Filter $pat -File -ErrorAction SilentlyContinue |
             ForEach-Object { Copy-Into $_.FullName 'probe' }
     }

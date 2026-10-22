@@ -44,6 +44,7 @@ UINT  g_maxSeconds = 600;
    每秒 10 次 SetCursorPos(500,0)，每 10 次里夹 1 次"内部移动" SetCursorPos(960,540)。
    依据：2026-10-16 机房日志去重后 954 条带坐标的取证行里，950 行是同一个边缘点 (500,0)，内部移动仅 5 次。 */
 bool  g_parkRequested = false;
+bool  g_parkAlternate = false;   /* --park2：两点 1:1 交替 */
 DWORD g_parentPid  = 0;
 ULONGLONG g_startTick = 0;      /* 进程启动时刻：时限从**启动**算，不从第一次定时器触发算 */
 /* --load <dll>：4 秒后再加载指定 DLL，用来验证"远志的钩子模块晚于注入出现"时
@@ -479,8 +480,15 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
         else if (wParam == 12)
         {
+            /* v0.6.49：--park2 复现"两个点 1:1 交替、每秒 10 次"的现场形态
+               （2026-10-22 机房：取证行只报"最后一次坐标"，所以看不出秒内交替 ⇒ 需要这个模式才能复现）。 */
             static int parkTick = 0;
             ++parkTick;
+            if (g_parkAlternate)
+            {
+                SetCursorPos((parkTick % 2) ? 500 : 960, (parkTick % 2) ? 0 : 540);
+                return 0;
+            }
             /* 内部移动的比例贴近机房：2026-10-16 现场 954 条带坐标取证里，内部移动只有 5 次
                （约 16 分钟一次）；这里用每 30 次（约 3 秒一次）——既保留"确实有内点调用"这个事实，
                又不会像每秒一次那样不断打断固定点的"已认定"状态。 */
@@ -589,7 +597,12 @@ int WINAPI wWinMain(HINSTANCE hinst, HINSTANCE, LPWSTR cmdLine, int)
 {
     g_exeDir = yz::GetExeDir();
     g_examRequested = (cmdLine != nullptr) && (wcsstr(cmdLine, L"--exam") != nullptr);
-if (cmdLine != nullptr && wcsstr(cmdLine, L"--park") != nullptr)
+if (cmdLine != nullptr && wcsstr(cmdLine, L"--park2") != nullptr)
+{
+    g_parkRequested = true;
+    g_parkAlternate = true;
+}
+else if (cmdLine != nullptr && wcsstr(cmdLine, L"--park") != nullptr)
     g_parkRequested = true;
 if (cmdLine != nullptr && wcsstr(cmdLine, L"--max-seconds") != nullptr)
 {
