@@ -45,6 +45,7 @@ UINT  g_maxSeconds = 600;
    依据：2026-10-16 机房日志去重后 954 条带坐标的取证行里，950 行是同一个边缘点 (500,0)，内部移动仅 5 次。 */
 bool  g_parkRequested = false;
 bool  g_parkAlternate = false;   /* --park2：两点 1:1 交替 */
+bool  g_parkMouseEvent = false;  /* --park3：绝对坐标 mouse_event 归位 */
 DWORD g_parentPid  = 0;
 ULONGLONG g_startTick = 0;      /* 进程启动时刻：时限从**启动**算，不从第一次定时器触发算 */
 /* --load <dll>：4 秒后再加载指定 DLL，用来验证"远志的钩子模块晚于注入出现"时
@@ -489,6 +490,20 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 SetCursorPos((parkTick % 2) ? 500 : 960, (parkTick % 2) ? 0 : 540);
                 return 0;
             }
+            /* v0.6.50：--park3 复现"厂商用 mouse_event 绝对坐标把光标摁回角落"的现场形态
+               （与 SetCursorPos 那路并行；机房实测两路并用，只拦一路就是"时间翻倍"）。 */
+            if (g_parkMouseEvent)
+            {
+                const int sxc = GetSystemMetrics(SM_CXSCREEN);
+                const int syc = GetSystemMetrics(SM_CYSCREEN);
+                if (sxc > 0 && syc > 0)
+                {
+                    mouse_event(MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE,
+                                (DWORD)((LONGLONG)500 * 65535 / sxc),
+                                (DWORD)((LONGLONG)0 * 65535 / syc), 0, 0);
+                }
+                return 0;
+            }
             /* 内部移动的比例贴近机房：2026-10-16 现场 954 条带坐标取证里，内部移动只有 5 次
                （约 16 分钟一次）；这里用每 30 次（约 3 秒一次）——既保留"确实有内点调用"这个事实，
                又不会像每秒一次那样不断打断固定点的"已认定"状态。 */
@@ -597,7 +612,12 @@ int WINAPI wWinMain(HINSTANCE hinst, HINSTANCE, LPWSTR cmdLine, int)
 {
     g_exeDir = yz::GetExeDir();
     g_examRequested = (cmdLine != nullptr) && (wcsstr(cmdLine, L"--exam") != nullptr);
-if (cmdLine != nullptr && wcsstr(cmdLine, L"--park2") != nullptr)
+if (cmdLine != nullptr && wcsstr(cmdLine, L"--park3") != nullptr)
+{
+    g_parkRequested = true;
+    g_parkMouseEvent = true;
+}
+else if (cmdLine != nullptr && wcsstr(cmdLine, L"--park2") != nullptr)
 {
     g_parkRequested = true;
     g_parkAlternate = true;

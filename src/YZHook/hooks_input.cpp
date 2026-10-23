@@ -570,10 +570,39 @@ void WINAPI Hook_mouse_event(DWORD flags, DWORD dx, DWORD dy, DWORD data, ULONG_
     }
 
     InterlockedIncrement(&g_yzMouseEventCalls);
+
+    /* v0.6.50：0x40 也要覆盖 mouse_event 的**绝对坐标**移动。
+       机房实测（2026-10-23 现场日志）：0x40 把 SetCursorPos 那一路丢掉了 141 次/10 秒 ✔，
+       但同一个进程里 mouse_event 仍然每秒被调 20 次、一次都没被拦 ✗ —— 厂商的"把光标摁回去"
+       是**两路并用**的，只拦一路 ⇒ 现象就是"频率减半、拽回时间翻倍"。
+       只处理 MOUSEEVENTF_ABSOLUTE（0..65535 归一化坐标），相对移动是正常鼠标动作、不动。
+       语义与 SetCursorPos 那路完全一致：同一目标点 1 秒内 ≥4 次才认定并丢弃。 */
+    const bool isAbsoluteMove = ((flags & (MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_MOVE)) ==
+                                 (MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_MOVE));
+    bool wantParkingMe = false;
+    if (isAbsoluteMove && (yzhook::g_flags & YZ_FLAG_BLOCK_PARKING) != 0 &&
+        (yzhook::g_flags & YZ_FLAG_BLOCK_REMOTE) == 0)
+    {
+        const int sxc = GetSystemMetrics(SM_CXSCREEN);
+        const int syc = GetSystemMetrics(SM_CYSCREEN);
+        if (sxc > 0 && syc > 0)
+        {
+            const int px = (int)((LONGLONG)(dx & 0xFFFF) * sxc / 65535);
+            const int py = (int)((LONGLONG)(dy & 0xFFFF) * syc / 65535);
+            wantParkingMe = IsParkingCall(px, py);
+        }
+    }
+
     if (yzhook::g_flags & YZ_FLAG_BLOCK_REMOTE)
     {
         InterlockedIncrement(&g_blockedRemoteCount);
         InterlockedIncrement(&g_yzBlockedMouseEvent);
+    }
+    else if (wantParkingMe)
+    {
+        InterlockedIncrement(&g_blockedRemoteCount);
+        InterlockedIncrement(&g_yzBlockedMouseEvent);
+        InterlockedIncrement(&g_yzBlockedParking);
     }
     else
     {

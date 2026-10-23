@@ -177,7 +177,13 @@ void ScanOnce(bool fullSweep, std::vector<std::wstring>* logLines)
 
         const bool young    = (now - g_firstSeen[p.pid]) <= kYoungWindowMs;
         const bool vendorish = yz::IsVendorCaptureRelatedName(p.name) || yz::IsYuanzhiInstallPath(p.path);
-        if (!hit && (fullSweep || young || vendorish))
+        /* v0.6.50：通用宿主角每轮都扫（不看 young/vendorish）。
+           为什么（机房实测）：厂商用一个 **启动前就已存在** 的 rundll32.exe 承载 ExdDtDup.dll，
+           而且这个 DLL 是**懒加载**的（教师一开始监视才加载）——按旧判据它既不"新"、名字也不是厂商，
+           于是只有 5 分钟一次的全量扫才可能发现，广播那几分钟里根本抓不到（冻结只能落到客户端身上）。
+           rundll32 在机器上通常只有 1~3 个，每轮扫它们很便宜。 */
+        const bool hostLike = (p.name == L"rundll32.exe" || p.name == L"dllhost.exe" || p.name == L"svchost.exe");
+        if (!hit && (fullSweep || young || vendorish || hostLike))
         {
             std::wstring mod;
             std::wstring modPath;
@@ -323,7 +329,12 @@ void capturewatch::Tick()
 
     const bool fullSweep = (g_lastFullSweep == 0) || ((now - g_lastFullSweep) >= kFullSweepMs);
     if (fullSweep)
+    {
         g_lastFullSweep = now;
+        /* v0.6.50：全量扫留一行痕迹，便于事后判断"那一轮到底扫没扫"（现场曾因分辨不出而误判）。 */
+        YZLOGI(yz::Format(L"采集栈监控: 全量扫描（每 %u 秒一次；常规轮只扫新进程/厂商名/通用宿主角）",
+                          (unsigned)(kFullSweepMs / 1000)).c_str());
+    }
 
     ScanOnce(fullSweep, nullptr);
 }

@@ -483,7 +483,17 @@ void EngineThreadProc()
 
     if (!yzhook::EngineIsTargetHost())
     {
-        YZLOGI(L"宿主进程不是远志学生端/模拟目标，Hook 不启用");
+            {
+        /* v0.6.50：补上 pid 与 exe 路径。之前只写一句"不是目标"，现场没法回答"到底是谁被拒"，
+           而"抓屏子进程没被注入"正是那几天最大的一块空白。 */
+        wchar_t exePath[MAX_PATH * 2] = { 0 };
+        DWORD exeLen = (DWORD)(sizeof(exePath) / sizeof(exePath[0]));
+        if (!QueryFullProcessImageNameW(GetCurrentProcess(), 0, exePath, &exeLen))
+            exePath[0] = 0;
+        YZLOGW(yz::Format(L"宿主进程不是远志学生端/模拟目标，Hook 不启用（pid=%u exe=%s）",
+                          (unsigned)GetCurrentProcessId(),
+                          (exePath[0] != 0) ? exePath : L"<读不到>").c_str());
+    }
         return;
     }
 

@@ -20,6 +20,7 @@
 #include "yz_hook_state.h"
 
 #include <dxgi1_2.h>
+#include <dxgi1_5.h>   /* v0.6.50：IDXGIOutput5::DuplicateOutput1 */
 
 namespace yzhook
 {
@@ -33,11 +34,19 @@ typedef HRESULT (STDMETHODCALLTYPE *PFN_AcquireNextFrame)(IDXGIOutputDuplication
 typedef HRESULT (STDMETHODCALLTYPE *PFN_ReleaseFrame)(IDXGIOutputDuplication*);
 
 PFN_DuplicateOutput g_realDuplicate = nullptr;
+typedef HRESULT (STDMETHODCALLTYPE *PFN_DuplicateOutput1)(IDXGIOutput5*, IUnknown*, UINT, const DXGI_FORMAT*, UINT, IDXGIOutputDuplication**);
+typedef HRESULT (STDMETHODCALLTYPE *PFN_DuplicateOutput1NoDev)(IDXGIOutput5*, IUnknown*, UINT, const DXGI_FORMAT*, UINT, IDXGIOutputDuplication**);
+PFN_DuplicateOutput1 g_realDuplicate1 = nullptr;
 PFN_AcquireNextFrame g_realAcquire   = nullptr;
 PFN_ReleaseFrame     g_realRelease   = nullptr;
 
 /* 槽位（开发记录 §19 本机功能验证过） */
-const int kSlotOutput1Duplicate = 22;   /* 0x58 */
+const int kSlotOutput1Duplicate = 22;   /* 0x58 DuplicateOutput（IDXGIOutput1） */
+/* v0.6.50：IDXGIOutput5 另加了 DuplicateOutput1（带"支持的格式"参数），槽位 26（0x68）。
+   机房实测：厂商的 ExdDtDup 走的是它 ⇒ 只钩槽 22 时 TraceDuplicateOutput 从不触发
+   ⇒ duplication 对象的 vtable 没被补 ⇒ AcquireNextFrame 拦不住 ⇒ 冻结形同不存在
+   （现场证据：抓屏子进程日志里一条 "[DXGI 取证] 取到帧" 都没有）。 */
+const int kSlotOutput5Duplicate1 = 26;  /* 0x68 */
 const int kSlotDupAcquire       = 8;    /* 0x20 */
 const int kSlotDupRelease       = 14;   /* 0x38 */
 const int kSlots                = 24;   /* 够覆盖 IDXGIOutputDuplication 的全部方法 */
@@ -106,6 +115,9 @@ void PatchDuplicationObject(IDXGIOutputDuplication* obj)
     *reinterpret_cast<void**>(obj) = reinterpret_cast<void*>(g_dupVtblCopy);
 }
 
+HRESULT STDMETHODCALLTYPE TraceDuplicateOutput1(IDXGIOutput5* self, IUnknown* device, UINT flags,
+                                               const DXGI_FORMAT* formats, UINT formatCount,
+                                               IDXGIOutputDuplication** out);
 HRESULT STDMETHODCALLTYPE TraceDuplicateOutput(IDXGIOutput1* self, IUnknown* device, IDXGIOutputDuplication** out)
 {
     if (g_realDuplicate == nullptr)
@@ -134,7 +146,36 @@ HRESULT STDMETHODCALLTYPE TraceDuplicateOutput(IDXGIOutput1* self, IUnknown* dev
     return hr;
 }
 
+/* v0.6.50：IDXGIOutput5::DuplicateOutput1 的桩。行为与 TraceDuplicateOutput 完全一致 ——
+   唯一的目的就是**在它返回后也给那个 duplication 对象补 vtable**，否则 AcquireNextFrame 拦不住，
+   冻结就形同不存在（机房实测：厂商 ExdDtDup 走这条，槽 22 上从无调用）。 */
+HRESULT STDMETHODCALLTYPE TraceDuplicateOutput1(IDXGIOutput5* self, IUnknown* device, UINT flags,
+                                               const DXGI_FORMAT* formats, UINT formatCount,
+                                               IDXGIOutputDuplication** out)
+{
+    if (g_realDuplicate1 == nullptr)
+        return E_FAIL;
 
+    if (!TryEnterHook())
+        return g_realDuplicate1(self, device, flags, formats, formatCount, out);
+
+    const HRESULT hr = g_realDuplicate1(self, device, flags, formats, formatCount, out);
+    if (SUCCEEDED(hr) && out != nullptr && *out != nullptr)
+    {
+        const LONG n = InterlockedIncrement(&g_dupCreated);
+        PatchDuplicationObject(*out);
+        if (n <= 3)
+            YZLOGI(L"[DXGI 取证] 建立桌面复制成功(1)（第 %d 次，duplication=%p）", n, *out);
+    }
+    else if (FAILED(hr))
+    {
+        InterlockedIncrement(&g_dupFailed);
+        YZLOGI(L"[DXGI 取证] DuplicateOutput1 失败 hr=0x%08X", static_cast<unsigned>(hr));
+    }
+
+    LeaveHook();
+    return hr;
+}
 
 HRESULT STDMETHODCALLTYPE TraceAcquireNextFrame(IDXGIOutputDuplication* self, UINT timeout,
                                                 DXGI_OUTDUPL_FRAME_INFO* info, IDXGIResource** res)
@@ -244,6 +285,31 @@ bool DupTraceInstall(bool enableNow)
     else
     {
         YZLOGW(L"[DXGI 取证] 未能取到 IDXGIOutput1 vtable，取证不启用（目标可能没有可用输出）");
+    }
+
+    /* v0.6.50：再把 IDXGIOutput5::DuplicateOutput1（槽 26）也接上（仅当该输出支持 IDXGIOutput5）。 */
+    if (g_installed && output != nullptr)
+    {
+        IDXGIOutput5* output5 = nullptr;
+        if (SUCCEEDED(output->QueryInterface(__uuidof(IDXGIOutput5), reinterpret_cast<void**>(&output5))) &&
+            output5 != nullptr)
+        {
+            void** vtbl5 = *reinterpret_cast<void***>(output5);
+            if (vtbl5 != nullptr && vtbl5[kSlotOutput5Duplicate1] != nullptr)
+            {
+                g_realDuplicate1 = reinterpret_cast<PFN_DuplicateOutput1>(vtbl5[kSlotOutput5Duplicate1]);
+                DWORD old5 = 0;
+                if (VirtualProtect(&vtbl5[kSlotOutput5Duplicate1], sizeof(void*), PAGE_READWRITE, &old5))
+                {
+                    vtbl5[kSlotOutput5Duplicate1] = reinterpret_cast<void*>(&TraceDuplicateOutput1);
+                    DWORD tmp5 = 0;
+                    VirtualProtect(&vtbl5[kSlotOutput5Duplicate1], sizeof(void*), old5, &tmp5);
+                    FlushInstructionCache(GetCurrentProcess(), &vtbl5[kSlotOutput5Duplicate1], sizeof(void*));
+                    YZLOGI(L"[DXGI 取证] 已补上 IDXGIOutput5::DuplicateOutput1（槽 0x68）");
+                }
+            }
+            output5->Release();
+        }
     }
 
     if (output1 != nullptr) output1->Release();
