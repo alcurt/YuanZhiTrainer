@@ -1,5 +1,4 @@
-﻿  ✗ [warn] 0 次 # YZTrainer 现场数据回收（v0.6.40 起随现场清单使用）
-#
+﻿#
 # 目的：从机房回来时**别漏东西**。踩过的坑：
 #   1) 只看 yzt.log 会漏掉真正活跃的那份——产品按 2MB 顺延编号（yzt.log / yzt-1.log / yzt-2.log …），
 #      机房跑一节课下来当前活跃的很可能是 -1 或 -2；
@@ -166,3 +165,6 @@ if ($diagCount -eq 0) {
     Write-Host ("已收到 {0} 个诊断包（期望含 广播 / 采集 / 退出 三份，按现场实际发生的取）。" -f $diagCount) -ForegroundColor Cyan
 }
 Write-Host '带回前请确认：manifest.txt 里"日志（含轮转档）"至少 1 份、诊断包数与你现场触发的次数对得上。' -ForegroundColor Cyan
+# ---- v0.6.49：回收前的固定提醒（不做自动判定，避免误报）----
+Write-Host ''
+Write-Host '提醒：现场备注请写成单独文件（清单第四节四问）。没有它，判读只能靠日志。' -ForegroundColor Yellow
