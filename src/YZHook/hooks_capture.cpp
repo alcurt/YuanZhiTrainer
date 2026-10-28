@@ -90,12 +90,40 @@ void ReleaseFrozen()
 }
 } /* namespace */
 
+/* v0.6.51：判断一个窗口是否"实际上就是整块屏幕"。
+   背景：厂商的 GDI 抓屏是 GetDC(某个全屏窗口)，不是 GetDC(NULL)；旧代码只在 hwnd==NULL 时
+   把 DC 记成"屏幕 DC"，于是 IsScreenDC 永远返回 false，Hook_BitBlt 的替换分支一次都没进过。
+   注意：hwnd == NULL 必须算"是屏幕"，否则 CaptureFreeze 自己取屏用的 GetDC(NULL) 都认不出来
+   （v0.6.51 第一次改就栽在这，导致冻结全盘失效、回归挂 4 项）。 */
+static bool IsScreenOrFullScreenWindow(HWND hwnd)
+{
+    if (hwnd == nullptr)
+        return true;                      /* GetDC(NULL) = 整屏 */
+    if (hwnd == GetDesktopWindow())
+        return true;
+
+    RECT rc = { 0, 0, 0, 0 };
+    if (!GetWindowRect(hwnd, &rc))
+        return false;
+
+    const int vx = GetSystemMetrics(SM_XVIRTUALSCREEN);
+    const int vy = GetSystemMetrics(SM_YVIRTUALSCREEN);
+    const int vw = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+    const int vh = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+    if (vw <= 0 || vh <= 0)
+        return false;
+
+    const int tol = 8;                    /* 全屏窗口常见 -8 这类边框偏移 */
+    return (rc.left <= vx + tol) && (rc.top <= vy + tol) &&
+           (rc.right >= vx + vw - tol) && (rc.bottom >= vy + vh - tol);
+}
+
 HDC WINAPI Hook_GetDC(HWND hwnd)
 {
     if (!yzhook::TryEnterHook())
         return g_realGetDC(hwnd);
     HDC dc = g_realGetDC(hwnd);
-    if (hwnd == nullptr && dc != nullptr)
+    if (dc != nullptr && IsScreenOrFullScreenWindow(hwnd))
         AddScreenDC(dc);
     yzhook::LeaveHook();
     return dc;
@@ -106,7 +134,7 @@ HDC WINAPI Hook_GetWindowDC(HWND hwnd)
     if (!yzhook::TryEnterHook())
         return g_realGetWindowDC(hwnd);
     HDC dc = g_realGetWindowDC(hwnd);
-    if (dc != nullptr && (hwnd == nullptr || hwnd == GetDesktopWindow()))
+    if (dc != nullptr && IsScreenOrFullScreenWindow(hwnd))
         AddScreenDC(dc);
     yzhook::LeaveHook();
     return dc;
@@ -154,7 +182,10 @@ BOOL WINAPI Hook_BitBlt(HDC hdc, int x, int y, int cx, int cy, HDC hdcSrc, int x
     {
         result = g_realBitBlt(hdc, x, y, cx, cy, g_frozenDC, x1 - g_vx, y1 - g_vy, rop);
         redirected = true;
-        InterlockedIncrement(&g_redirectCount);
+        const LONG seq = InterlockedIncrement(&g_redirectCount);
+        if (seq <= 5)
+            YZLOGI(L"[抓屏替换] BitBlt 命中屏幕源（第 %d 次）：%dx%d @ %d,%d rop=0x%08X",
+                   seq, cx, cy, x, y, (unsigned)rop);
     }
     else
     {
@@ -176,7 +207,9 @@ BOOL WINAPI Hook_StretchBlt(HDC hdc, int x, int y, int cx, int cy,
     if (g_frozen && IsScreenDC(hdcSrc) && g_frozenDC != nullptr)
     {
         result = g_realStretchBlt(hdc, x, y, cx, cy, g_frozenDC, x1 - g_vx, y1 - g_vy, w1, h1, rop);
-        InterlockedIncrement(&g_redirectCount);
+        const LONG seqS = InterlockedIncrement(&g_redirectCount);
+        if (seqS <= 5)
+            YZLOGI(L"[抓屏替换] StretchBlt 命中屏幕源（第 %d 次）：%dx%d rop=0x%08X", seqS, cx, cy, (unsigned)rop);
     }
     else
     {
