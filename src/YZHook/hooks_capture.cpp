@@ -29,7 +29,7 @@ PFN_PrintWindow g_realPrintWindow = nullptr;
 CRITICAL_SECTION g_cs;
 bool             g_csInit = false;
 std::set<HDC>    g_screenDCs;
-
+std::set<HDC>    g_windowDCs;   /* v0.6.55：任意窗口 DC（不要求全屏） */
 HDC     g_frozenDC   = nullptr;
 HBITMAP g_frozenBmp  = nullptr;
 void*   g_frozenBits = nullptr;
@@ -43,6 +43,29 @@ volatile LONG g_redirectCount = 0;
 
 void Lock()   { if (g_csInit) EnterCriticalSection(&g_cs); }
 void Unlock() { if (g_csInit) LeaveCriticalSection(&g_cs); }
+
+/* v0.6.55：第二个集合 —— 来自 GetDC/GetWindowDC 的"窗口 DC"（不要求覆盖整个屏幕）。
+   录屏器抓的是它选定的那个窗口（WndToCapture），窗口不是全屏；预览阶段用的是 GetDC(NULL)，
+   于是"预览被替换、录制不被替换"完全可以用这一点解释，不能据此断言"录制不走 BitBlt"。 */
+void AddWindowDC(HDC dc)
+{
+    if (dc == nullptr)
+        return;
+    Lock();
+    if (g_windowDCs.size() > 64)
+        g_windowDCs.clear();
+    g_windowDCs.insert(dc);
+    Unlock();
+}
+
+bool IsWindowDC(HDC dc)
+{
+    bool found = false;
+    Lock();
+    found = g_windowDCs.find(dc) != g_windowDCs.end();
+    Unlock();
+    return found;
+}
 
 void AddScreenDC(HDC dc)
 {
@@ -125,6 +148,7 @@ HDC WINAPI Hook_GetDC(HWND hwnd)
     HDC dc = g_realGetDC(hwnd);
     if (dc != nullptr && IsScreenOrFullScreenWindow(hwnd))
         AddScreenDC(dc);
+    AddWindowDC(dc);
     yzhook::LeaveHook();
     return dc;
 }
@@ -136,6 +160,7 @@ HDC WINAPI Hook_GetWindowDC(HWND hwnd)
     HDC dc = g_realGetWindowDC(hwnd);
     if (dc != nullptr && IsScreenOrFullScreenWindow(hwnd))
         AddScreenDC(dc);
+    AddWindowDC(dc);
     yzhook::LeaveHook();
     return dc;
 }
@@ -178,7 +203,8 @@ BOOL WINAPI Hook_BitBlt(HDC hdc, int x, int y, int cx, int cy, HDC hdcSrc, int x
 
     BOOL result = FALSE;
     bool redirected = false;
-    if (g_frozen && IsScreenDC(hdcSrc) && g_frozenDC != nullptr)
+    const bool srcIsWindowDC = IsWindowDC(hdcSrc);
+    if (g_frozen && (IsScreenDC(hdcSrc) || srcIsWindowDC) && g_frozenDC != nullptr)
     {
         result = g_realBitBlt(hdc, x, y, cx, cy, g_frozenDC, x1 - g_vx, y1 - g_vy, rop);
         redirected = true;
@@ -190,6 +216,16 @@ BOOL WINAPI Hook_BitBlt(HDC hdc, int x, int y, int cx, int cy, HDC hdcSrc, int x
     else
     {
         result = g_realBitBlt(hdc, x, y, cx, cy, hdcSrc, x1, y1, rop);
+        /* v0.6.55：冻结期间"没被替换"的 BitBlt 也记前 5 次，用来区分
+           "根本没调 BitBlt" 与 "调了但源 DC 没被认出来"。 */
+        if (g_frozen)
+        {
+            static LONG s_miss = 0;
+            const LONG miss = InterlockedIncrement(&s_miss);
+            if (miss <= 5)
+                YZLOGI(L"[抓屏替换] 未替换的 BitBlt（第 %d 次）：%dx%d src=0x%p 窗口DC=%d 屏幕DC=%d rop=0x%08X",
+                       miss, cx, cy, hdcSrc, srcIsWindowDC ? 1 : 0, IsScreenDC(hdcSrc) ? 1 : 0, (unsigned)rop);
+        }
     }
     (void)redirected;
 
