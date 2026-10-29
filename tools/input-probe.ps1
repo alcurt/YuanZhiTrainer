@@ -311,6 +311,8 @@ if ($WatchMinutes -gt 0) {
     $wAsyncNoHook = 0; $wKeyChanges = 0; $wRefresh = 0; $wHeartbeat = (Get-Date).AddSeconds(30)
     # 光标轨迹统计（用户 2026-10-15 描述的现场现象：被锁时鼠标能移动，但几百毫秒就被拽回左上角）
     $wAwayStart = $null; $wAwaySpans = @(); $wAwayMax = 0; $wAwayMaxDist = 0
+    # 停点分布：现场被摁住的角不一定是 (0,0)，所以同时统计"出现最多的点"（原先只数 (0,0)，会漏判）
+    $wPointTally = @{}
     try {
         while ((Get-Date) -lt $wEnd) {
             [void][YzInputProbe]::PumpOnce()
@@ -318,6 +320,8 @@ if ($WatchMinutes -gt 0) {
             [YzInputProbe]::SampleCursor()
             $wSamples++
             $cx = [YzInputProbe]::CursorX; $cy = [YzInputProbe]::CursorY
+            $ptKey = '{0},{1}' -f $cx, $cy
+            if ($wPointTally.ContainsKey($ptKey)) { $wPointTally[$ptKey]++ } else { $wPointTally[$ptKey] = 1 }
             if ($cx -eq 0 -and $cy -eq 0) {
                 $wZero++
                 if ($null -ne $wAwayStart) {          # 一段"离开左上角"到此结束 ⇒ 记下它有多久
@@ -378,6 +382,15 @@ if ($WatchMinutes -gt 0) {
          [YzInputProbe]::KeyEventCount, [YzInputProbe]::PhysicalCount, [YzInputProbe]::InjectedCount, `
          [YzInputProbe]::MouseEventCount, [YzInputProbe]::MousePhysicalCount, [YzInputProbe]::MouseInjectedCount)
     Say ("  光标停在 (0,0) 的比例: {0:P1}" -f $(if ($wSamples -gt 0) { $wZero / $wSamples } else { 0 }))
+    if ($wPointTally.Count -gt 0) {
+        $topPts = @($wPointTally.GetEnumerator() | Sort-Object Value -Descending | Select-Object -First 3)
+        $topLine = ($topPts | ForEach-Object { '{0} ×{1}' -f $_.Key, $_.Value }) -join '；'
+        Say ("  停点分布前 3: {0}（共 {1} 个不同点）" -f $topLine, $wPointTally.Count)
+        $best = $topPts[0]
+        if ($best.Key -ne '0,0' -and $wSamples -gt 0) {
+            Say ("  注意：出现最多的点是 {0}（{1:P1}），不是 (0,0) —— 现场被摁住的角可能不是左上角，判「被拽回 (0,0)」之前先看这一行。" -f $best.Key, ($best.Value / $wSamples))
+        }
+    }
     if ($wAwaySpans.Count -gt 0) {
         $sorted = @($wAwaySpans | Sort-Object)
         $median = $sorted[[int]($sorted.Count / 2)]
