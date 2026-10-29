@@ -309,18 +309,29 @@ bool CaptureFreeze()
     if (g_frozen)
         return true;
     if (g_realGetDC == nullptr || g_realBitBlt == nullptr)
+    {
+        /* v0.6.54：原来是静默返回，现场只看到"DXGI 冻结: 已开启"却查不出为什么没有底图。 */
+        YZLOGI(L"CaptureFreeze: 钩子原指针未就绪（GetDC=%p BitBlt=%p），本次跳过",
+               reinterpret_cast<void*>(g_realGetDC), reinterpret_cast<void*>(g_realBitBlt));
         return false;
+    }
 
     const int vx = GetSystemMetrics(SM_XVIRTUALSCREEN);
     const int vy = GetSystemMetrics(SM_YVIRTUALSCREEN);
     const int vw = GetSystemMetrics(SM_CXVIRTUALSCREEN);
     const int vh = GetSystemMetrics(SM_CYVIRTUALSCREEN);
     if (vw <= 0 || vh <= 0)
+    {
+        YZLOGE(L"CaptureFreeze: 虚拟屏幕尺寸非法（%d,%d %dx%d）", vx, vy, vw, vh);
         return false;
+    }
 
     HDC screen = g_realGetDC(nullptr);
     if (screen == nullptr)
+    {
+        YZLOGE(L"CaptureFreeze: GetDC(NULL) 失败（err=%u）—— 会话无屏幕访问时会出现", GetLastError());
         return false;
+    }
 
     BITMAPINFO bmi;
     ZeroMemory(&bmi, sizeof(bmi));

@@ -129,6 +129,19 @@ void ApplyEffectiveFlags()
     InterlockedExchange(&yzhook::g_flags, static_cast<LONG>(effective));
 
     bool wantFrozen = (effective & YZ_FLAG_ANTI_MONITOR) != 0;
+    /* v0.6.54：生效位留痕。抓屏子进程若因考试模式把 effective 清零，wantFrozen 会是 false，
+       而日志上只有"DXGI 冻结: 已开启"，现场根本看不出来。只在值变化时打一行。 */
+    {
+        static LONG s_lastLogged = -1;
+        const LONG nowBits = static_cast<LONG>(effective) | (wantFrozen ? 0x10000 : 0) | (yzhook::g_examMode != 0 ? 0x20000 : 0);
+        if (nowBits != s_lastLogged)
+        {
+            s_lastLogged = nowBits;
+            YZLOGI(L"生效位: flags=0x%X wantFrozen=%d examMode=%d 抓屏进程=%d",
+                   (unsigned)effective, wantFrozen ? 1 : 0, yzhook::g_examMode != 0 ? 1 : 0,
+                   yzhook::ProcessLoadedCaptureComponent() ? 1 : 0);
+        }
+    }
     g_wantFrozen = wantFrozen;
     if (wantFrozen && !yzhook::CaptureIsFrozen())
     {
@@ -314,6 +327,9 @@ void RefreshCaptureFreezeFromFile()
     if (anti == 0)
     {
         yzhook::DupTraceSetFreeze(false);
+        /* v0.6.54：GDI 这边也要解冻，否则关了防监视底图还留着 */
+        if (yzhook::CaptureIsFrozen())
+            yzhook::CaptureUnfreeze();
         return;
     }
     if (yzhook::ProcessLoadedCaptureComponent() && !yzhook::DupTraceIsFrozen())
@@ -321,6 +337,15 @@ void RefreshCaptureFreezeFromFile()
         /* 只置冻结标志不够——vtable 交换也得装上，否则调用方走的还是真函数。装钩是幂等的。 */
         yzhook::DupTraceInstall(true);
         yzhook::DupTraceSetFreeze(true);
+    }
+
+    /* v0.6.54：这条文件通道是**唯一确定能到达抓屏子进程**的路径（它读文件，不依赖管道握手，
+       也不经过 ApplyEffectiveFlags）。原来它只武装 DXGI，所以抓屏子进程哪怕收不到配置帧，
+       DXGI 也显示"已开启"、GDI 底图却永远不存在。这里把 GDI 一起武装上。 */
+    if (yzhook::ProcessLoadedCaptureComponent() && !yzhook::CaptureIsFrozen())
+    {
+        if (yzhook::CaptureFreeze())
+            YZLOGI(L"补充状态通道: GDI 冻结底图已武装（不经配置帧）");
     }
 }
 void SweepTick()
