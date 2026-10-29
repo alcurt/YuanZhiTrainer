@@ -113,6 +113,13 @@ void FillStatus(YZ_STATUS* status, DWORD opcodeUnused)
     wcsncpy_s(status->hostPath, MAX_PATH, host.c_str(), _TRUNCATE);
 }
 
+/* v0.6.53：惰性补齐冻结底图所需的意图位。
+   现场形态（虚拟机台架三次注入复现）：配置帧可能比 CaptureHooksInstall 更早到达，
+   此时 g_realGetDC / g_realBitBlt 还没取到，CaptureFreeze() 会静默返回 false；
+   而它是 CaptureFreeze 的唯一调用点，于是"防监视已勾选、DXGI 也已开启"，
+   GDI 冻结底图却永远没生成 —— 教师端画面照常。SweepTick 里按这个意图位补一次。 */
+static bool g_wantFrozen = false;
+
 void ApplyEffectiveFlags()
 {
     /* 只让功能位参与生效计算，控制位（如 EnableExamGuard）不得混进 g_flags */
@@ -122,8 +129,16 @@ void ApplyEffectiveFlags()
     InterlockedExchange(&yzhook::g_flags, static_cast<LONG>(effective));
 
     bool wantFrozen = (effective & YZ_FLAG_ANTI_MONITOR) != 0;
+    g_wantFrozen = wantFrozen;
     if (wantFrozen && !yzhook::CaptureIsFrozen())
-        yzhook::CaptureFreeze();
+    {
+        if (!yzhook::CaptureFreeze())
+        {
+            static LONG s_freezeFailLogged = 0;
+            if (InterlockedExchange(&s_freezeFailLogged, 1) == 0)
+                YZLOGI(L"冻结底图暂未生成（钩子未就绪），将在扫描周期内惰性补齐");
+        }
+    }
     else if (!wantFrozen && yzhook::CaptureIsFrozen())
         yzhook::CaptureUnfreeze();
 
@@ -313,6 +328,15 @@ void SweepTick()
     if (yzhook::g_examMode != 0)
         return;
     RefreshCaptureFreezeFromFile();   /* v0.6.36：抓屏子进程的补充状态通道 */
+
+    /* v0.6.53：惰性补齐冻结底图。配置帧早于 CaptureHooksInstall 时，ApplyEffectiveFlags
+       那次 CaptureFreeze() 会因为原指针还没取到而失败（静默返回 false），且没有重试。
+       这里每轮扫一次，钩子就绪后立刻补上；成功只打一次日志。 */
+    if (g_wantFrozen && !yzhook::CaptureIsFrozen())
+    {
+        if (yzhook::CaptureFreeze())
+            YZLOGI(L"冻结底图惰性补齐成功（此前钩子未就绪，本轮补上）");
+    }
     yzhook::WindowSweepTick();
     yzhook::InputEnforceTick();
 
