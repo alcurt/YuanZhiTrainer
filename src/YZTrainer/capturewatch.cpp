@@ -32,8 +32,8 @@ struct CaptureHitRecord
 };
 
 const DWORD kScanIntervalMs  = 30000;    /* 常规扫描节流 */
-const DWORD kFullSweepMs     = 300000;   /* 全进程兜底扫：5 分钟 */
-const DWORD kYoungWindowMs   = 30000;    /* 新进程观察窗：这段时间内每轮都重扫 */
+const DWORD kFullSweepMs     = 300000;   /* 全进程兜底扫：5 分钟（不受扫描周期影响） */
+const DWORD kYoungWindowMs   = 10000;    /* 新进程观察窗：新进程出现后这段时间内每轮都重扫（v0.6.52 由 30 秒降到 10 秒） */
 const DWORD kRelogIntervalMs = 300000;   /* 同一命中重复记日志的节流 */
 
 DWORD                        g_lastScanTick    = 0;
