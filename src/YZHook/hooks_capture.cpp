@@ -211,19 +211,41 @@ BOOL WINAPI Hook_BitBlt(HDC hdc, int x, int y, int cx, int cy, HDC hdcSrc, int x
     HDC frozenDC = nullptr;
     int fvx = 0;
     int fvy = 0;
+    bool bySizeOnly = false;
     Lock();
-    if (g_frozen && g_frozenDC != nullptr && (IsScreenDC(hdcSrc) || srcIsWindowDC))
+    if (g_frozen && g_frozenDC != nullptr)
     {
+        const bool dcKnown = IsScreenDC(hdcSrc) || srcIsWindowDC;
+        /* v0.6.57：整屏兜底。现场偶发缺陷（5 次样本 4 成 1 败）是**抓屏 DC 未登记**：
+           抓屏进程缓存的 DC 若在装钩之前取得，就永远进不了登记表，之后整屏 BitBlt 全部命中不了。
+           此时按"尺寸与位置都等于虚拟屏幕"认作抓屏，避免因为登记缺失整段失效。 */
+        const bool sizeMatch = (cx == g_vw && cy == g_vh && x1 == g_vx && y1 == g_vy);
+        if (dcKnown || sizeMatch)
+        {
         frozenDC = g_frozenDC;
         fvx = g_vx;
         fvy = g_vy;
+        bySizeOnly = (!dcKnown && sizeMatch);
         result = g_realBitBlt(hdc, x, y, cx, cy, frozenDC, x1 - fvx, y1 - fvy, rop);
         redirected = true;
         const LONG seq = InterlockedIncrement(&g_redirectCount);
         if (seq <= 5)
-            YZLOGI(L"[抓屏替换] BitBlt 命中屏幕源（第 %d 次）：%dx%d @ %d,%d rop=0x%08X",
-                   seq, cx, cy, x, y, (unsigned)rop);
+        {
+            if (bySizeOnly)
+                YZLOGI(L"[抓屏替换] BitBlt 按整屏尺寸兜底命中（DC 未登记，第 %d 次）：%dx%d @ %d,%d rop=0x%08X",
+                       seq, cx, cy, x, y, (unsigned)rop);
+            else
+                YZLOGI(L"[抓屏替换] BitBlt 命中屏幕源（第 %d 次）：%dx%d @ %d,%d rop=0x%08X",
+                       seq, cx, cy, x, y, (unsigned)rop);
+        }
+        }
     }
+    Unlock();
+    /* v0.6.57：诊断字段必须在"未命中"分支里重新取一次真值。
+       旧版把只在命中分支赋值的 frozenDC 打出来，于是永远显示 0x0，误导判读（台架已被误导一次）。 */
+    HDC curFrozenDC = nullptr;
+    Lock();
+    curFrozenDC = g_frozenDC;
     Unlock();
     if (!redirected)
     {
@@ -237,7 +259,7 @@ BOOL WINAPI Hook_BitBlt(HDC hdc, int x, int y, int cx, int cy, HDC hdcSrc, int x
             if (miss <= 5)
                 YZLOGI(L"[抓屏替换] 未替换的 BitBlt（第 %d 次）：%dx%d src=0x%p 窗口DC=%d 屏幕DC=%d 底图DC=0x%p rop=0x%08X",
                        miss, cx, cy, hdcSrc, srcIsWindowDC ? 1 : 0, IsScreenDC(hdcSrc) ? 1 : 0,
-                       reinterpret_cast<void*>(frozenDC), (unsigned)rop);
+                       reinterpret_cast<void*>(curFrozenDC), (unsigned)rop);
         }
     }
     (void)redirected;
