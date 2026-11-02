@@ -16,6 +16,8 @@ typedef BOOL (WINAPI *PFN_DeleteDC)(HDC);
 typedef BOOL (WINAPI *PFN_BitBlt)(HDC, int, int, int, int, HDC, int, int, DWORD);
 typedef BOOL (WINAPI *PFN_StretchBlt)(HDC, int, int, int, int, HDC, int, int, int, int, DWORD);
 typedef BOOL (WINAPI *PFN_PrintWindow)(HWND, HDC, UINT);
+typedef HDC  (WINAPI *PFN_GetDCEx)(HWND, HRGN, DWORD);
+typedef int  (WINAPI *PFN_GetDIBits)(HDC, HBITMAP, UINT, UINT, LPVOID, LPBITMAPINFO, UINT);
 
 PFN_GetDC       g_realGetDC       = nullptr;
 PFN_GetWindowDC g_realGetWindowDC = nullptr;
@@ -25,6 +27,8 @@ PFN_DeleteDC    g_realDeleteDC    = nullptr;
 PFN_BitBlt      g_realBitBlt      = nullptr;
 PFN_StretchBlt  g_realStretchBlt  = nullptr;
 PFN_PrintWindow g_realPrintWindow = nullptr;
+PFN_GetDCEx     g_realGetDCEx     = nullptr;   /* v0.6.59：老代码常用 GetDCEx 取 DC */
+PFN_GetDIBits   g_realGetDIBits   = nullptr;   /* v0.6.59：观测用，不改变行为 */
 
 CRITICAL_SECTION g_cs;
 bool             g_csInit = false;
@@ -341,6 +345,50 @@ BOOL WINAPI Hook_PrintWindow(HWND hwnd, HDC hdc, UINT flags)
     return result;
 }
 
+/* v0.6.59：GetDCEx 拿到的 DC 也登记成"窗口 DC"。
+   之前只登记 GetDC/GetWindowDC，用 GetDCEx 取 DC 的代码（多见于 2000 年代的老模块）漏了。 */
+HDC WINAPI Hook_GetDCEx(HWND hwnd, HRGN hrgnClip, DWORD flags)
+{
+    if (!yzhook::TryEnterHook())
+        return g_realGetDCEx(hwnd, hrgnClip, flags);
+    HDC dc = g_realGetDCEx(hwnd, hrgnClip, flags);
+    AddWindowDC(dc);
+    yzhook::LeaveHook();
+    return dc;
+}
+
+/* v0.6.59：GetDIBits 观测。这是唯一没被覆盖的 GDI 抓屏原语，AdCap/ExdPaint/ScreenRecoder 都导入它。
+   这一版**只记录、不改变行为**——先用数据判断"课堂监视那条路到底用不用它"，再决定要不要冻结它。
+   记录 hdc 是否已登记、目标位图尺寸、以及当时冻结与否，前 5 次。 */
+int WINAPI Hook_GetDIBits(HDC hdc, HBITMAP hbm, UINT start, UINT lines,
+                          LPVOID bits, LPBITMAPINFO bmi, UINT usage)
+{
+    if (!yzhook::TryEnterHook())
+        return g_realGetDIBits(hdc, hbm, start, lines, bits, bmi, usage);
+
+    const int result = g_realGetDIBits(hdc, hbm, start, lines, bits, bmi, usage);
+
+    static LONG s_seen = 0;
+    const LONG n = InterlockedIncrement(&s_seen);
+    if (n <= 5)
+    {
+        BITMAP bm;
+        ZeroMemory(&bm, sizeof(bm));
+        if (hbm != nullptr)
+            GetObjectW(hbm, sizeof(bm), &bm);
+        FrozenSnap snap;
+        Lock();
+        SnapFrozenLocked(&snap);
+        Unlock();
+        YZLOGI(L"[抓屏观测] GetDIBits 第 %d 次：hdc=0x%p hbm=0x%p 位图=%dx%dx%dbpp start=%u lines=%u 窗口DC=%d 屏幕DC=%d 冻结=%d",
+               n, hdc, hbm, (int)bm.bmWidth, (int)bm.bmHeight, (int)bm.bmBitsPixel,
+               start, lines, IsWindowDC(hdc) ? 1 : 0, IsScreenDC(hdc) ? 1 : 0, snap.frozen ? 1 : 0);
+    }
+
+    yzhook::LeaveHook();
+    return result;
+}
+
 namespace yzhook
 {
 bool CaptureHooksInstall(bool enableNow)
@@ -367,6 +415,8 @@ bool CaptureHooksInstall(bool enableNow)
     ok = HookAttach("capture", L"gdi32.dll", "DeleteDC", reinterpret_cast<void*>(&Hook_DeleteDC), false) && ok;
     ok = HookAttach("capture", L"gdi32.dll", "BitBlt", reinterpret_cast<void*>(&Hook_BitBlt), false) && ok;
     ok = HookAttach("capture", L"gdi32.dll", "StretchBlt", reinterpret_cast<void*>(&Hook_StretchBlt), false) && ok;
+    ok = HookAttach("capture", L"user32.dll", "GetDCEx", reinterpret_cast<void*>(&Hook_GetDCEx), false) && ok;
+    ok = HookAttach("capture", L"gdi32.dll", "GetDIBits", reinterpret_cast<void*>(&Hook_GetDIBits), false) && ok;
 
     g_realGetDC       = reinterpret_cast<PFN_GetDC>(HookGetOriginal(reinterpret_cast<void*>(&Hook_GetDC)));
     g_realGetWindowDC = reinterpret_cast<PFN_GetWindowDC>(HookGetOriginal(reinterpret_cast<void*>(&Hook_GetWindowDC)));
@@ -376,13 +426,16 @@ bool CaptureHooksInstall(bool enableNow)
     g_realBitBlt      = reinterpret_cast<PFN_BitBlt>(HookGetOriginal(reinterpret_cast<void*>(&Hook_BitBlt)));
     g_realStretchBlt  = reinterpret_cast<PFN_StretchBlt>(HookGetOriginal(reinterpret_cast<void*>(&Hook_StretchBlt)));
     g_realPrintWindow = reinterpret_cast<PFN_PrintWindow>(HookGetOriginal(reinterpret_cast<void*>(&Hook_PrintWindow)));
+    g_realGetDCEx     = reinterpret_cast<PFN_GetDCEx>(HookGetOriginal(reinterpret_cast<void*>(&Hook_GetDCEx)));
+    g_realGetDIBits   = reinterpret_cast<PFN_GetDIBits>(HookGetOriginal(reinterpret_cast<void*>(&Hook_GetDIBits)));
 
     /* 只要有一个原指针没拿到，整组就保持停用：宁可功能不生效，也不能让任何
        detour 在空指针上被调用（Hook_PrintWindow 还会用到 g_realBitBlt，
        所以这里必须逐个检查，不能只查"关键"的两个）。 */
     if (g_realGetDC == nullptr || g_realGetWindowDC == nullptr || g_realReleaseDC == nullptr ||
         g_realCreateDCW == nullptr || g_realDeleteDC == nullptr || g_realBitBlt == nullptr ||
-        g_realStretchBlt == nullptr || g_realPrintWindow == nullptr)
+        g_realStretchBlt == nullptr || g_realPrintWindow == nullptr ||
+        g_realGetDCEx == nullptr || g_realGetDIBits == nullptr)
     {
         YZLOGE(L"CaptureHooksInstall: 原始函数指针不完整，采集 hook 保持停用");
         return false;
