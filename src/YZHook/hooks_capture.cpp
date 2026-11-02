@@ -67,6 +67,30 @@ bool IsWindowDC(HDC dc)
     return found;
 }
 
+/* v0.6.58：冻结状态、底图 DC 与虚拟屏幕矩形必须在同一把锁下取到同一时刻的值。
+   旧版 Hook_BitBlt 的决策在锁内，但未命中日志用的 g_frozen 是解锁后再读一次 ——
+   重建窗口里会出现"决策时未冻结、日志却说冻结"，台架据此被误导过两次。
+   本结构由 SnapFrozenLocked() 填充（调用方必须已持有 g_cs）。 */
+struct FrozenSnap
+{
+    bool frozen;
+    HDC  dc;
+    int  vx;
+    int  vy;
+    int  vw;
+    int  vh;
+};
+
+void SnapFrozenLocked(FrozenSnap* s)
+{
+    s->frozen = g_frozen;
+    s->dc     = g_frozenDC;
+    s->vx     = g_vx;
+    s->vy     = g_vy;
+    s->vw     = g_vw;
+    s->vh     = g_vh;
+}
+
 void AddScreenDC(HDC dc)
 {
     if (dc == nullptr)
@@ -204,29 +228,27 @@ BOOL WINAPI Hook_BitBlt(HDC hdc, int x, int y, int cx, int cy, HDC hdcSrc, int x
     BOOL result = FALSE;
     bool redirected = false;
     const bool srcIsWindowDC = IsWindowDC(hdcSrc);
+
+    /* v0.6.58：一次锁内快照，决策与日志都用它。 */
+    FrozenSnap snap;
+    bool bySizeOnly = false;
     /* v0.6.56：冻结标志、底图 DC 与虚拟屏幕原点必须在同一把锁下取用。
        否则会和 CaptureFreeze() 里 ReleaseFrozen()→重建之间撕裂：钩子读到旧的 g_frozen=true
        与新的 g_frozenDC=nullptr，第三个条件不成立 ⇒ 明明两个判定位都是 1 却没被替换，
        现场看到的就是那条自相矛盾的"未替换"日志。 */
-    HDC frozenDC = nullptr;
-    int fvx = 0;
-    int fvy = 0;
-    bool bySizeOnly = false;
     Lock();
-    if (g_frozen && g_frozenDC != nullptr)
+    SnapFrozenLocked(&snap);
+    if (snap.frozen && snap.dc != nullptr)
     {
         const bool dcKnown = IsScreenDC(hdcSrc) || srcIsWindowDC;
         /* v0.6.57：整屏兜底。现场偶发缺陷（5 次样本 4 成 1 败）是**抓屏 DC 未登记**：
            抓屏进程缓存的 DC 若在装钩之前取得，就永远进不了登记表，之后整屏 BitBlt 全部命中不了。
            此时按"尺寸与位置都等于虚拟屏幕"认作抓屏，避免因为登记缺失整段失效。 */
-        const bool sizeMatch = (cx == g_vw && cy == g_vh && x1 == g_vx && y1 == g_vy);
+        const bool sizeMatch = (cx == snap.vw && cy == snap.vh && x1 == snap.vx && y1 == snap.vy);
         if (dcKnown || sizeMatch)
         {
-        frozenDC = g_frozenDC;
-        fvx = g_vx;
-        fvy = g_vy;
         bySizeOnly = (!dcKnown && sizeMatch);
-        result = g_realBitBlt(hdc, x, y, cx, cy, frozenDC, x1 - fvx, y1 - fvy, rop);
+        result = g_realBitBlt(hdc, x, y, cx, cy, snap.dc, x1 - snap.vx, y1 - snap.vy, rop);
         redirected = true;
         const LONG seq = InterlockedIncrement(&g_redirectCount);
         if (seq <= 5)
@@ -241,25 +263,19 @@ BOOL WINAPI Hook_BitBlt(HDC hdc, int x, int y, int cx, int cy, HDC hdcSrc, int x
         }
     }
     Unlock();
-    /* v0.6.57：诊断字段必须在"未命中"分支里重新取一次真值。
-       旧版把只在命中分支赋值的 frozenDC 打出来，于是永远显示 0x0，误导判读（台架已被误导一次）。 */
-    HDC curFrozenDC = nullptr;
-    Lock();
-    curFrozenDC = g_frozenDC;
-    Unlock();
     if (!redirected)
     {
         result = g_realBitBlt(hdc, x, y, cx, cy, hdcSrc, x1, y1, rop);
         /* v0.6.55：冻结期间"没被替换"的 BitBlt 也记前 5 次，用来区分
            "根本没调 BitBlt" 与 "调了但源 DC 没被认出来"。 */
-        if (g_frozen)
+        if (snap.frozen)
         {
             static LONG s_miss = 0;
             const LONG miss = InterlockedIncrement(&s_miss);
             if (miss <= 5)
-                YZLOGI(L"[抓屏替换] 未替换的 BitBlt（第 %d 次）：%dx%d src=0x%p 窗口DC=%d 屏幕DC=%d 底图DC=0x%p rop=0x%08X",
+                YZLOGI(L"[抓屏替换] 未替换的 BitBlt（第 %d 次）：%dx%d src=0x%p 窗口DC=%d 屏幕DC=%d 冻结=%d 底图DC=0x%p rop=0x%08X",
                        miss, cx, cy, hdcSrc, srcIsWindowDC ? 1 : 0, IsScreenDC(hdcSrc) ? 1 : 0,
-                       reinterpret_cast<void*>(curFrozenDC), (unsigned)rop);
+                       snap.frozen ? 1 : 0, reinterpret_cast<void*>(snap.dc), (unsigned)rop);
         }
     }
     (void)redirected;
@@ -275,17 +291,27 @@ BOOL WINAPI Hook_StretchBlt(HDC hdc, int x, int y, int cx, int cy,
         return g_realStretchBlt(hdc, x, y, cx, cy, hdcSrc, x1, y1, w1, h1, rop);
 
     BOOL result = FALSE;
-    if (g_frozen && IsScreenDC(hdcSrc) && g_frozenDC != nullptr)
+    bool redirected = false;
+    FrozenSnap snap;
+    Lock();
+    SnapFrozenLocked(&snap);
+    if (snap.frozen && snap.dc != nullptr)
     {
-        result = g_realStretchBlt(hdc, x, y, cx, cy, g_frozenDC, x1 - g_vx, y1 - g_vy, w1, h1, rop);
-        const LONG seqS = InterlockedIncrement(&g_redirectCount);
-        if (seqS <= 5)
-            YZLOGI(L"[抓屏替换] StretchBlt 命中屏幕源（第 %d 次）：%dx%d rop=0x%08X", seqS, cx, cy, (unsigned)rop);
+        const bool dcKnown = IsScreenDC(hdcSrc) || IsWindowDC(hdcSrc);
+        const bool sizeMatch = (cx == snap.vw && cy == snap.vh);
+        if (dcKnown || sizeMatch)
+        {
+            result = g_realStretchBlt(hdc, x, y, cx, cy, snap.dc, x1 - snap.vx, y1 - snap.vy, w1, h1, rop);
+            redirected = true;
+            const LONG seqS = InterlockedIncrement(&g_redirectCount);
+            if (seqS <= 5)
+                YZLOGI(L"[抓屏替换] StretchBlt 命中屏幕源（第 %d 次）：%dx%d rop=0x%08X%s", seqS, cx, cy, (unsigned)rop,
+                       dcKnown ? L"" : L"（按整屏尺寸兜底）");
+        }
     }
-    else
-    {
+    Unlock();
+    if (!redirected)
         result = g_realStretchBlt(hdc, x, y, cx, cy, hdcSrc, x1, y1, w1, h1, rop);
-    }
 
     yzhook::LeaveHook();
     return result;
@@ -297,15 +323,19 @@ BOOL WINAPI Hook_PrintWindow(HWND hwnd, HDC hdc, UINT flags)
         return g_realPrintWindow(hwnd, hdc, flags);
 
     BOOL result = FALSE;
-    if (g_frozen && g_frozenDC != nullptr)
+    bool redirected = false;
+    FrozenSnap snap;
+    Lock();
+    SnapFrozenLocked(&snap);
+    if (snap.frozen && snap.dc != nullptr)
     {
-        result = g_realBitBlt(hdc, 0, 0, g_vw, g_vh, g_frozenDC, 0, 0, SRCCOPY);
+        result = g_realBitBlt(hdc, 0, 0, snap.vw, snap.vh, snap.dc, 0, 0, SRCCOPY);
+        redirected = true;
         InterlockedIncrement(&g_redirectCount);
     }
-    else
-    {
+    Unlock();
+    if (!redirected)
         result = g_realPrintWindow(hwnd, hdc, flags);
-    }
 
     yzhook::LeaveHook();
     return result;
