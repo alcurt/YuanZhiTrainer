@@ -694,7 +694,12 @@ void LogHooked(const wchar_t* fmt, ...)
 
 /* 采集组件的名字标记：抓屏子进程（真实形态 C:\Windows\SysWOW64\rundll32.exe "…\ExdDtDup.dll",RunCapture 0）、
    以及可能的其它采集实现。命令行与已加载模块两处都用它。 */
-static const wchar_t* const kCaptureMarks[] = { L"ExdDtDup", L"ExdElite", L"ExdPaint", L"ScreenRecoder" };
+/* v0.6.60：补上 Thumbnail 与 AdCap。缩略图是教师端**持续刷新**的那条路（教师很少点开单台监视），
+    静态分析指向 Thumbnail.ads（加载在 Yistart 内、自带 GDI）与 AdCap.dll（CreateCpObject + 一整套 GDI）。
+    缺了这两个名字，ProcessLoadedCaptureComponent() 在"只加载了它们的宿主"里恒为假，
+    文件通道那条唯一确定能到达抓屏进程的路径就不会武装冻结。 */
+static const wchar_t* const kCaptureMarks[] = { L"ExdDtDup", L"ExdElite", L"ExdPaint", L"ScreenRecoder",
+                                                L"Thumbnail", L"AdCap" };
 
 /* 本进程的**命令行**里有没有采集组件标记。
    用途见 EngineIsTargetHost：抓屏子进程的自身路径既不在远志目录下、也不叫 YZSimTarget，
