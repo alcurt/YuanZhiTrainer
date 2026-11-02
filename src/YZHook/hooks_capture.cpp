@@ -204,16 +204,28 @@ BOOL WINAPI Hook_BitBlt(HDC hdc, int x, int y, int cx, int cy, HDC hdcSrc, int x
     BOOL result = FALSE;
     bool redirected = false;
     const bool srcIsWindowDC = IsWindowDC(hdcSrc);
-    if (g_frozen && (IsScreenDC(hdcSrc) || srcIsWindowDC) && g_frozenDC != nullptr)
+    /* v0.6.56：冻结标志、底图 DC 与虚拟屏幕原点必须在同一把锁下取用。
+       否则会和 CaptureFreeze() 里 ReleaseFrozen()→重建之间撕裂：钩子读到旧的 g_frozen=true
+       与新的 g_frozenDC=nullptr，第三个条件不成立 ⇒ 明明两个判定位都是 1 却没被替换，
+       现场看到的就是那条自相矛盾的"未替换"日志。 */
+    HDC frozenDC = nullptr;
+    int fvx = 0;
+    int fvy = 0;
+    Lock();
+    if (g_frozen && g_frozenDC != nullptr && (IsScreenDC(hdcSrc) || srcIsWindowDC))
     {
-        result = g_realBitBlt(hdc, x, y, cx, cy, g_frozenDC, x1 - g_vx, y1 - g_vy, rop);
+        frozenDC = g_frozenDC;
+        fvx = g_vx;
+        fvy = g_vy;
+        result = g_realBitBlt(hdc, x, y, cx, cy, frozenDC, x1 - fvx, y1 - fvy, rop);
         redirected = true;
         const LONG seq = InterlockedIncrement(&g_redirectCount);
         if (seq <= 5)
             YZLOGI(L"[抓屏替换] BitBlt 命中屏幕源（第 %d 次）：%dx%d @ %d,%d rop=0x%08X",
                    seq, cx, cy, x, y, (unsigned)rop);
     }
-    else
+    Unlock();
+    if (!redirected)
     {
         result = g_realBitBlt(hdc, x, y, cx, cy, hdcSrc, x1, y1, rop);
         /* v0.6.55：冻结期间"没被替换"的 BitBlt 也记前 5 次，用来区分
@@ -223,8 +235,9 @@ BOOL WINAPI Hook_BitBlt(HDC hdc, int x, int y, int cx, int cy, HDC hdcSrc, int x
             static LONG s_miss = 0;
             const LONG miss = InterlockedIncrement(&s_miss);
             if (miss <= 5)
-                YZLOGI(L"[抓屏替换] 未替换的 BitBlt（第 %d 次）：%dx%d src=0x%p 窗口DC=%d 屏幕DC=%d rop=0x%08X",
-                       miss, cx, cy, hdcSrc, srcIsWindowDC ? 1 : 0, IsScreenDC(hdcSrc) ? 1 : 0, (unsigned)rop);
+                YZLOGI(L"[抓屏替换] 未替换的 BitBlt（第 %d 次）：%dx%d src=0x%p 窗口DC=%d 屏幕DC=%d 底图DC=0x%p rop=0x%08X",
+                       miss, cx, cy, hdcSrc, srcIsWindowDC ? 1 : 0, IsScreenDC(hdcSrc) ? 1 : 0,
+                       reinterpret_cast<void*>(frozenDC), (unsigned)rop);
         }
     }
     (void)redirected;
