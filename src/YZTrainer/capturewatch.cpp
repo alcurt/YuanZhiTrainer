@@ -34,7 +34,6 @@ struct CaptureHitRecord
 const DWORD kScanIntervalMs  = 30000;    /* 常规扫描节流 */
 const DWORD kFullSweepMs     = 300000;   /* 全进程兜底扫：5 分钟（不受扫描周期影响） */
 const DWORD kYoungWindowMs   = 10000;    /* 新进程观察窗：新进程出现后这段时间内每轮都重扫（v0.6.52 由 30 秒降到 10 秒） */
-const DWORD kRelogIntervalMs = 300000;   /* 同一命中重复记日志的节流 */
 
 DWORD                        g_lastScanTick    = 0;
 DWORD                        g_lastFullSweep   = 0;
@@ -119,6 +118,11 @@ const wchar_t* ModuleRoute(const std::wstring& module)
     if (yz::ContainsNoCase(module, L"ExdElite"))   return L"疑似 DXGI（ExdDtDup 的加载者）";
     if (yz::ContainsNoCase(module, L"ExdPaint"))   return L"疑似 DXGI（广播画面组件，引用 ExdElite）";
     if (yz::ContainsNoCase(module, L"ScreenRecoder")) return L"GDI 抓屏 helper（独立进程，需另行注入）";
+    /* v0.6.61：缩略图才是课堂上持续刷新的那条路（教师很少点开单台监视）。
+       Thumbnail.ads 加载在 Yistart 内、自带 GDI；AdCap.dll 有 CreateCpObject 与一整套 GDI 抓屏。
+       这两条原先落到"未知采集组件"，现场判读时分不清路径，所以补上。 */
+    if (yz::ContainsNoCase(module, L"Thumbnail"))   return L"缩略图组件（主进程内自抓，自带 GDI）";
+    if (yz::ContainsNoCase(module, L"AdCap"))       return L"抓屏对象工厂（CreateCpObject + 一整套 GDI）";
     return L"未知采集组件";
 }
 
