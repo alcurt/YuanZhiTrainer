@@ -306,15 +306,19 @@ if ($WatchMinutes -gt 0) {
     $whookKb = [YzInputProbe]::InstallKeyboardCounter()
     $whookMs = [YzInputProbe]::InstallMouseCounter()
     Say ("  钩子就绪: 键盘={0} 鼠标={1}" -f $whookKb, $whookMs)
+    # v0.6.61（现场证据）：远志客户端导入并调用 SetSystemTime —— 它会**改系统时钟**。
+    # 所以"自由段时长/心跳"一律用单调计时器，不用 Get-Date（现场就出现过 4889879 ms
+    # 这种超过观察窗 5 倍的假数字，正是时钟跳变造成的）。
+    $wWatch = [System.Diagnostics.Stopwatch]::StartNew()
     $wEnd = (Get-Date).AddMinutes($WatchMinutes)
     $wKb = 0; $wMs = 0; $wLastKeys = ''; $wEvents = @(); $wSamples = 0; $wZero = 0
-    $wAsyncNoHook = 0; $wKeyChanges = 0; $wRefresh = 0; $wHeartbeat = (Get-Date).AddSeconds(30)
+    $wAsyncNoHook = 0; $wKeyChanges = 0; $wRefresh = 0; $wHeartbeatSw = [System.Diagnostics.Stopwatch]::StartNew()
     # 光标轨迹统计（用户 2026-10-15 描述的现场现象：被锁时鼠标能移动，但几百毫秒就被拽回左上角）
-    $wAwayStart = $null; $wAwaySpans = @(); $wAwayMax = 0; $wAwayMaxDist = 0
+    $wAwayStart = $null; $wAwaySpans = @(); $wAwayMax = 0; $wAwayMaxDist = 0   # $wAwayStart 现在是毫秒数（单调）
     # 停点分布：现场被摁住的角不一定是 (0,0)，所以同时统计"出现最多的点"（原先只数 (0,0)，会漏判）
     $wPointTally = @{}
     try {
-        while ((Get-Date) -lt $wEnd) {
+        while ($wWatch.Elapsed.TotalMinutes -lt $WatchMinutes) {
             [void][YzInputProbe]::PumpOnce()
             $down = [YzInputProbe]::DownKeys()
             [YzInputProbe]::SampleCursor()
@@ -324,14 +328,15 @@ if ($WatchMinutes -gt 0) {
             if ($wPointTally.ContainsKey($ptKey)) { $wPointTally[$ptKey]++ } else { $wPointTally[$ptKey] = 1 }
             if ($cx -eq 0 -and $cy -eq 0) {
                 $wZero++
-                if ($null -ne $wAwayStart) {          # 一段"离开左上角"到此结束 ⇒ 记下它有多久
-                    $dur = ((Get-Date) - $wAwayStart).TotalMilliseconds
+                if ($null -ne $wAwayStart) {          # 一段"离开左上角"到此结束 ⇒ 记下它有多久（单调时钟）
+                    $dur = $wWatch.Elapsed.TotalMilliseconds - $wAwayStart
+                    if ($dur -lt 0) { $dur = 0 }
                     $wAwaySpans += [int]$dur
                     if ($dur -gt $wAwayMax) { $wAwayMax = $dur }
                     $wAwayStart = $null
                 }
             } else {
-                if ($null -eq $wAwayStart) { $wAwayStart = Get-Date }
+                if ($null -eq $wAwayStart) { $wAwayStart = $wWatch.Elapsed.TotalMilliseconds }
                 $dist = [Math]::Sqrt(($cx * $cx) + ($cy * $cy))
                 if ($dist -gt $wAwayMaxDist) { $wAwayMaxDist = $dist }
             }
@@ -346,8 +351,8 @@ if ($WatchMinutes -gt 0) {
                 $wEvents += ("  t={0} 低层钩子新增：键盘 {1}→{2} 鼠标 {3}→{4}（keys=[{5}] 光标={6},{7}）" -f (Get-Date -Format 'HH:mm:ss'), $wKb, $kb, $wMs, $ms, $down, [YzInputProbe]::CursorX, [YzInputProbe]::CursorY)
             }
             $wKb = $kb; $wMs = $ms; $wLastKeys = $down
-            if ((Get-Date) -gt $wHeartbeat) {
-                $wHeartbeat = (Get-Date).AddSeconds(30)
+            if ($wHeartbeatSw.Elapsed.TotalSeconds -ge 30) {
+                $wHeartbeatSw.Restart()
                 Say ("  [心跳 {0}] 采样 {1} 次；按键变化 {2} 次（其中钩子全无 {3} 次）；钩子累计 键盘 {4} / 鼠标 {5}；光标停(0,0) {6} 次" -f (Get-Date -Format 'HH:mm:ss'), $wSamples, $wKeyChanges, $wAsyncNoHook, $wKb, $wMs, $wZero)
             }
             # 每秒重装一次自己的低层钩子：本机实测"**后装的钩子先被调用**"（顺序是 B 先 A 后），
@@ -368,7 +373,8 @@ if ($WatchMinutes -gt 0) {
         [void][YzInputProbe]::UninstallMouseHook()
         # 收尾：采样结束时若光标仍在外面，把这一段也算上（否则"停(0,0)=0 次"却报"没离开过"这种自相矛盾）
         if ($null -ne $wAwayStart) {
-            $dur = ((Get-Date) - $wAwayStart).TotalMilliseconds
+            $dur = $wWatch.Elapsed.TotalMilliseconds - $wAwayStart
+            if ($dur -lt 0) { $dur = 0 }
             $wAwaySpans += [int]$dur
             if ($dur -gt $wAwayMax) { $wAwayMax = $dur }
             $wAwayStart = $null
