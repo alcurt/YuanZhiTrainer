@@ -533,7 +533,43 @@ bool CaptureFreeze()
 
     g_realReleaseDC(nullptr, screen);
 
-    YZLOGI(L"已冻结画面: 虚拟屏幕 %d,%d %dx%d", vx, vy, vw, vh);
+    /* v0.6.62：冻结底图的内容统计。
+       现场出现过"教师端监视直接变黑"——合理怀疑底图抓到的是一张黑屏（教师锁屏、
+       或广播窗口还在等待时屏幕本来就是黑的）。这里只统计并记录，不改变行为；
+       近黑占比接近 100% 时给一条 WARN，提示"该先让屏幕显示正常内容再开防监视"。 */
+    unsigned long avgLum  = 0;
+    unsigned      nearBlackPct = 0;
+    if (bits != nullptr && vw > 0 && vh > 0)
+    {
+        const unsigned char* px = static_cast<const unsigned char*>(bits);
+        const size_t stride = static_cast<size_t>(vw) * 4;
+        const size_t total  = static_cast<size_t>(vw) * static_cast<size_t>(vh);
+        const size_t step   = (total > 200000) ? (total / 200000) : 1;   /* 抽样上限约 20 万点 */
+        unsigned long long sum = 0;
+        size_t counted = 0;
+        size_t black   = 0;
+        for (size_t idx = 0; idx < total; idx += step)
+        {
+            const unsigned char* q = px + (idx / static_cast<size_t>(vw)) * stride +
+                                          (idx % static_cast<size_t>(vw)) * 4;
+            const unsigned lum = (unsigned)q[2] * 29u / 100u +
+                                 (unsigned)q[1] * 59u / 100u +
+                                 (unsigned)q[0] * 11u / 100u;
+            sum += lum;
+            if (lum < 16u)
+                black++;
+            counted++;
+        }
+        if (counted > 0)
+        {
+            avgLum       = (unsigned long)(sum / counted);
+            nearBlackPct = (unsigned)(black * 100ull / counted);
+        }
+    }
+    YZLOGI(L"已冻结画面: 虚拟屏幕 %d,%d %dx%d 平均亮度=%lu 近黑占比=%u%%", vx, vy, vw, vh, avgLum, nearBlackPct);
+    if (nearBlackPct >= 95u)
+        YZLOGW(L"冻结底图几乎全黑（近黑占比 %u%%）：抓底图时屏幕本身可能就是黑的（教师锁屏/广播等待），"
+               L"教师端监视会看到黑屏。想让掩护更像「没被动过」，先让屏幕显示正常内容再开防监视。", nearBlackPct);
     SendLogToHost(YZ_LOG_INFO, L"防监视已开启：教师端将看到固定画面");
     return true;
 }

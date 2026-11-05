@@ -2762,11 +2762,19 @@ try {
         Start-Sleep -Milliseconds 800
         $seg28 = Read-LogTail $appLog $mark28
         # 现场客户端是 SetCursorPos 与 mouse_event 并用（机房日志两者都是每秒 10 次），所以两个计数都要抓
-        $m28 = [regex]::Match($seg28, '\[输入拦截\][^\r\n]*丢弃[^\r\n]*SetCursorPos\s+(\d+)\s+次[^\r\n]*mouse_event\s+(\d+)\s+次')
-        if ($m28.Success) {
-            $blockedLine  = $m28.Value.Trim()
-            $blockedCount = [int]$m28.Groups[1].Value
-            $blockedMouse = [int]$m28.Groups[2].Value
+        # v0.6.62（回归侧）：原来用 [regex]::Match 只取**第一条**匹配，而刚开跑的第一个 10 秒窗口
+        # 常常是 "SetCursorPos 1 次 / mouse_event 0 次"（节流窗口刚好卡在启动瞬间），于是即使后面
+        # 每条都是 17/17 也永远读不到 —— 现场证据见 %TEMP%\YZTrainer\yzt.log。
+        # 现在扫全部匹配，优先取 mouse_event>0 的那条，没有则退化为最后一条（仍要求它真出现过）。
+        $ms28 = [regex]::Matches($seg28, '\[输入拦截\][^\r\n]*丢弃[^\r\n]*SetCursorPos\s+(\d+)\s+次[^\r\n]*mouse_event\s+(\d+)\s+次')
+        if ($ms28.Count -gt 0) {
+            $pick = $ms28[$ms28.Count - 1]
+            foreach ($cand in $ms28) {
+                if ([int]$cand.Groups[2].Value -gt 0) { $pick = $cand; break }
+            }
+            $blockedLine  = $pick.Value.Trim()
+            $blockedCount = [int]$pick.Groups[1].Value
+            $blockedMouse = [int]$pick.Groups[2].Value
             if ($blockedMouse -gt 0) { break }
         }
     }
