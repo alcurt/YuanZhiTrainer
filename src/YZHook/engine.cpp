@@ -120,8 +120,83 @@ void FillStatus(YZ_STATUS* status, DWORD opcodeUnused)
    GDI 冻结底图却永远没生成 —— 教师端画面照常。SweepTick 里按这个意图位补一次。 */
 static bool g_wantFrozen = false;
 
+/* v0.6.63：只观测模式（现场点名"谁在拽光标 / 谁在吞键盘"用）。
+   现场查不出来的根因是：那些调用不在我们注入的进程里（Yistart 内每秒只有 1 次 SetCursorPos(960,540)），
+   而宿主闸门只允许远志/模拟目标启用钩子，别的进程（例如第二套远控的 ycdinfo.exe / Remote.exe）
+   即使被全局钩子加载了 DLL 也会被拒绝启用，于是一行日志都没有。
+   这个模式让**被点名的非目标宿主**也能启用输入钩子，但只记录、不拦截。
+
+   开关刻意不走 ini（避免动主程序配置链路），而是读这个固定小文件：
+       C:\ProgramData\YZTrainer\observe-state.txt
+       ObserveAll=1
+       Names=ycdinfo.exe;Remote.exe
+   写它用 tools\observe-input.ps1；删掉它就等于关掉。 */
+static bool g_observeOnly = false;
+
+static std::wstring ObserveStatePath()
+{
+    return L"C:\\ProgramData\\YZTrainer\\observe-state.txt";
+}
+
+static std::wstring SelfExeName()
+{
+    wchar_t path[MAX_PATH * 2] = { 0 };
+    DWORD len = (DWORD)(sizeof(path) / sizeof(path[0]));
+    if (!QueryFullProcessImageNameW(GetCurrentProcess(), 0, path, &len))
+        return std::wstring();
+    std::wstring full(path, len);
+    const size_t pos = full.find_last_of(L"\\/");
+    return (pos == std::wstring::npos) ? full : full.substr(pos + 1);
+}
+
+static bool ObserveShouldEnableView()
+{
+    HANDLE f = CreateFileW(ObserveStatePath().c_str(), GENERIC_READ,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                           OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (f == INVALID_HANDLE_VALUE)
+        return false;
+    char buf[4096] = { 0 };
+    DWORD got = 0;
+    ReadFile(f, buf, sizeof(buf) - 1, &got, nullptr);
+    CloseHandle(f);
+    const std::string text(buf, got);
+    if (text.find("ObserveAll=1") == std::string::npos)
+        return false;
+    const size_t pos = text.find("Names=");
+    if (pos == std::string::npos)
+        return false;
+    size_t end = text.find_first_of("\r\n", pos);
+    const std::string list = text.substr(pos + 6,
+        (end == std::string::npos) ? std::string::npos : end - pos - 6);
+    const std::wstring self = SelfExeName();
+    if (self.empty())
+        return false;
+    std::string selfA;
+    for (size_t i = 0; i < self.size(); ++i)
+    {
+        wchar_t c = self[i];
+        if (c >= L'A' && c <= L'Z')
+            c = static_cast<wchar_t>(c - L'A' + L'a');
+        selfA.push_back(static_cast<char>(c));
+    }
+    std::string listLower = list;
+    for (size_t i = 0; i < listLower.size(); ++i)
+    {
+        if (listLower[i] >= 'A' && listLower[i] <= 'Z')
+            listLower[i] = static_cast<char>(listLower[i] - 'A' + 'a');
+    }
+    return listLower.find(selfA) != std::string::npos;
+}
+
 void ApplyEffectiveFlags()
 {
+    /* 只观测模式绝不接收功能位：否则配置帧会在这里打开拦截/冻结，那就不是"只记录"了 */
+    if (g_observeOnly)
+    {
+        InterlockedExchange(&yzhook::g_flags, 0);
+        return;
+    }
     /* 只让功能位参与生效计算，控制位（如 EnableExamGuard）不得混进 g_flags */
     DWORD effective = g_configFlags & YZ_FLAG_FUNCTION_MASK;
     if (yzhook::g_examMode != 0)
@@ -530,7 +605,10 @@ void EngineThreadProc()
 {
     YZLOGI(L"YZHook 引擎线程启动");
 
-    if (!yzhook::EngineIsTargetHost())
+    const bool isTargetHost = yzhook::EngineIsTargetHost();
+    if (!isTargetHost)
+        g_observeOnly = ObserveShouldEnableView();
+    if (!isTargetHost && !g_observeOnly)
     {
             {
         /* v0.6.50：补上 pid 与 exe 路径。之前只写一句"不是目标"，现场没法回答"到底是谁被拒"，
@@ -552,10 +630,19 @@ void EngineThreadProc()
         return;
     }
 
-    yzhook::WindowHooksInstall(true);
-    yzhook::InputHooksInstall(true);
-    yzhook::CaptureHooksInstall(true);
-    yzhook::ExecHooksInstall(true);
+    if (g_observeOnly)
+    {
+        yzhook::InputHooksInstall(true);
+        YZLOGI(L"[输入观测] 只观测模式启用（pid=%u exe=%s）：只记录不拦截，供现场点名调用者",
+               (unsigned)GetCurrentProcessId(), SelfExeName().c_str());
+    }
+    else
+    {
+        yzhook::WindowHooksInstall(true);
+        yzhook::InputHooksInstall(true);
+        yzhook::CaptureHooksInstall(true);
+        yzhook::ExecHooksInstall(true);
+    }
     /* 只读自报：本进程的 HKCU 落在哪个 hive（\REGISTRY\USER\S-1-5-18 之类）。
        有了它，现场就不必再靠外部脚本扫 HKU 去猜"策略被写进谁家"（P0 的日志镜像
        会把这一行带回宿主日志/诊断包）。 */
@@ -564,7 +651,10 @@ void EngineThreadProc()
 
     InterlockedExchange(&yzhook::g_hooksInstalled, static_cast<LONG>(yzhook::HookActiveCount()));
     YZLOGI(L"Hook 安装完成，共 %u 个", static_cast<unsigned>(yzhook::HookActiveCount()));
-    yzhook::SendLogToHost(YZ_LOG_INFO, L"已注入远志学生端，等待主程序配置");
+    if (!g_observeOnly)
+        yzhook::SendLogToHost(YZ_LOG_INFO, L"已注入远志学生端，等待主程序配置");
+    else
+        yzhook::SendLogToHost(YZ_LOG_INFO, L"[输入观测] 只观测模式：本进程的输入调用会被记录，但一律不拦截");
 
     DWORD lastSweep = 0;
     DWORD lastExam  = 0;
@@ -577,12 +667,12 @@ void EngineThreadProc()
         IpcTick();
 
         DWORD now = GetTickCount();
-        if (now - lastSweep >= 500)
+        if (!g_observeOnly && now - lastSweep >= 500)
         {
             lastSweep = now;
             SweepTick();
         }
-        if (now - lastExam >= 2000)
+        if (!g_observeOnly && now - lastExam >= 2000)
         {
             lastExam = now;
             ExamTick();
