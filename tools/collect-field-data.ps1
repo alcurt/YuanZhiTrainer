@@ -17,7 +17,10 @@ param(
 )
 
 $ErrorActionPreference = 'Continue'
-if ([string]::IsNullOrEmpty($OutDir)) { $OutDir = (Get-Location).Path }
+# v0.6.61（现场反馈）：不给 -OutDir 时会落到"当前目录"，于是回收产物散落在好几个地方。
+# 这里把落点大声打出来，避免事后又要满盘找。
+$outGiven = -not [string]::IsNullOrEmpty($OutDir)
+if (-not $outGiven) { $OutDir = (Get-Location).Path }
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $dest = Join-Path $OutDir ("field-{0}" -f $stamp)
 New-Item -ItemType Directory -Path $dest -Force | Out-Null
@@ -32,6 +35,20 @@ $manifest = New-Object System.Collections.Generic.List[string]
 function M([string]$s) { $manifest.Add($s); Write-Host $s }
 
 M ("==== YZTrainer 现场数据回收 {0} ====" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'))
+if ($outGiven) {
+    M ("回收落点: {0}" -f $OutDir)
+} else {
+    M ("回收落点: {0}  ← 未指定 -OutDir，这是**当前目录**" -f $OutDir)
+    Write-Host '注意：没有给 -OutDir，产物落在当前目录（现场建议统一用 -OutDir D:\带回）。' -ForegroundColor Yellow
+}
+# 主程序/客户端还在跑时，退出时那份诊断包还没生成（现场反馈过"忘记退出就回收"）。
+$stillRunning = @(Get-Process -Name YZTrainer,Yistart -ErrorAction SilentlyContinue)
+if ($stillRunning.Count -gt 0) {
+    $names = ($stillRunning | ForEach-Object { $_.ProcessName + '(' + $_.Id + ')' }) -join ', '
+    M ("仍在运行: {0}  ← 退出主程序时才会生成最后一份诊断包" -f $names)
+    Write-Host ('注意：这些进程仍在运行：' + $names) -ForegroundColor Yellow
+    Write-Host '      建议先退出 YZTrainer 再跑一次本脚本；来不及就先跑这次、退出后再补跑一次。' -ForegroundColor Yellow
+}
 M ("主机: {0}  用户: {1}  管理员: {2}" -f $env:COMPUTERNAME, $env:USERNAME,
    ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator))
 M ''
