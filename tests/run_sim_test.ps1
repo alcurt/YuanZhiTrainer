@@ -2794,6 +2794,95 @@ if ($fastHookCount -gt 0 -and $fastHookCount -lt 20) {
 } else {
     $result.Add(('FAIL  抓屏子进程的钩子数没有降下来（实测 {0} 个）' -f $fastHookCount))
 }
+Start-Stage '==== 阶段二十七之三：日志只在"已经贴底"时才自动滚动（v0.6.69）===='
+
+# 背景（用户 2026-11-07 提出）：现场一开程序日志狂刷，往上看历史时会被新行拽回最新一行，根本读不了。
+# 期望：原本贴底 ⇒ 跟随最新；用户往上滚过 ⇒ 视图不动，直到他自己滚回底部。
+if (-not ('YZUiMsg' -as [type])) {
+    $sig = '[DllImport("user32.dll")] public static extern IntPtr GetDlgItem(IntPtr h, int id); [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr SendMessageW(IntPtr h, uint msg, IntPtr w, IntPtr l);'
+    Add-Type -Namespace YZUiMsg -Name W -MemberDefinition $sig
+}
+$scrollIni = @(
+    '[General]',
+    'CaptureScanIntervalMs=3000',
+    'Flags=1',
+    'WindowPercent=60',
+    'LogLevel=3',
+    'AutoInject=1',
+    'InjectMethod=0',
+    'EnableExamGuard=1',
+    'ExternalWindowFix=0',
+    'InjectCaptureChild=0',
+    'AutoExportOnBroadcast=0',
+    'AutoExportOnExit=0',
+    'AutoExportOnCapture=0',
+    'ProcessNames=YZSimTarget.exe'
+)
+Set-Content -LiteralPath $iniFile -Value $scrollIni -Encoding utf8
+
+$WM_VSCROLL = 0x0115
+$WM_COMMAND = 0x0111
+$EM_GETLINECOUNT = 0x00BA
+$EM_GETFIRSTVISIBLELINE = 0x00CE
+$SB_TOP = 6
+$SB_BOTTOM = 7
+$IDC_CHK_WINDOWIZE = 2001
+$IDC_EDIT_LOG = 2014
+
+$scProc = $null
+$fv0 = -1
+$fv1 = -1
+$fv2 = -1
+$fv3 = -1
+$lineCount = 0
+try {
+    $scProc = Start-Trainer
+    Start-Sleep -Seconds 3
+    $scProc.Refresh()
+    $hMain = $scProc.MainWindowHandle
+    $hEdit = [IntPtr]::Zero
+    if ($hMain -ne [IntPtr]::Zero) { $hEdit = [YZUiMsg.W]::GetDlgItem($hMain, $IDC_EDIT_LOG) }
+
+    if ($hEdit -ne [IntPtr]::Zero) {
+        # 先制造足够多的日志行（勾/取消窗口化各记一行）
+        for ($i = 0; $i -lt 6; $i++) {
+            [void][YZUiMsg.W]::SendMessageW($hMain, $WM_COMMAND, [IntPtr]$IDC_CHK_WINDOWIZE, [IntPtr]::Zero)
+            Start-Sleep -Milliseconds 120
+        }
+        Start-Sleep -Milliseconds 300
+        $lineCount = [int]([YZUiMsg.W]::SendMessageW($hEdit, $EM_GETLINECOUNT, [IntPtr]::Zero, [IntPtr]::Zero))
+
+        # ① 往上滚到顶，再触发一次追加：位置必须不动
+        [void][YZUiMsg.W]::SendMessageW($hEdit, $WM_VSCROLL, [IntPtr]$SB_TOP, [IntPtr]::Zero)
+        Start-Sleep -Milliseconds 250
+        $fv0 = [int]([YZUiMsg.W]::SendMessageW($hEdit, $EM_GETFIRSTVISIBLELINE, [IntPtr]::Zero, [IntPtr]::Zero))
+        [void][YZUiMsg.W]::SendMessageW($hMain, $WM_COMMAND, [IntPtr]$IDC_CHK_WINDOWIZE, [IntPtr]::Zero)
+        Start-Sleep -Milliseconds 400
+        $fv1 = [int]([YZUiMsg.W]::SendMessageW($hEdit, $EM_GETFIRSTVISIBLELINE, [IntPtr]::Zero, [IntPtr]::Zero))
+
+        # ② 滚回底部，再触发一次追加：必须跟到最新
+        [void][YZUiMsg.W]::SendMessageW($hEdit, $WM_VSCROLL, [IntPtr]$SB_BOTTOM, [IntPtr]::Zero)
+        Start-Sleep -Milliseconds 250
+        $fv2 = [int]([YZUiMsg.W]::SendMessageW($hEdit, $EM_GETFIRSTVISIBLELINE, [IntPtr]::Zero, [IntPtr]::Zero))
+        [void][YZUiMsg.W]::SendMessageW($hMain, $WM_COMMAND, [IntPtr]$IDC_CHK_WINDOWIZE, [IntPtr]::Zero)
+        Start-Sleep -Milliseconds 400
+        $fv3 = [int]([YZUiMsg.W]::SendMessageW($hEdit, $EM_GETFIRSTVISIBLELINE, [IntPtr]::Zero, [IntPtr]::Zero))
+    }
+}
+finally {
+    [void](Close-TrainerGracefully $scProc 8)
+}
+Write-Host ("日志滚动: 行数=" + $lineCount + " 上翻后 fv0=" + $fv0 + " 追加后 fv1=" + $fv1 + " 贴底 fv2=" + $fv2 + " 追加后 fv3=" + $fv3)
+if ($fv0 -ge 0 -and $fv1 -eq $fv0) {
+    $result.Add('PASS  往上翻日志时新行不会把视图拽回底部（视角保持不动）')
+} else {
+    $result.Add(('FAIL  往上翻之后新行仍把视图拽走（fv0={0} fv1={1}）' -f $fv0, $fv1))
+}
+if ($fv2 -ge 0 -and $fv3 -ge $fv2 -and $fv3 -ge 0) {
+    $result.Add('PASS  已经贴底时仍然跟随最新一行（不会漏看新日志）')
+} else {
+    $result.Add(('FAIL  贴底状态下没有跟随最新（fv2={0} fv3={1}）' -f $fv2, $fv3))
+}
 Start-Stage '==== 阶段二十八：拦截"丢弃"必须能在日志里看见（v0.6.46）===='
 
 # 背景：0x10（拦截教师端遥控输入）开着时，四个输入钩子会把进程内的调用直接吞掉，但此前**只计数不打印**

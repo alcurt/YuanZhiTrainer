@@ -138,7 +138,44 @@ void AppendLogLine(int level, const std::wstring& text)
     else if (level == yz::kLogDebug) tag = L"[调试]";
 
     std::wstring line = yz::Format(L"%s %s\r\n", tag, text.c_str());
+
+    /* v0.6.69（用户 2026-11-05 提出）：往上看日志时不要被新行拽回底部。
+       做法：追加前记住"是否已经贴底"与当前首行号；追加后——
+         · 原本贴底 ⇒ 滚到最新（SB_BOTTOM）；
+         · 原本被用户往上滚过 ⇒ 复原选区与首行位置，视图不动。
+       贴底判定：首行号 + 可见行数 >= 总行数 - 1；可见行数由客户区高度 / 字体行高算出。 */
+    DWORD selStart = 0;
+    DWORD selEnd = 0;
+    SendMessageW(g_logEdit, EM_GETSEL, reinterpret_cast<WPARAM>(&selStart), reinterpret_cast<LPARAM>(&selEnd));
+    const int firstVisibleBefore = static_cast<int>(SendMessageW(g_logEdit, EM_GETFIRSTVISIBLELINE, 0, 0));
+    const int lineCountBefore    = static_cast<int>(SendMessageW(g_logEdit, EM_GETLINECOUNT, 0, 0));
+
+    int visibleLines = 1;
+    {
+        HFONT font = reinterpret_cast<HFONT>(SendMessageW(g_logEdit, WM_GETFONT, 0, 0));
+        HDC dc = GetDC(g_logEdit);
+        if (dc != nullptr)
+        {
+            HGDIOBJ oldFont = (font != nullptr) ? SelectObject(dc, font) : nullptr;
+            TEXTMETRICW tm;
+            ZeroMemory(&tm, sizeof(tm));
+            if (GetTextMetricsW(dc, &tm) && tm.tmHeight > 0)
+            {
+                RECT rc;
+                GetClientRect(g_logEdit, &rc);
+                visibleLines = static_cast<int>((rc.bottom - rc.top) / tm.tmHeight);
+                if (visibleLines < 1)
+                    visibleLines = 1;
+            }
+            if (oldFont != nullptr)
+                SelectObject(dc, oldFont);
+            ReleaseDC(g_logEdit, dc);
+        }
+    }
+    const bool wasAtBottom = (firstVisibleBefore + visibleLines) >= (lineCountBefore - 1);
+
     int len = GetWindowTextLengthW(g_logEdit);
+    bool trimmed = false;
     /* v0.6.47：抬掉上限之后不能让控件无限长（一节课下来几十 MB 会拖慢重绘）。
        超过 20 万字符就把最前面的一段删掉、只留最近的——现场要看的内容都在尾部。 */
     if (len > 200000)
@@ -146,9 +183,25 @@ void AppendLogLine(int level, const std::wstring& text)
         SendMessageW(g_logEdit, EM_SETSEL, 0, len - 200000);
         SendMessageW(g_logEdit, EM_REPLACESEL, FALSE, reinterpret_cast<LPARAM>(L""));
         len = GetWindowTextLengthW(g_logEdit);
+        trimmed = true;
     }
     SendMessageW(g_logEdit, EM_SETSEL, len, len);
     SendMessageW(g_logEdit, EM_REPLACESEL, FALSE, reinterpret_cast<LPARAM>(line.c_str()));
+
+    if (wasAtBottom || trimmed)
+    {
+        /* 原本就贴底（或刚裁过前段、位置已无意义）：跟到最新一行 */
+        SendMessageW(g_logEdit, WM_VSCROLL, SB_BOTTOM, 0);
+    }
+    else
+    {
+        /* 用户正在往上看：把选区与首行位置复原，别抢他的视图 */
+        SendMessageW(g_logEdit, EM_SETSEL, selStart, selEnd);
+        const int firstVisibleNow = static_cast<int>(SendMessageW(g_logEdit, EM_GETFIRSTVISIBLELINE, 0, 0));
+        const int delta = firstVisibleBefore - firstVisibleNow;
+        if (delta != 0)
+            SendMessageW(g_logEdit, EM_LINESCROLL, 0, delta);
+    }
 }
 
 void SyncControls()
