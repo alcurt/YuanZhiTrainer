@@ -45,6 +45,7 @@ volatile LONG g_blockedRemoteCount = 0;
 static volatile LONG   g_yzBlockedCursorPos = 0;
 static volatile LONG   g_yzBlockedMouseEvent = 0;
 static volatile LONG   g_yzBlockedSendInput = 0;
+static volatile LONG   g_yzBlockInputCalls = 0;   /* v0.6.70：BlockInput 调用次数 */
 static volatile LONG   g_yzBlockedKeybdEvent = 0;
 static volatile LONG   g_yzBlockedLastX = 0;
 static volatile LONG   g_yzBlockedLastY = 0;
@@ -502,6 +503,7 @@ BOOL WINAPI Hook_BlockInput(BOOL block)
     if (!yzhook::TryEnterHook())
         return g_realBlockInput(block);
 
+    InterlockedIncrement(&g_yzBlockInputCalls);
     BOOL result = FALSE;
     if ((yzhook::g_flags & YZ_FLAG_INPUT_UNLOCK) && block)
     {
@@ -511,6 +513,24 @@ BOOL WINAPI Hook_BlockInput(BOOL block)
     else
     {
         result = g_realBlockInput(block);
+    }
+
+    /* v0.6.70：**每一次** BlockInput 都留痕（以前只在我们拦下时打一行）。
+       为什么：现场键盘被锁、日志里却查不到谁锁的，只能靠猜。加上真实返回值后可以区分三种情况：
+         · 有进程调 BlockInput(TRUE) 且真实返回 TRUE ⇒ 用户态有人锁，0x4 能拦；
+         · 有调用但真实返回 FALSE ⇒ 我们权限不够（多半是驱动/安全桌面层）；
+         · 一条都没有 ⇒ 锁不在用户态，直接指向驱动。 */
+    {
+        static volatile LONG64 s_lastBlockLog = 0;
+        const ULONGLONG nowMs = GetTickCount64();
+        const LONG64 prev = s_lastBlockLog;
+        if (prev == 0 || (nowMs - (ULONGLONG)prev) >= 1000)
+        {
+            s_lastBlockLog = (LONG64)nowMs;
+            YZLOGI(L"[输入取证] BlockInput(%s) 被调用：真实返回=%s，0x4=%s",
+                   block ? L"TRUE" : L"FALSE", result ? L"TRUE" : L"FALSE",
+                   (yzhook::g_flags & YZ_FLAG_INPUT_UNLOCK) ? L"开" : L"关");
+        }
     }
 
     yzhook::LeaveHook();
@@ -769,7 +789,13 @@ void InputEnforceTick()
     if (g_realClipCursor != nullptr)
         g_realClipCursor(nullptr);
     if (g_realBlockInput != nullptr)
-        g_realBlockInput(FALSE);
+    {
+        /* v0.6.70：把解除封锁的**真实结果**写日志。返回 FALSE 说明这一层我们解不动
+           （多半是驱动或安全桌面），比"静默尝试"有用得多。 */
+        const BOOL unblocked = g_realBlockInput(FALSE);
+        YZLOGI(L"[输入取证] 主动解除键盘封锁 BlockInput(FALSE) 返回=%s",
+               unblocked ? L"TRUE" : L"FALSE（这一层解不动，怀疑驱动/安全桌面）");
+    }
 
     /* 键鼠封锁的定性探针（v0.6.7）：只读，用来区分
        ① 有进程在抢设 ClipCursor（裁剪区被压成 1x1）
