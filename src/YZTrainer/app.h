@@ -118,6 +118,7 @@ void  OnCaptureChildSeen(DWORD pid, const std::wstring& line);
    抓屏子进程常连不上管道（服务端同时只服务一个客户端），这条是配置之外的补充通道。 */
 void  WriteCaptureStateFile();
 void  CaptureCleanFrozenFrame();   /* v0.6.66：UI 之前抓干净底图，交给钩子当冻结帧 */
+void  DisplayTopologyTick();       /* v0.6.71：每秒记显示拓扑指纹，变了就留痕（检测镜像驱动被挂上） */
 void  WatchdogTick();
 std::wstring ResolveHookDllPath();
 

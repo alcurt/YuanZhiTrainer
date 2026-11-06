@@ -616,6 +616,10 @@ void WatchdogTick()
         return;
     }
 
+    /* v0.6.71：显示拓扑指纹（每秒一次）。教师端"看画面"与"锁键鼠"都会去挂镜像驱动，
+       镜像驱动从显示栈取画面、钩子够不到，所以至少要能看出它什么时候挂上/摘下。 */
+    DisplayTopologyTick();
+
     /* 采集栈监控：低频（30 秒）扫"教师监视时谁在抓屏"。放在最前面，
        与 autoInject 开关、目标进程能不能找到都无关——它记录的是别的东西。 */
     capturewatch::Tick();
@@ -942,4 +946,51 @@ void CaptureCleanFrozenFrame()
     DeleteObject(bmp);
     YZLOGI(L"干净底图: 已抓 %dx%d 存到 %s（%u 字节，alpha=0xFF）；钩子会优先用它当冻结帧，画面里不含我们自己的 UI",
            vw, vh, path.c_str(), static_cast<unsigned>(fh.bfSize));
+}
+
+/* v0.6.71：显示拓扑指纹。动机：教师端点开学生机看画面、或全屏广播锁键鼠，都会让远志去**挂镜像驱动**
+   （学生端 `ExdMirr.sys`，其用户态一半 `ExdMirr.dll` 导入的是 `EngBitBlt/EngCopyBits/EngStretchBlt`
+   这一套显示驱动接口；`Rmdesk.ads` 又调 `ChangeDisplaySettingsExW` + `ExtEscape` + `DeviceIoControl`）。
+   镜像驱动从显示栈直接取画面，**任何 GDI/DXGI 钩子都够不到**——这解释了"缩略图冻住了、点开监控却是实时"。
+   我们能做的第一件事是**检测它什么时候被挂上**：每秒算一次指纹（显示设备数 / 显示器数 / 虚拟屏幕），
+   变了就打一行。有了这条时间线，下一步才可能做到"只在被镜像的时候自动静帧"。 */
+void DisplayTopologyTick()
+{
+    static std::wstring s_lastSig;
+    static bool s_gotFirst = false;
+
+    int devCount = 0;
+    DISPLAY_DEVICEW dd;
+    ZeroMemory(&dd, sizeof(dd));
+    dd.cb = sizeof(dd);
+    while (EnumDisplayDevicesW(nullptr, static_cast<DWORD>(devCount), &dd, 0))
+    {
+        ++devCount;
+        if (devCount > 16)
+            break;
+        ZeroMemory(&dd, sizeof(dd));
+        dd.cb = sizeof(dd);
+    }
+
+    const int monitors = GetSystemMetrics(SM_CMONITORS);
+    const int vx = GetSystemMetrics(SM_XVIRTUALSCREEN);
+    const int vy = GetSystemMetrics(SM_YVIRTUALSCREEN);
+    const int vw = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+    const int vh = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+    const std::wstring sig = yz::Format(L"设备=%d 显示器=%d 虚拟屏=%d,%d %dx%d",
+                                        devCount, monitors, vx, vy, vw, vh);
+
+    if (!s_gotFirst)
+    {
+        s_gotFirst = true;
+        s_lastSig = sig;
+        YZLOGI(L"显示拓扑基线: %s", sig.c_str());
+        return;
+    }
+    if (sig != s_lastSig)
+    {
+        YZLOGW(L"显示拓扑变化: %s → %s（若此时教师端刚点开监视，说明镜像驱动被挂上/摘下）",
+               s_lastSig.c_str(), sig.c_str());
+        s_lastSig = sig;
+    }
 }
