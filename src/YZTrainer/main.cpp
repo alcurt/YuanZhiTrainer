@@ -1,4 +1,4 @@
-//
+﻿//
 // YZTrainer.exe 主程序入口。
 //
 #include "app.h"
@@ -83,6 +83,7 @@ int WINAPI wWinMain(HINSTANCE hinst, HINSTANCE, LPWSTR, int)
     ConfigEnsureExists(g_app.iniPath);   /* v0.6.42：没有 ini 就按内建出厂内容先写一份 */
     ConfigLoad(g_app.cfg, g_app.iniPath);
     WriteCaptureStateFile();   /* v0.6.36：启动即把"是否要冻结"写进补充状态通道，避免读到上一次运行的陈旧值 */
+    CaptureCleanFrozenFrame(); /* v0.6.66：在 UiInit 之前抓干净底图，避免托盘图标/气泡冻进教师端画面 */
     yz::LogSetLevel(g_app.cfg.logLevel);
     yz::LogSetSink(LogSinkProc, nullptr);
     YZLOGI(L"YZTrainer 启动，exeDir=%s", g_app.exeDir.c_str());

@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 //
 // YZTrainer 主程序共享状态与模块接口。
 //
@@ -117,6 +117,7 @@ void  OnCaptureChildSeen(DWORD pid, const std::wstring& line);
 /* 把"当前要不要冻结抓屏进程"写到 C:\ProgramData\YZTrainer\capture-state.txt（v0.6.36）：
    抓屏子进程常连不上管道（服务端同时只服务一个客户端），这条是配置之外的补充通道。 */
 void  WriteCaptureStateFile();
+void  CaptureCleanFrozenFrame();   /* v0.6.66：UI 之前抓干净底图，交给钩子当冻结帧 */
 void  WatchdogTick();
 std::wstring ResolveHookDllPath();
 

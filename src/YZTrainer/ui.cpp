@@ -853,13 +853,23 @@ void CmdSetFlag(DWORD flag, bool on)
        冻结帧是在目标进程里 GetDC(NULL)+BitBlt 抓的，顺序反了就会把主界面冻进那张图——
        教师在"监视/远程桌面"里点开学生机，一眼就能看见学生在用某个工具。
        FreezePrepareMainWindow() 内部会隐藏主界面并等一小会儿让桌面重绘。 */
-    if (flag == YZ_FLAG_ANTI_MONITOR)
-        FreezePrepareMainWindow(on);
-
     if (on)
         g_app.cfg.flags |= flag;
     else
         g_app.cfg.flags &= ~flag;
+
+    if (flag == YZ_FLAG_ANTI_MONITOR)
+    {
+        FreezePrepareMainWindow(on);
+        if (on)
+        {
+            /* v0.6.66：开启后要一张"没有我们自己的 UI"的底图：先摘托盘图标、抓完再挂回去。
+               否则冻结帧会带着任务栏上的 YZTrainer 图标一起被教师端看到（用户现场指出）。 */
+            RemoveTrayIcon();
+            CaptureCleanFrozenFrame();
+            ReAddTrayIcon();
+        }
+    }
 
     ConfigSave(g_app.cfg, g_app.iniPath);
     WriteCaptureStateFile();   /* v0.6.36：功能位一变就刷新补充状态通道（抓屏子进程据此武装冻结） */

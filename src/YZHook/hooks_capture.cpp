@@ -458,17 +458,81 @@ void CaptureHooksShutdown()
     g_hooksReady = false;
 }
 
+/* v0.6.66：优先用主程序在 UiInit() 之前抓的干净底图（%ProgramData%\YZTrainer\frozen.bmp）。
+   为什么：冻结帧要的是"开启那一刻的桌面"，若由被注入进程自己抓，托盘图标/气泡已经画在上面了。
+   文件格式：BITMAPFILEHEADER + BITMAPINFOHEADER(32bpp, BI_RGB, biHeight<0 即自上而下) + 像素。
+   只在"文件较新（<=120 秒）且尺寸与虚拟屏幕一致"时采用，避免用到过期或错尺寸的画面。 */
+static bool LoadCleanFrozenFrame(int vx, int vy, int vw, int vh)
+{
+    const std::wstring path = L"C:\ProgramData\YZTrainer\frozen.bmp";
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                           nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE)
+        return false;
+
+    FILETIME ftWrite;
+    if (!GetFileTime(h, nullptr, nullptr, &ftWrite)) { CloseHandle(h); return false; }
+    FILETIME ftNow;
+    GetSystemTimeAsFileTime(&ftNow);
+    ULARGE_INTEGER fileTimeU, nowTimeU;
+    fileTimeU.LowPart = ftWrite.dwLowDateTime; fileTimeU.HighPart = ftWrite.dwHighDateTime;
+    nowTimeU.LowPart  = ftNow.dwLowDateTime;   nowTimeU.HighPart  = ftNow.dwHighDateTime;
+    const ULONGLONG ageMs = (nowTimeU.QuadPart > fileTimeU.QuadPart)
+                            ? (nowTimeU.QuadPart - fileTimeU.QuadPart) / 10000ULL : 0;
+    if (ageMs > 120000ULL) { CloseHandle(h); return false; }
+
+    BITMAPFILEHEADER fh;
+    BITMAPINFOHEADER ih;
+    DWORD got = 0;
+    if (!ReadFile(h, &fh, sizeof(fh), &got, nullptr) || got != sizeof(fh) || fh.bfType != 0x4D42) { CloseHandle(h); return false; }
+    if (!ReadFile(h, &ih, sizeof(ih), &got, nullptr) || got != sizeof(ih)) { CloseHandle(h); return false; }
+    if (ih.biBitCount != 32 || ih.biCompression != BI_RGB) { CloseHandle(h); return false; }
+    const int bmpW = ih.biWidth;
+    const int bmpH = (ih.biHeight < 0) ? -ih.biHeight : ih.biHeight;
+    if (bmpW != vw || bmpH != vh) { CloseHandle(h); return false; }
+    SetFilePointer(h, static_cast<LONG>(fh.bfOffBits), nullptr, FILE_BEGIN);
+
+    BITMAPINFO bmi;
+    ZeroMemory(&bmi, sizeof(bmi));
+    bmi.bmiHeader.biSize        = sizeof(BITMAPINFOHEADER);
+    bmi.bmiHeader.biWidth       = bmpW;
+    bmi.bmiHeader.biHeight      = -bmpH;
+    bmi.bmiHeader.biPlanes      = 1;
+    bmi.bmiHeader.biBitCount    = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
+
+    void* bits = nullptr;
+    HBITMAP bmp = CreateDIBSection(nullptr, &bmi, DIB_RGB_COLORS, &bits, nullptr, 0);
+    if (bmp == nullptr || bits == nullptr) { CloseHandle(h); return false; }
+    HDC mem = CreateCompatibleDC(nullptr);
+    HGDIOBJ old = SelectObject(mem, bmp);
+    const DWORD bytes = static_cast<DWORD>(static_cast<size_t>(bmpW) * static_cast<size_t>(bmpH) * 4);
+    if (!ReadFile(h, bits, bytes, &got, nullptr) || got != bytes)
+    {
+        SelectObject(mem, old); DeleteDC(mem); DeleteObject(bmp); CloseHandle(h);
+        return false;
+    }
+    SelectObject(mem, old);
+    CloseHandle(h);
+
+    Lock();
+    ReleaseFrozen();
+    g_frozenDC   = mem;
+    g_frozenBmp  = bmp;
+    g_frozenBits = bits;
+    g_vx = vx;
+    g_vy = vy;
+    g_vw = vw;
+    g_vh = vh;
+    g_frozen     = true;
+    Unlock();
+    return true;
+}
+
 bool CaptureFreeze()
 {
     if (g_frozen)
         return true;
-    if (g_realGetDC == nullptr || g_realBitBlt == nullptr)
-    {
-        /* v0.6.54：原来是静默返回，现场只看到"DXGI 冻结: 已开启"却查不出为什么没有底图。 */
-        YZLOGI(L"CaptureFreeze: 钩子原指针未就绪（GetDC=%p BitBlt=%p），本次跳过",
-               reinterpret_cast<void*>(g_realGetDC), reinterpret_cast<void*>(g_realBitBlt));
-        return false;
-    }
 
     const int vx = GetSystemMetrics(SM_XVIRTUALSCREEN);
     const int vy = GetSystemMetrics(SM_YVIRTUALSCREEN);
@@ -477,6 +541,22 @@ bool CaptureFreeze()
     if (vw <= 0 || vh <= 0)
     {
         YZLOGE(L"CaptureFreeze: 虚拟屏幕尺寸非法（%d,%d %dx%d）", vx, vy, vw, vh);
+        return false;
+    }
+
+    /* v0.6.66：优先用主程序预抓的干净底图（UiInit 之前抓的，不含工具自身 UI） */
+    if (LoadCleanFrozenFrame(vx, vy, vw, vh))
+    {
+        YZLOGI(L"已冻结画面: 使用主程序预抓的干净底图（虚拟屏幕 %d,%d %dx%d）", vx, vy, vw, vh);
+        SendLogToHost(YZ_LOG_INFO, L"防监视已开启：教师端将看到固定画面（主程序预抓，不含工具自身 UI）");
+        return true;
+    }
+
+    if (g_realGetDC == nullptr || g_realBitBlt == nullptr)
+    {
+        /* v0.6.54：原来是静默返回，现场只看到"DXGI 冻结: 已开启"却查不出为什么没有底图。 */
+        YZLOGI(L"CaptureFreeze: 钩子原指针未就绪（GetDC=%p BitBlt=%p），本次跳过",
+               reinterpret_cast<void*>(g_realGetDC), reinterpret_cast<void*>(g_realBitBlt));
         return false;
     }
 

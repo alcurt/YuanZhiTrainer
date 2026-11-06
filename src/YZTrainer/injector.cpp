@@ -1,4 +1,4 @@
-#include "app.h"
+﻿#include "app.h"
 
 #include "payload.h"
 
@@ -854,4 +854,92 @@ void WriteCaptureStateFile()
     WriteFile(h, utf8.data(), static_cast<DWORD>(utf8.size()), &written, nullptr);
     CloseHandle(h);
     YZLOGI(L"补充状态通道: 已写 %s（AntiMonitor=%u，供抓屏子进程读取）", path.c_str(), anti);
+}
+
+/* v0.6.66：主程序在**创建任何 UI 之前**抓一张干净桌面，存成 frozen.bmp 交给钩子当冻结帧。
+   动机（用户提出）：防监视要的是"开启那一刻的画面"，但那一刻我们的托盘图标/气泡已经在屏幕上，
+   会被原样冻进画面、再被教师端看到。让被注入进程自己抓就一定会带上我们的 UI；
+   由主程序在 UiInit() 之前抓，画面里就只有桌面本身。
+   只在防监视开启时写；钩子侧读到**较新**的 frozen.bmp 就优先用它，否则回退到自己抓。 */
+void CaptureCleanFrozenFrame()
+{
+    if ((g_app.cfg.flags & YZ_FLAG_ANTI_MONITOR) == 0)
+        return;
+
+    const int vx = GetSystemMetrics(SM_XVIRTUALSCREEN);
+    const int vy = GetSystemMetrics(SM_YVIRTUALSCREEN);
+    const int vw = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+    const int vh = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+    if (vw <= 0 || vh <= 0)
+    {
+        YZLOGW(L"干净底图: 虚拟屏幕尺寸非法（%d,%d %dx%d），跳过", vx, vy, vw, vh);
+        return;
+    }
+
+    HDC screen = GetDC(nullptr);
+    if (screen == nullptr)
+    {
+        YZLOGW(L"干净底图: GetDC(NULL) 失败 err=%u", GetLastError());
+        return;
+    }
+
+    BITMAPINFO bmi;
+    ZeroMemory(&bmi, sizeof(bmi));
+    bmi.bmiHeader.biSize        = sizeof(BITMAPINFOHEADER);
+    bmi.bmiHeader.biWidth       = vw;
+    bmi.bmiHeader.biHeight      = -vh;    /* 自上而下，与钩子侧一致 */
+    bmi.bmiHeader.biPlanes      = 1;
+    bmi.bmiHeader.biBitCount    = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
+
+    void* bits = nullptr;
+    HBITMAP bmp = CreateDIBSection(screen, &bmi, DIB_RGB_COLORS, &bits, nullptr, 0);
+    if (bmp == nullptr || bits == nullptr)
+    {
+        ReleaseDC(nullptr, screen);
+        YZLOGW(L"干净底图: CreateDIBSection 失败");
+        return;
+    }
+    HDC mem = CreateCompatibleDC(screen);
+    HGDIOBJ old = SelectObject(mem, bmp);
+    const BOOL ok = BitBlt(mem, 0, 0, vw, vh, screen, vx, vy, SRCCOPY);
+    SelectObject(mem, old);
+    DeleteDC(mem);
+    ReleaseDC(nullptr, screen);
+    if (!ok)
+    {
+        DeleteObject(bmp);
+        YZLOGW(L"干净底图: BitBlt 失败 err=%u", GetLastError());
+        return;
+    }
+    unsigned char* px = static_cast<unsigned char*>(bits);
+    const size_t total = static_cast<size_t>(vw) * static_cast<size_t>(vh);
+    for (size_t i = 0; i < total; ++i)
+        px[i * 4 + 3] = 0xFF;            /* GDI 不写 alpha；不给 0xFF 对方合成链会当全透明 */
+
+    const std::wstring dir = L"C:\ProgramData\YZTrainer";
+    yz::EnsureDirectory(dir);
+    const std::wstring path = yz::JoinPath(dir, L"frozen.bmp");
+    BITMAPFILEHEADER fh;
+    ZeroMemory(&fh, sizeof(fh));
+    const DWORD dibBytes = static_cast<DWORD>(total * 4);
+    fh.bfType    = 0x4D42;
+    fh.bfOffBits = sizeof(fh) + sizeof(BITMAPINFOHEADER);
+    fh.bfSize    = fh.bfOffBits + dibBytes;
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr,
+                           CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE)
+    {
+        DeleteObject(bmp);
+        YZLOGW(L"干净底图: 写 %s 失败 err=%u", path.c_str(), GetLastError());
+        return;
+    }
+    DWORD written = 0;
+    WriteFile(h, &fh, sizeof(fh), &written, nullptr);
+    WriteFile(h, &bmi.bmiHeader, sizeof(BITMAPINFOHEADER), &written, nullptr);
+    WriteFile(h, bits, dibBytes, &written, nullptr);
+    CloseHandle(h);
+    DeleteObject(bmp);
+    YZLOGI(L"干净底图: 已抓 %dx%d 存到 %s（%u 字节，alpha=0xFF）；钩子会优先用它当冻结帧，画面里不含我们自己的 UI",
+           vw, vh, path.c_str(), static_cast<unsigned>(fh.bfSize));
 }
