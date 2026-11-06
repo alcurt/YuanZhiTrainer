@@ -604,6 +604,7 @@ void IpcTick()
 void EngineThreadProc()
 {
     YZLOGI(L"YZHook 引擎线程启动");
+    const ULONGLONG tHookStart = GetTickCount64();
 
     const bool isTargetHost = yzhook::EngineIsTargetHost();
     if (!isTargetHost)
@@ -630,6 +631,14 @@ void EngineThreadProc()
         return;
     }
 
+    /* v0.6.67：先把 DXGI 那组（只改 dxgi.dll 的 vtable）装上，再装其余 30 个钩子。
+       现场证据：厂商的 rundll32 子进程只活 2 秒，而整组 31 个钩子装完要 ~0.5 秒；
+       若它在我们的补丁之前就建好桌面复制，我们就永远接不住——两次现场日志里
+       "[DXGI 取证] 建立桌面复制成功" 零次，而回归里 --dup 的断言一直 PASS，
+       说明钩子本身没问题，差的是时序。DupTraceInstall 只有几微秒级开销，提前装几乎免费。 */
+    if (!g_observeOnly)
+        yzhook::DupTraceInstall(true);
+
     if (g_observeOnly)
     {
         yzhook::InputHooksInstall(true);
@@ -650,7 +659,9 @@ void EngineThreadProc()
     g_hooksReady = true;
 
     InterlockedExchange(&yzhook::g_hooksInstalled, static_cast<LONG>(yzhook::HookActiveCount()));
-    YZLOGI(L"Hook 安装完成，共 %u 个", static_cast<unsigned>(yzhook::HookActiveCount()));
+    YZLOGI(L"Hook 安装完成，共 %u 个（耗时 %llu ms）",
+           static_cast<unsigned>(yzhook::HookActiveCount()),
+           static_cast<unsigned long long>(GetTickCount64() - tHookStart));
     if (!g_observeOnly)
         yzhook::SendLogToHost(YZ_LOG_INFO, L"已注入远志学生端，等待主程序配置");
     else
