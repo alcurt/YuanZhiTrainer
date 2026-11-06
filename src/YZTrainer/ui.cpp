@@ -334,6 +334,13 @@ void Balloon(const wchar_t* title, const wchar_t* text)
 {
     if (!g_trayAdded)
         return;
+    /* v0.6.65（现场要求）：防监视开着时不弹气泡。
+       冻结帧是"开启那一刻的桌面"，气泡带文字（含 YZTrainer 字样）会直接出现在教师端画面里。 */
+    if ((g_app.cfg.flags & YZ_FLAG_ANTI_MONITOR) != 0)
+    {
+        YZLOGI(L"提示气泡已抑制（防监视开启期间，避免出现在冻结画面里）：%s", title);
+        return;
+    }
     NOTIFYICONDATAW nid = g_nid;
     /* 气球提示也必须带上 GUID（否则按 uID 找不到这个图标，提示就丢了） */
     nid.uFlags     = NIF_INFO | ((g_nid.uFlags & NIF_GUID) ? NIF_GUID : 0);

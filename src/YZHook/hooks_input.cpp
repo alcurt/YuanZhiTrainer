@@ -78,15 +78,46 @@ static volatile LONG   g_yzParkSlotCount[YZ_PARK_SLOTS];
 static volatile LONG64 g_yzParkSlotStart[YZ_PARK_SLOTS];
 static volatile LONG   g_yzParkNextSlot = 0;
 #define YZ_PARK_KNOWN_TTL_MS 5000
+/* v0.6.65：现场 0x40 每 10 秒丢 111/92 次但光标仍被拽回 -> 漏网。补两点：
+   1) 区域匹配：与已认定点相差 <=8 像素算同一点；
+   2) 粘滞：认定后 1.2 秒内任何 SetCursorPos 一律丢并续期，不再逐点重算。
+   物理鼠标移动不经过这个 API，粘滞期不会误伤用户。 */
+#define YZ_PARK_SAME_PX 8
+static volatile LONG64 g_yzParkStickyUntil = 0;
 
 static bool IsParkingCall(int x, int y)
 {
     const ULONGLONG now = GetTickCount64();
 
     /* 1) 已认定点（count>=8 且在 TTL 内）：命中即续期后直接丢 */
+    /* 0) 粘滞窗：认定之后的一小段时间里，落在**已认定点附近 ±64 像素**的调用一律算停车（续期 1.2 秒）。
+       为什么不是"任何调用"：厂商在同一次锁定里还会往屏幕中心做一次"内部移动"，那一路必须放行，
+       否则 0x40 就退化成 0x10（回归阶段二十九断言"丢弃数 < 同期调用数"正是盯着这一点）。 */
+    {
+        const ULONGLONG sticky = (ULONGLONG)g_yzParkStickyUntil;
+        if (sticky != 0 && now < sticky)
+        {
+            for (int i = 0; i < YZ_PARK_SLOTS; ++i)
+            {
+                if (g_yzParkSlotCount[i] < YZ_PARK_MIN_CALLS)
+                    continue;
+                const LONG sx = g_yzParkSlotX[i] - (LONG)x;
+                const LONG sy = g_yzParkSlotY[i] - (LONG)y;
+                if (sx <= 64 && sx >= -64 && sy <= 64 && sy >= -64)
+                {
+                    g_yzParkStickyUntil = (LONG64)(now + 1200);
+                    return true;
+                }
+            }
+        }
+    }
+
     for (int i = 0; i < YZ_PARK_SLOTS; ++i)
     {
-        if (g_yzParkSlotX[i] != x || g_yzParkSlotY[i] != y)
+        const LONG sx = g_yzParkSlotX[i] - (LONG)x;
+        const LONG sy = g_yzParkSlotY[i] - (LONG)y;
+        if (sx > YZ_PARK_SAME_PX || sx < -YZ_PARK_SAME_PX ||
+            sy > YZ_PARK_SAME_PX || sy < -YZ_PARK_SAME_PX)
             continue;
         const ULONGLONG start = (ULONGLONG)g_yzParkSlotStart[i];
         if (start == 0)
@@ -94,6 +125,7 @@ static bool IsParkingCall(int x, int y)
         if (g_yzParkSlotCount[i] >= YZ_PARK_MIN_CALLS && (now - start) <= YZ_PARK_KNOWN_TTL_MS)
         {
             g_yzParkSlotStart[i] = (LONG64)now;   /* 滑动续期 */
+            g_yzParkStickyUntil = (LONG64)(now + 1200);
             return true;
         }
     }
@@ -102,7 +134,10 @@ static bool IsParkingCall(int x, int y)
     int slot = -1;
     for (int i = 0; i < YZ_PARK_SLOTS; ++i)
     {
-        if (g_yzParkSlotX[i] == x && g_yzParkSlotY[i] == y) { slot = i; break; }
+        const LONG ax = g_yzParkSlotX[i] - (LONG)x;
+        const LONG ay = g_yzParkSlotY[i] - (LONG)y;
+        if (ax <= YZ_PARK_SAME_PX && ax >= -YZ_PARK_SAME_PX &&
+            ay <= YZ_PARK_SAME_PX && ay >= -YZ_PARK_SAME_PX) { slot = i; break; }
     }
     if (slot < 0)
     {
@@ -124,6 +159,7 @@ static bool IsParkingCall(int x, int y)
     if (n >= YZ_PARK_MIN_CALLS && (now - (ULONGLONG)g_yzParkSlotStart[slot]) <= 1200)
     {
         g_yzParkSlotStart[slot] = (LONG64)now;       /* 认定 + 续期 */
+        g_yzParkStickyUntil = (LONG64)(now + 1200);  /* 首次认定 -> 开粘滞窗 */
         return true;
     }
     return false;
