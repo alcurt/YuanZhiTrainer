@@ -2726,6 +2726,74 @@ if ($plainRefused -and -not $plainHooked) {
 } else {
     $result.Add(('FAIL  闸门过宽：同名但无采集痕迹的替身也被放行了（被拒绝={0} 被挂钩子={1}）' -f $plainRefused, $plainHooked))
 }
+Start-Stage '==== 阶段二十七之二：抓屏子进程只装采集钩子（v0.6.68）===='
+
+# 背景（2026-11-06 机房实测）：厂商那个 rundll32 承载 ExdDtDup 的子进程只活 2 秒，而装 31 个钩子要 ~1000 ms
+# （MinHook 每装一个都要挂起进程内全部线程）。只要它在补丁就位前建好桌面复制，DXGI 冻结就永远接不住
+# ——两次现场日志里"建立桌面复制成功"零次。本阶段把替身命名成 rundll32.exe，验证"只装采集那一组"真的生效。
+$fastDir = Join-Path $env:TEMP 'yzt-fastchild'
+if (Test-Path $fastDir) { Remove-Item $fastDir -Recurse -Force -ErrorAction SilentlyContinue }
+New-Item -ItemType Directory -Path $fastDir -Force | Out-Null
+$fastSim = Join-Path $fastDir 'rundll32.exe'
+Copy-Item -LiteralPath $sim -Destination $fastSim -Force
+$fastDll = Join-Path $fastDir 'ExdDtDup.dll'
+Copy-Item -LiteralPath (Join-Path $DistDir 'YZHook.dll') -Destination $fastDll -Force
+$fastIni = @(
+    '[General]',
+    'CaptureScanIntervalMs=3000',
+    'Flags=1',
+    'WindowPercent=60',
+    'LogLevel=3',
+    'AutoInject=1',
+    'InjectMethod=0',
+    'EnableExamGuard=1',
+    'ExternalWindowFix=0',
+    'InjectCaptureChild=1',
+    'AutoExportOnBroadcast=0',
+    'AutoExportOnExit=0',
+    'AutoExportOnCapture=0',
+    'ProcessNames=rundll32.exe'
+)
+Set-Content -LiteralPath $iniFile -Value $fastIni -Encoding utf8
+
+$mark27c = Get-LogLength $appLog
+$fastSimProc = $null
+$fastAppProc = $null
+$fastPid = 0
+$fastOnlyLine = ''
+$fastHookCount = -1
+try {
+    $fastSimProc = Start-Process -FilePath $fastSim -PassThru `
+        -ArgumentList '--load', $fastDll, '"ExdDtDup.dll",RunCapture', '0'
+    Start-Sleep -Seconds 1
+    $fastAppProc = Start-Trainer
+    for ($i = 0; $i -lt 40; $i++) {
+        Start-Sleep -Milliseconds 800
+        $seg27c = Read-LogTail $appLog $mark27c
+        if ($seg27c -match '只装采集钩子') { $fastOnlyLine = $Matches[0].Trim() }
+        if ($fastPid -eq 0 -and $seg27c -match '目标进程 pid=(\d+)\s*\(rundll32\.exe\)[^\r\n]*命中') { $fastPid = [int]$Matches[1] }
+        if ($fastPid -ne 0 -and $seg27c -match ("\[Hook pid=" + $fastPid + "\][^\r\n]*Hook 安装完成，共 (\d+) 个")) {
+            $fastHookCount = [int]$Matches[1]
+            break
+        }
+    }
+}
+finally {
+    if ($null -ne $fastSimProc) { Stop-Process -Id $fastSimProc.Id -Force -ErrorAction SilentlyContinue }
+    Start-Sleep -Milliseconds 500
+    [void](Close-TrainerGracefully $fastAppProc 8)
+}
+Write-Host ("快速路径: pid=" + $fastPid + " 只装采集=" + $(if ($fastOnlyLine) { '是' } else { '否' }) + " 钩子数=" + $fastHookCount)
+if ($fastOnlyLine) {
+    $result.Add('PASS  抓屏子进程宿主只装采集那一组（日志出现"只装采集钩子"）')
+} else {
+    $result.Add('FAIL  没有走到"只装采集钩子"这条快速路径 ⇒ 抓屏子进程仍要装全部钩子，2 秒窗口根本不够')
+}
+if ($fastHookCount -gt 0 -and $fastHookCount -lt 20) {
+    $result.Add(('PASS  抓屏子进程的钩子数降到 {0} 个（全部组是 30 个）⇒ 安装窗口大幅缩短' -f $fastHookCount))
+} else {
+    $result.Add(('FAIL  抓屏子进程的钩子数没有降下来（实测 {0} 个）' -f $fastHookCount))
+}
 Start-Stage '==== 阶段二十八：拦截"丢弃"必须能在日志里看见（v0.6.46）===='
 
 # 背景：0x10（拦截教师端遥控输入）开着时，四个输入钩子会把进程内的调用直接吞掉，但此前**只计数不打印**

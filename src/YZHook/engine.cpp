@@ -149,6 +149,25 @@ static std::wstring SelfExeName()
     return (pos == std::wstring::npos) ? full : full.substr(pos + 1);
 }
 
+/* v0.6.67：抓屏子进程宿主（rundll32 承载 ExdDtDup / ScreenRecoder）只需采集那一组钩子。
+   现场证据：整组 31 个钩子装完要 ~1000 ms（MinHook 每装一个都要挂起全部线程），
+   而厂商那个 rundll32 只活 2 秒 ⇒ 必须在它建桌面复制之前把钩子装上。
+   去掉窗口/键鼠/审计/策略四组后钩子数降到个位数，安装耗时降一个数量级。 */
+static bool LooksLikeCaptureChildHost()
+{
+    const std::wstring self = SelfExeName();
+    if (self.empty())
+        return false;
+    std::wstring lower = self;
+    for (size_t i = 0; i < lower.size(); ++i)
+    {
+        if (lower[i] >= L'A' && lower[i] <= L'Z')
+            lower[i] = static_cast<wchar_t>(lower[i] - L'A' + L'a');
+    }
+    return lower.find(L"rundll32") != std::wstring::npos ||
+           lower.find(L"screenrecoder") != std::wstring::npos;
+}
+
 static bool ObserveShouldEnableView()
 {
     HANDLE f = CreateFileW(ObserveStatePath().c_str(), GENERIC_READ,
@@ -639,13 +658,21 @@ void EngineThreadProc()
     if (!g_observeOnly)
         yzhook::DupTraceInstall(true);
 
+    /* v0.6.67：抓屏子进程只装采集这一组（窗口/键鼠/审计/策略对它没意义，而且每多装一组都更慢） */
+    const bool captureChildHost = (!g_observeOnly) && LooksLikeCaptureChildHost();
+    if (captureChildHost)
+    {
+        yzhook::CaptureHooksInstall(true);
+        YZLOGI(L"抓屏子进程宿主：只装采集钩子（省掉窗口/键鼠/审计/策略四组，安装更快）");
+    }
+
     if (g_observeOnly)
     {
         yzhook::InputHooksInstall(true);
         YZLOGI(L"[输入观测] 只观测模式启用（pid=%u exe=%s）：只记录不拦截，供现场点名调用者",
                (unsigned)GetCurrentProcessId(), SelfExeName().c_str());
     }
-    else
+    else if (!captureChildHost)
     {
         yzhook::WindowHooksInstall(true);
         yzhook::InputHooksInstall(true);
