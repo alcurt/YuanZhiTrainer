@@ -593,7 +593,25 @@ void WINAPI Hook_mouse_event(DWORD flags, DWORD dx, DWORD dy, DWORD data, ULONG_
         }
     }
 
+    /* v0.6.64（0x80）：现场实测（2026-11-06 机房）Yistart 在锁定阶段每秒发 16~26 次 mouse_event，
+       把光标下的图标反复点开；0x40 只管"把光标摁回同一个点"的移动，按键一路全放行，所以"一直点左键"没解。
+       这里只丢**按键类**（LEFTDOWN/UP、RIGHTDOWN/UP、MIDDLEDOWN/UP），不动任何带坐标的移动；
+       用户自己的物理点击由系统投递、不经过本进程的这个 API，所以不会被误伤；
+       代价是教师的"遥控点击"同样失效（与 0x10 相同），故做成独立位、默认不开。 */
+    const bool isButtonEvent =
+        (flags & (MOUSEEVENTF_LEFTDOWN | MOUSEEVENTF_LEFTUP |
+                  MOUSEEVENTF_RIGHTDOWN | MOUSEEVENTF_RIGHTUP |
+                  MOUSEEVENTF_MIDDLEDOWN | MOUSEEVENTF_MIDDLEUP)) != 0;
+    const bool wantClicksMe = isButtonEvent &&
+                              (yzhook::g_flags & YZ_FLAG_BLOCK_CLICKS) != 0 &&
+                              (yzhook::g_flags & YZ_FLAG_BLOCK_REMOTE) == 0;
+
     if (yzhook::g_flags & YZ_FLAG_BLOCK_REMOTE)
+    {
+        InterlockedIncrement(&g_blockedRemoteCount);
+        InterlockedIncrement(&g_yzBlockedMouseEvent);
+    }
+    else if (wantClicksMe)
     {
         InterlockedIncrement(&g_blockedRemoteCount);
         InterlockedIncrement(&g_yzBlockedMouseEvent);

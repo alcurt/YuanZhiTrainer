@@ -519,6 +519,18 @@ bool CaptureFreeze()
         return false;
     }
 
+    /* v0.6.64：把 32bpp DIB 的 alpha 填成 0xFF。
+       现场证据（2026-11-06 机房）：教师端缩略图是**纯黑**，而本地统计的平均亮度是 133/159（只看 RGB）
+       ⇒ 对方的合成/缩放链**尊重 alpha**；而 GDI 的 BitBlt 不写 alpha 通道（全 0 ⇒ 完全透明 ⇒ 合成到黑底就是黑）。
+       台架用的 CRAM 编码器忽略 alpha，所以一直没暴露。 */
+    if (bits != nullptr && vw > 0 && vh > 0)
+    {
+        unsigned char* px = static_cast<unsigned char*>(bits);
+        const size_t total = static_cast<size_t>(vw) * static_cast<size_t>(vh);
+        for (size_t i = 0; i < total; ++i)
+            px[i * 4 + 3] = 0xFF;
+    }
+
     Lock();
     ReleaseFrozen();
     g_frozenDC   = mem;
