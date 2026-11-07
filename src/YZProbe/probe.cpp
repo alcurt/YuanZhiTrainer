@@ -1262,6 +1262,8 @@ static void CollectVendorServices(ProbeData& data)
 {
     static const wchar_t* kNames[] = {
         L"ProcessProtect",
+        L"pkprot",          /* v0.6.76：Ycdclient 那套的保护驱动（pkprotx64.sys，9-18 真机报告里 RUNNING） */
+        L"pkdsk",           /* v0.6.76：同上的磁盘过滤（pkdskx64.sys） */
         L"AkDeamon",
         L"WINIO",
         L"VA",
