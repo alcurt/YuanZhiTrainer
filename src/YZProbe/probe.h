@@ -135,6 +135,17 @@ struct ProbeSelf
     std::vector<ProbeModule> modules;
 };
 
+/* v0.6.72：远志自带的设备驱动句柄探测（只读开、不发 IOCTL）。
+   动机：Yistart/ProxyC 会打开 `\\.\ProcessProtect`、`\\.\AkDeamon` 这些设备，而
+   `ProcessProtect.sys` 装到 system32\drivers、还能被 `net start ProcessProtect` 拉起——
+   它很可能就是"注入时 OpenProcess 拿不到句柄（0x5）"的原因。这条只解答"装没装、开不开得动"，
+   不做任何控制。 */
+struct ProbeVendorDevice
+{
+    std::wstring name;      /* 设备名，例如 \\.\ProcessProtect */
+    bool         opened;    /* CreateFileW 是否成功 */
+    DWORD        error;     /* 失败时的 GetLastError */
+};
 struct ProbeData
 {
     std::wstring               generatedAt;
@@ -145,6 +156,7 @@ struct ProbeData
     std::vector<ProbeWindow>   windows;
     std::vector<ProbeService>  services;
     std::vector<ProbeDriver>   drivers;
+    std::vector<ProbeVendorDevice> vendorDevices;
     std::vector<ProbeAccess>   access;
     std::vector<ProbeNet>      net;
     std::vector<std::wstring>  notes;

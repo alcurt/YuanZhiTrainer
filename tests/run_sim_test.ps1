@@ -1800,6 +1800,19 @@ try {
     } else {
         $result.Add('FAIL  该进程的保护级别判读错误（现场会误判"抓屏进程受 PPL 保护"）')
     }
+
+    # v0.6.72：设备驱动表。为什么单列一条：ProcessProtect.sys 很可能就是"注入时 OpenProcess 拿不到
+    # 句柄（0x5）"的原因，现场必须能看出它装没装、开不开得动，否则又要靠猜。
+    if ($protTxt -match '远志自带设备驱动') {
+        $result.Add('PASS  YZProbe 报告含"远志自带设备驱动"表（ProcessProtect / AkDeamon / WINIO 等只读探测）')
+    } else {
+        $result.Add('FAIL  YZProbe 报告缺少"远志自带设备驱动"表——ProcessProtect 就没法被观测')
+    }
+    if ($protTxt -match 'ProcessProtect') {
+        $result.Add('PASS  设备表里列出了 ProcessProtect 一行（能打开=驱动在跑，错误码 2=没装，5=拒绝）')
+    } else {
+        $result.Add('FAIL  设备表里没有 ProcessProtect 一行')
+    }
 }
 finally {
     if ($protSim -and -not $protSim.HasExited) { Stop-Process -Id $protSim.Id -Force -ErrorAction SilentlyContinue }

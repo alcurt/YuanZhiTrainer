@@ -1213,6 +1213,47 @@ bool ProbeIsYuanzhiPath(const std::wstring& path, const std::wstring& exeName)
     return false;
 }
 
+/* v0.6.72：远志自带的设备驱动探测（只读）。见 probe.h 里 ProbeVendorDevice 的说明。
+   注意：一律用 FILE_READ_ATTRIBUTES 打开——只要能开就说明设备对象存在，不需要读数据；
+   驱动若拒绝这种打开方式，也会给出明确的错误码（5=拒绝访问，2=不存在）。 */
+static void CollectVendorDevices(ProbeData& data)
+{
+    static const wchar_t* kDevices[] = {
+        L"\\\\.\\ProcessProtect",
+        L"\\\\.\\AkDeamon",
+        L"\\\\.\\WINIO",
+        L"\\\\.\\LCD",
+        L"\\\\.\\VA",
+        L"\\\\.\\resys",
+        L"\\\\.\\revxd",
+        L"\\\\.\\rescvxd",
+        L"\\\\.\\Devfer",
+        L"\\\\.\\NetFilter",
+        L"\\\\.\\Nfndis",
+        L"\\\\.\\Netlord",
+        L"\\\\.\\NDISNETFILTER",
+    };
+    for (size_t i = 0; i < sizeof(kDevices) / sizeof(kDevices[0]); ++i)
+    {
+        ProbeVendorDevice d;
+        d.name = kDevices[i];
+        d.error = 0;
+        const HANDLE h = CreateFileW(d.name.c_str(), FILE_READ_ATTRIBUTES,
+                                     FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                                     OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        d.opened = (h != INVALID_HANDLE_VALUE);
+        if (d.opened)
+        {
+            CloseHandle(h);
+        }
+        else
+        {
+            d.error = GetLastError();
+        }
+        data.vendorDevices.push_back(d);
+    }
+}
+
 bool ProbeCollect(ProbeData& data, bool includeAllModules)
 {
     data.generatedAt = yz::NowStampEx();
@@ -1222,6 +1263,7 @@ bool ProbeCollect(ProbeData& data, bool includeAllModules)
     CollectWindows(data);
     CollectServices(data);
     CollectThirdPartyDrivers(data);
+    CollectVendorDevices(data);   /* v0.6.72：远志设备驱动句柄探测（只读） */
     CollectNet(data);
     return true;
 }

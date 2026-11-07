@@ -522,6 +522,23 @@ std::wstring ProbeToMarkdown(const ProbeData& data)
         m += L"\n";
     }
 
+    m += L"\n## 远志自带设备驱动（只读探测：能打开=驱动在跑，5=拒绝，2=没装）\n\n";
+    if (data.vendorDevices.empty())
+    {
+        m += L"（未采集）\n\n";
+    }
+    else
+    {
+        m += L"| 设备名 | 能否打开 | 错误码 |\n|---|---|---|\n";
+        for (size_t i = 0; i < data.vendorDevices.size(); i++)
+        {
+            const ProbeVendorDevice& d = data.vendorDevices[i];
+            m += yz::Format(L"| %s | %s | %u |\n", d.name.c_str(),
+                            d.opened ? L"是" : L"否", d.error);
+        }
+        m += L"\n";
+    }
+
     m += L"\n## 远志进程的网络端点\n\n";
     m += L"| PID | 协议 | 本地 | 远端 |\n|---|---|---|---|\n";
     for (size_t i = 0; i < data.net.size(); i++)
