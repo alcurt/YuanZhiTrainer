@@ -560,6 +560,43 @@ std::wstring ProbeToMarkdown(const ProbeData& data)
         m += L"\n";
     }
 
+    m += L"\n## 可疑驱动服务（全量扫描：名字关键词 / 非 system32 路径 / 厂商非微软）\n\n";
+    if (data.suspiciousServices.empty())
+    {
+        m += L"（没有命中，或没有权限枚举）\n\n";
+    }
+    else
+    {
+        m += L"| 服务名 | 状态 | 文件存在 | 厂商 | 文件版本 | 命中原因 | ImagePath |\n|---|---|---|---|---|---|---|\n";
+        for (size_t i = 0; i < data.suspiciousServices.size(); i++)
+        {
+            const ProbeSuspiciousService& v = data.suspiciousServices[i];
+            m += yz::Format(L"| %s | %u | %s | %s | %s | %s | %s |\n",
+                            v.name.c_str(), v.state, v.fileExists ? L"是" : L"否",
+                            v.company.empty() ? L"-" : v.company.c_str(),
+                            v.fileVersion.empty() ? L"-" : v.fileVersion.c_str(),
+                            v.reason.c_str(), v.imagePath.empty() ? L"-" : v.imagePath.c_str());
+        }
+        m += L"\n";
+    }
+
+    m += L"\n## 已加载的内核模块（厂商非微软的，含 system32\drivers 里的）\n\n";
+    if (data.kernelModules.empty())
+    {
+        m += L"（没有非微软模块，或没有权限查询）\n\n";
+    }
+    else
+    {
+        m += L"| 模块路径 | 基址 | 大小 | 厂商 |\n|---|---|---|---|\n";
+        for (size_t i = 0; i < data.kernelModules.size(); i++)
+        {
+            const ProbeKernelModule& k = data.kernelModules[i];
+            m += yz::Format(L"| %s | 0x%08llX | %u | %s |\n", k.path.c_str(), k.base, k.size,
+                            k.company.empty() ? L"(取不到版本)" : k.company.c_str());
+        }
+        m += L"\n";
+    }
+
     m += L"\n## 远志进程的网络端点\n\n";
     m += L"| PID | 协议 | 本地 | 远端 |\n|---|---|---|---|\n";
     for (size_t i = 0; i < data.net.size(); i++)

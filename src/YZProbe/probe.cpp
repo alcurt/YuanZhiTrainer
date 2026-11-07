@@ -1335,6 +1335,187 @@ static void CollectVendorServices(ProbeData& data)
     CloseServiceHandle(scm);
 }
 
+/* v0.6.75：全量扫驱动服务，按"可疑"判据收表。见 probe.h 里 ProbeSuspiciousService 的说明。
+   只读：枚举 + 读服务配置 + 读文件版本。 */
+static void CollectSuspiciousServices(ProbeData& data)
+{
+    SC_HANDLE scm = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_ENUMERATE_SERVICE);
+    if (scm == nullptr)
+    {
+        data.notes.push_back(yz::Format(L"可疑驱动未采集：OpenSCManager 失败 err=%u", GetLastError()));
+        return;
+    }
+    /* 关键词只留"管控/保护"语义的；control/disk/usb/keyboard/filter/monitor 这类整机到处都有，
+       留着会把 1394ohci 这种系统驱动也筛进来（第一次跑就踩到了）。 */
+    static const wchar_t* kKeywords[] = {
+        L"protect", L"guard", L"kafe", L"anti", L"hide", L"shadow",
+        L"restore", L"reboot", L"defend", L"shield", L"supervise",
+    };
+    std::vector<BYTE> buffer;
+    DWORD returned = 0;
+    DWORD enumErr = 0;
+    if (!EnumServicesEx(scm, SERVICE_DRIVER, buffer, &returned, &enumErr))
+    {
+        data.notes.push_back(yz::Format(L"可疑驱动未采集：服务枚举失败 err=%u", enumErr));
+        CloseServiceHandle(scm);
+        return;
+    }
+    const ENUM_SERVICE_STATUS_PROCESSW* items =
+        reinterpret_cast<const ENUM_SERVICE_STATUS_PROCESSW*>(buffer.data());
+    const DWORD count = returned / sizeof(ENUM_SERVICE_STATUS_PROCESSW);
+    for (DWORD i = 0; i < count && data.suspiciousServices.size() < 120; ++i)
+    {
+        const wchar_t* name = items[i].lpServiceName;
+        ProbeSuspiciousService v;
+        v.name = (name != nullptr) ? name : L"";
+        v.display = (items[i].lpDisplayName != nullptr) ? items[i].lpDisplayName : L"";
+        v.state = items[i].ServiceStatusProcess.dwCurrentState;
+
+        SC_HANDLE svc = OpenServiceW(scm, name, SERVICE_QUERY_CONFIG);
+        if (svc == nullptr)
+            continue;
+        DWORD cfgSize = 0;
+        QueryServiceConfigW(svc, nullptr, 0, &cfgSize);
+        if (cfgSize > 0)
+        {
+            std::vector<BYTE> cfg(cfgSize);
+            if (QueryServiceConfigW(svc, reinterpret_cast<LPQUERY_SERVICE_CONFIGW>(cfg.data()), cfgSize, &cfgSize))
+            {
+                const QUERY_SERVICE_CONFIGW* c = reinterpret_cast<const QUERY_SERVICE_CONFIGW*>(cfg.data());
+                if (c->lpBinaryPathName != nullptr)
+                    v.imagePath = ResolveServicePath(c->lpBinaryPathName);
+            }
+        }
+        CloseServiceHandle(svc);
+
+        if (!v.imagePath.empty())
+        {
+            v.fileExists = (GetFileAttributesW(v.imagePath.c_str()) != INVALID_FILE_ATTRIBUTES);
+            if (v.fileExists)
+            {
+                v.company = FileVersionValue(v.imagePath, L"CompanyName");
+                v.fileVersion = FileVersionValue(v.imagePath, L"FileVersion");
+            }
+        }
+
+        std::wstring reason;
+        const std::wstring lowerName = yz::ToLower(v.name);
+        const std::wstring lowerDisp = yz::ToLower(v.display);
+        for (size_t k = 0; k < sizeof(kKeywords) / sizeof(kKeywords[0]); ++k)
+        {
+            if (lowerName.find(kKeywords[k]) != std::wstring::npos ||
+                lowerDisp.find(kKeywords[k]) != std::wstring::npos)
+            {
+                reason += yz::Format(L"名字含\"%s\" ", kKeywords[k]);
+                break;
+            }
+        }
+        const std::wstring lowerPath = yz::ToLower(v.imagePath);
+        if (!lowerPath.empty() &&
+            lowerPath.find(L"\\system32\\drivers\\") == std::wstring::npos &&
+            lowerPath.find(L"\\system32\\driver\\") == std::wstring::npos)
+            reason += L"不在 system32\\drivers ";
+        if (!v.company.empty() && yz::ToLower(v.company).find(L"microsoft") == std::wstring::npos)
+            reason += L"厂商非微软 ";
+        if (v.fileExists && v.fileVersion.empty())
+            reason += L"无版本信息 ";
+        if (reason.empty())
+            continue;
+        v.reason = yz::Trim(reason);
+        data.suspiciousServices.push_back(v);
+    }
+    CloseServiceHandle(scm);
+}
+
+/* v0.6.75：已加载的内核模块。见 probe.h 里 ProbeKernelModule 的说明。
+   SystemModuleInformation 是未文档化 API，但只读、稳定；缓冲区按 returning length 重试两次。 */
+typedef LONG (WINAPI *PFN_NtQuerySystemInformation)(ULONG, PVOID, ULONG, PULONG);
+struct RTL_PROCESS_MODULE_INFORMATION_LOCAL
+{
+    PVOID  Section;        /* v0.6.75：这两个前导字段漏掉会整体错位，路径读出来是空、大小是 0 */
+    PVOID  MappedBase;
+    PVOID  ImageBase;
+    ULONG  ImageSize;
+    ULONG  Flags;
+    USHORT LoadOrderIndex;
+    USHORT InitOrderIndex;
+    USHORT LoadCount;
+    USHORT OffsetToFileName;
+    UCHAR  FullPathName[256];
+};
+struct RTL_PROCESS_MODULES_LOCAL
+{
+    ULONG ModulesCount;
+    RTL_PROCESS_MODULE_INFORMATION_LOCAL Modules[1];
+};
+
+static void CollectKernelModules(ProbeData& data)
+{
+    HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+    if (ntdll == nullptr)
+        return;
+    PFN_NtQuerySystemInformation q = reinterpret_cast<PFN_NtQuerySystemInformation>(
+        GetProcAddress(ntdll, "NtQuerySystemInformation"));
+    if (q == nullptr)
+        return;
+    const ULONG kClassModuleInfo = 11;
+    ULONG need = 0;
+    LONG st = q(kClassModuleInfo, nullptr, 0, &need);
+    if (need == 0)
+        return;
+    std::vector<BYTE> buf(need + 0x10000);
+    st = q(kClassModuleInfo, buf.data(), static_cast<ULONG>(buf.size()), &need);
+    if (st < 0)
+        return;
+    const RTL_PROCESS_MODULES_LOCAL* mods = reinterpret_cast<const RTL_PROCESS_MODULES_LOCAL*>(buf.data());
+    for (ULONG i = 0; i < mods->ModulesCount && data.kernelModules.size() < 200; ++i)
+    {
+        const RTL_PROCESS_MODULE_INFORMATION_LOCAL& m = mods->Modules[i];
+        std::string ascii(reinterpret_cast<const char*>(m.FullPathName));
+        ProbeKernelModule km;
+        km.path = yz::Utf8ToWide(ascii);
+        km.base = reinterpret_cast<unsigned long long>(m.ImageBase);
+        km.size = m.ImageSize;
+        /* v0.6.75：按**厂商**筛，不按路径筛。厂商驱动本来就装在 system32\drivers 里
+           （ProcessProtect.sys 就是），按"不在 system32"过滤等于把它们全漏掉。
+           路径形如 \SystemRoot\system32\drivers\xxx.sys，先换回真实盘符再读版本资源。 */
+        std::wstring real;
+        {
+            const std::wstring lower = yz::ToLower(km.path);
+            const std::wstring key = L"\\systemroot\\";
+            const size_t pos = lower.find(key);
+            if (pos != std::wstring::npos)
+            {
+                wchar_t win[MAX_PATH] = { 0 };
+                if (GetWindowsDirectoryW(win, MAX_PATH) > 0)
+                {
+                    real = std::wstring(win) + L"\\";
+                    real += km.path.substr(pos + key.size());
+                }
+            }
+            else
+            {
+                real = km.path;
+            }
+        }
+        if (!real.empty() && GetFileAttributesW(real.c_str()) != INVALID_FILE_ATTRIBUTES)
+            km.company = FileVersionValue(real, L"CompanyName");
+
+        const std::wstring lowerCompany = yz::ToLower(km.company);
+        if (lowerCompany.find(L"microsoft") != std::wstring::npos)
+            continue;   /* 微软自带的不列 */
+        if (km.company.empty())
+        {
+            /* 32 位进程（WOW64）读 64 位内核镜像的版本资源会失败，厂商列因此是空的——
+               这时不能按"厂商非微软"过滤，否则整张表会被筛空。照列，但标注一下。 */
+            BOOL wow = FALSE;
+            if (IsWow64Process(GetCurrentProcess(), &wow) && wow)
+                km.company = L"(32 位进程读不到厂商，请用 x64 探针)";
+        }
+        data.kernelModules.push_back(km);
+    }
+}
+
 bool ProbeCollect(ProbeData& data, bool includeAllModules)
 {
     data.generatedAt = yz::NowStampEx();
@@ -1346,6 +1527,8 @@ bool ProbeCollect(ProbeData& data, bool includeAllModules)
     CollectThirdPartyDrivers(data);
     CollectVendorDevices(data);   /* v0.6.72：远志设备驱动句柄探测（只读） */
     CollectVendorServices(data);  /* v0.6.74：按名字点名的服务/驱动（ProcessProtect 等） */
+    CollectSuspiciousServices(data);  /* v0.6.75：全量扫可疑驱动（不依赖名字） */
+    CollectKernelModules(data);       /* v0.6.75：已加载的内核模块（不在 system32 的） */
     CollectNet(data);
     return true;
 }

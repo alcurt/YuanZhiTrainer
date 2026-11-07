@@ -160,6 +160,32 @@ struct ProbeVendorService
     std::wstring company;
     std::wstring fileVersion;
 };
+/* v0.6.75：全量扫出来的"可疑"驱动服务（不再只按名字点名）。
+   判据（任一命中就进表）：厂商不是 Microsoft、ImagePath 不在 system32\drivers 下、
+   名字/显示名命中关键词（protect/guard/lock/monitor/kafe/anti/safe/hide/shadow/restore/reboot/eagis 等）、
+   或取不到版本信息。目的：万一真正起作用的是别的驱动，别因为"名字没对上"就漏掉。
+   上限 120 条，避免把整台机器的驱动全倒进报告。 */
+struct ProbeSuspiciousService
+{
+    std::wstring name;
+    std::wstring display;
+    DWORD        state;
+    std::wstring imagePath;
+    bool         fileExists;
+    std::wstring company;
+    std::wstring fileVersion;
+    std::wstring reason;      /* 为什么进了这张表 */
+};
+
+/* v0.6.75：当前**已加载**的内核模块（NtQuerySystemInformation/SystemModuleInformation）。
+   服务表只能说明"注册了"，说明不了"加载了"；镜像驱动、保护件、文件过滤往往只在运行时出现。 */
+struct ProbeKernelModule
+{
+    std::wstring path;
+    unsigned long long base;
+    DWORD        size;
+    std::wstring company;
+};
 struct ProbeData
 {
     std::wstring               generatedAt;
@@ -172,6 +198,8 @@ struct ProbeData
     std::vector<ProbeDriver>   drivers;
     std::vector<ProbeVendorDevice> vendorDevices;
     std::vector<ProbeVendorService> vendorServices;
+    std::vector<ProbeSuspiciousService> suspiciousServices;
+    std::vector<ProbeKernelModule> kernelModules;
     std::vector<ProbeAccess>   access;
     std::vector<ProbeNet>      net;
     std::vector<std::wstring>  notes;

@@ -1821,6 +1821,18 @@ try {
     } else {
         $result.Add('FAIL  YZProbe 报告缺少"点名的远志服务 / 驱动"表')
     }
+    # v0.6.75：不按名字、全量扫的两张表。用户提醒过"也许真正起作用的是别的驱动"，
+    # 所以既要有"点名"，也要有"不依赖名字"的兜底。
+    if ($protTxt -match '可疑驱动服务') {
+        $result.Add('PASS  YZProbe 报告含"可疑驱动服务"表（名字关键词 / 非 system32 路径 / 厂商非微软）')
+    } else {
+        $result.Add('FAIL  YZProbe 报告缺少"可疑驱动服务"表')
+    }
+    if ($protTxt -match '已加载的内核模块') {
+        $result.Add('PASS  YZProbe 报告含"已加载的内核模块"表（NtQuerySystemInformation，看运行时真正加载了什么）')
+    } else {
+        $result.Add('FAIL  YZProbe 报告缺少"已加载的内核模块"表')
+    }
 }
 finally {
     if ($protSim -and -not $protSim.HasExited) { Stop-Process -Id $protSim.Id -Force -ErrorAction SilentlyContinue }
