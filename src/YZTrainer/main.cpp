@@ -2,6 +2,7 @@
 // YZTrainer.exe 主程序入口。
 //
 #include "app.h"
+#include "softkbd.h"
 
 #include "payload.h"
 
@@ -117,6 +118,8 @@ int WINAPI wWinMain(HINSTANCE hinst, HINSTANCE, LPWSTR, int)
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }
+
+    softkbd::Shutdown();   /* v0.6.73: 退出时销毁软键盘窗口 */
 
     YZLOGI(L"准备退出");
     InterlockedExchange(&g_stop, 1);

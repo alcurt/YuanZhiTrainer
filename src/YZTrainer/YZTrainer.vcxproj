@@ -81,6 +81,7 @@
     <ClCompile Include="ipc.cpp" />
     <ClCompile Include="ui.cpp" />
     <ClCompile Include="servicepanel.cpp" />
+    <ClCompile Include="softkbd.cpp" />
     <ClCompile Include="diag.cpp" />
     <ClCompile Include="main.cpp" />
     <ClCompile Include="payload.cpp" />

@@ -2896,6 +2896,71 @@ if ($fv2 -ge 0 -and $fv3 -ge $fv2 -and $fv3 -ge 0) {
 } else {
     $result.Add(('FAIL  贴底状态下没有跟随最新（fv2={0} fv3={1}）' -f $fv2, $fv3))
 }
+Start-Stage '==== 阶段二十七之四：软键盘窗口能开能关（v0.6.73）===='
+
+# 背景：教师端"锁键盘"之后物理按键进不来，而 Yistart 用户态没有任何输入 API ⇒ 锁大概率在驱动层。
+# 消息级注入（PostMessage WM_KEYDOWN/WM_CHAR）不过键盘驱动栈，所以留一个软键盘当应急出口。
+# 本阶段只验证窗口生命周期；字符是否真的落到目标窗口，靠人工在记事本里点几下确认，自动化里不冒充。
+# 判据用"按 PID 枚举顶层窗口 + 读类名"，不用 FindWindow：后者要求类名注册在当前会话窗口站，
+# 而这里的窗口属于另一个进程（实测 FindWindow 返回 0，但日志里"软键盘: 已显示"明明打了）。
+if (-not ('YZUiMsgKbd' -as [type])) {
+    $sig = 'public delegate bool EnumProc2(IntPtr h, IntPtr l); [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc2 cb, IntPtr l); [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid); [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h); [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetClassNameW(IntPtr h, System.Text.StringBuilder s, int n); [DllImport("user32.dll")] public static extern IntPtr SendMessage(IntPtr h, uint m, IntPtr w, IntPtr l); public static IntPtr FindByPid(int pid) { IntPtr found = IntPtr.Zero; EnumWindows((h, l) => { uint p; GetWindowThreadProcessId(h, out p); if (p == (uint)pid) { found = h; return false; } return true; }, IntPtr.Zero); return found; } public static string VisibleClasses(int pid) { var sb = new System.Text.StringBuilder(); EnumWindows((h, l) => { uint p; GetWindowThreadProcessId(h, out p); if (p == (uint)pid && IsWindowVisible(h)) { var cls = new System.Text.StringBuilder(256); GetClassNameW(h, cls, 256); sb.Append(cls.ToString()); sb.Append("|"); } return true; }, IntPtr.Zero); return sb.ToString(); }'
+    Add-Type -Namespace YZUiMsgKbd -Name W -MemberDefinition $sig
+}
+$kbdIni = @(
+    '[General]',
+    'CaptureScanIntervalMs=3000',
+    'Flags=1',
+    'WindowPercent=60',
+    'LogLevel=3',
+    'AutoInject=1',
+    'InjectMethod=0',
+    'EnableExamGuard=1',
+    'ExternalWindowFix=0',
+    'InjectCaptureChild=0',
+    'AutoExportOnBroadcast=0',
+    'AutoExportOnExit=0',
+    'AutoExportOnCapture=0',
+    'ProcessNames=YZSimTarget.exe'
+)
+Set-Content -LiteralPath $iniFile -Value $kbdIni -Encoding utf8
+
+$WM_COMMAND = 0x0111
+$IDM_TRAY_SOFTKBD = 3008
+$kbdProc = $null
+$classes1 = ''
+$classes2 = ''
+try {
+    $kbdProc = Start-Trainer
+    Start-Sleep -Seconds 3
+    $kbdProc.Refresh()
+    $hMain = $kbdProc.MainWindowHandle
+    if ($hMain -eq [IntPtr]::Zero) { $hMain = [YZUiMsgKbd.W]::FindByPid($kbdProc.Id) }
+    if ($hMain -ne [IntPtr]::Zero) {
+        [void][YZUiMsgKbd.W]::SendMessage($hMain, $WM_COMMAND, [IntPtr]$IDM_TRAY_SOFTKBD, [IntPtr]::Zero)
+        Start-Sleep -Milliseconds 700
+        $classes1 = [YZUiMsgKbd.W]::VisibleClasses($kbdProc.Id)
+        [void][YZUiMsgKbd.W]::SendMessage($hMain, $WM_COMMAND, [IntPtr]$IDM_TRAY_SOFTKBD, [IntPtr]::Zero)
+        Start-Sleep -Milliseconds 500
+        $classes2 = [YZUiMsgKbd.W]::VisibleClasses($kbdProc.Id)
+    }
+}
+finally {
+    [void](Close-TrainerGracefully $kbdProc 8)
+}
+$shown1 = ($classes1 -match 'YZSoftKbd')
+$shown2 = ($classes2 -match 'YZSoftKbd')
+Write-Host ("软键盘: 第一次可见窗口=[" + $classes1 + "] 第二次=[" + $classes2 + "]")
+if ($shown1) {
+    $result.Add('PASS  软键盘能从托盘命令打开（同名顶层窗口可见）')
+} else {
+    $result.Add('FAIL  软键盘没能打开——键盘被锁时就没有应急输入通道了')
+}
+if ($shown1 -and -not $shown2) {
+    $result.Add('PASS  再点一次能隐藏软键盘（不会一直挡在屏幕上）')
+} else {
+    $result.Add('FAIL  软键盘第二次命令没有隐藏它')
+}
 Start-Stage '==== 阶段二十八：拦截"丢弃"必须能在日志里看见（v0.6.46）===='
 
 # 背景：0x10（拦截教师端遥控输入）开着时，四个输入钩子会把进程内的调用直接吞掉，但此前**只计数不打印**

@@ -1,9 +1,10 @@
-#include "app.h"
+﻿#include "app.h"
 
 #include "yz_log.h"
 #include "yz_util.h"
 
 #include "winfix.h"
+#include "softkbd.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -39,6 +40,7 @@ const int  IDM_TRAY_WINDOWIZE = 3003;
 const int  IDM_TRAY_UNLOCK   = 3004;
 const int  IDM_TRAY_ANTIMON  = 3005;
 const int  IDM_TRAY_INJECT   = 3006;
+const int  IDM_TRAY_SOFTKBD  = 3008;   /* v0.6.73: 软键盘（键盘被锁时用鼠标点字） */
 const int  IDM_TRAY_FAKEFULL = 3007;
 
 const wchar_t* const kWindowClass = L"YZTrainerMainWnd";
@@ -263,6 +265,7 @@ void ShowTrayMenu(HWND hwnd)
     AppendMenuW(menu, MF_STRING | (CmdGetFlag(YZ_FLAG_ANTI_MONITOR) ? MF_CHECKED : 0), IDM_TRAY_ANTIMON, L"防监视（冻结画面）");
     AppendMenuW(menu, MF_STRING | (CmdGetFlag(YZ_FLAG_FAKE_FULLSCREEN) ? MF_CHECKED : 0), IDM_TRAY_FAKEFULL, L"假全屏（保持全屏外观，仅取消置顶）");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING, IDM_TRAY_SOFTKBD, L"软键盘（键盘被锁时用鼠标点字）");
     AppendMenuW(menu, MF_STRING, IDM_TRAY_INJECT, L"立即注入");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, IDM_TRAY_EXIT, L"退出");
@@ -650,7 +653,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     case WM_COMMAND:
         {
             int id = LOWORD(wParam);
-            if (id >= IDM_TRAY_SHOW && id <= IDM_TRAY_FAKEFULL)
+            if (id >= IDM_TRAY_SHOW && id <= IDM_TRAY_SOFTKBD)   /* v0.6.73: 范围要含 3008 软键盘 */
                 return TrayMenuCommand(id);
             if (HIWORD(wParam) == BN_CLICKED || HIWORD(wParam) == EN_CHANGE)
                 OnCommandWord(hwnd, id);
@@ -765,6 +768,7 @@ int TrayMenuCommand(int id)
     case IDM_TRAY_UNLOCK:    CmdToggleFlag(YZ_FLAG_INPUT_UNLOCK); break;
     case IDM_TRAY_ANTIMON:   CmdToggleFlag(YZ_FLAG_ANTI_MONITOR); break;
     case IDM_TRAY_FAKEFULL:  CmdToggleFlag(YZ_FLAG_FAKE_FULLSCREEN); break;
+    case IDM_TRAY_SOFTKBD:   softkbd::Toggle(g_app.hwndMain); break;
     case IDM_TRAY_INJECT:    CmdInjectNow(); break;
     default:
         break;
