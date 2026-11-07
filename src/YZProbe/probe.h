@@ -146,6 +146,20 @@ struct ProbeVendorDevice
     bool         opened;    /* CreateFileW 是否成功 */
     DWORD        error;     /* 失败时的 GetLastError */
 };
+/* v0.6.74：按名字点名的远志服务/驱动（不依赖"路径里带 GZYZ"这类模糊匹配）。
+   `ProcessProtect` 的服务名就是这四个字母，ImagePath 指向 system32\drivers\ProcessProtect.sys，
+   跟远志的安装目录没有关系——按路径过滤的旧表会把它漏掉。
+   现场判读：存在 + 状态 4(RUNNING) ⇒ 保护件在跑；文件存在但服务不存在 ⇒ 装过没注册。 */
+struct ProbeVendorService
+{
+    std::wstring name;
+    DWORD        state;         /* SERVICE_STOPPED / RUNNING … */
+    bool         exists;        /* OpenService 是否成功 */
+    std::wstring imagePath;     /* 已展开的真实路径 */
+    bool         fileExists;
+    std::wstring company;
+    std::wstring fileVersion;
+};
 struct ProbeData
 {
     std::wstring               generatedAt;
@@ -157,6 +171,7 @@ struct ProbeData
     std::vector<ProbeService>  services;
     std::vector<ProbeDriver>   drivers;
     std::vector<ProbeVendorDevice> vendorDevices;
+    std::vector<ProbeVendorService> vendorServices;
     std::vector<ProbeAccess>   access;
     std::vector<ProbeNet>      net;
     std::vector<std::wstring>  notes;

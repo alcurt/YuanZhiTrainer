@@ -1,4 +1,4 @@
-//
+﻿//
 // YZProbe.exe —— 机房只读侦察工具。
 //
 // 用法：
@@ -535,6 +535,27 @@ std::wstring ProbeToMarkdown(const ProbeData& data)
             const ProbeVendorDevice& d = data.vendorDevices[i];
             m += yz::Format(L"| %s | %s | %u |\n", d.name.c_str(),
                             d.opened ? L"是" : L"否", d.error);
+        }
+        m += L"\n";
+    }
+
+    m += L"\n## 点名的远志服务 / 驱动（按名字查，不看安装路径）\n\n";
+    if (data.vendorServices.empty())
+    {
+        m += L"（未采集）\n\n";
+    }
+    else
+    {
+        m += L"| 服务名 | 是否存在 | 状态 | 文件是否存在 | 厂商 | 文件版本 | ImagePath |\n|---|---|---|---|---|---|---|\n";
+        for (size_t i = 0; i < data.vendorServices.size(); i++)
+        {
+            const ProbeVendorService& v = data.vendorServices[i];
+            m += yz::Format(L"| %s | %s | %u | %s | %s | %s | %s |\n",
+                            v.name.c_str(), v.exists ? L"是" : L"否", v.state,
+                            v.fileExists ? L"是" : L"否",
+                            v.company.empty() ? L"-" : v.company.c_str(),
+                            v.fileVersion.empty() ? L"-" : v.fileVersion.c_str(),
+                            v.imagePath.empty() ? L"-" : v.imagePath.c_str());
         }
         m += L"\n";
     }

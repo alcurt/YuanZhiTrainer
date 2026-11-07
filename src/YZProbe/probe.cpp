@@ -1254,6 +1254,87 @@ static void CollectVendorDevices(ProbeData& data)
     }
 }
 
+/* v0.6.74：按名字点名的远志服务/驱动。见 probe.h 里 ProbeVendorService 的说明。
+   为什么不用现成的"非微软驱动"表：那张表按"非微软签名/路径"筛，而 ProcessProtect 的
+   ImagePath 是纯 system32\drivers，跟远志目录没关系，很容易漏；这里直接按名字点。
+   只读操作（OpenService/QueryServiceStatusEx/QueryServiceConfigW + 读文件版本），不动任何服务。 */
+static void CollectVendorServices(ProbeData& data)
+{
+    static const wchar_t* kNames[] = {
+        L"ProcessProtect",
+        L"AkDeamon",
+        L"WINIO",
+        L"VA",
+        L"resys",
+        L"revxd",
+        L"rescvxd",
+        L"Devfer",
+        L"Ekernel",
+        L"NdisNetFilter",
+        L"nfndis",
+        L"ExdMirr",
+        L"videfake",
+    };
+    SC_HANDLE scm = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT | SC_MANAGER_ENUMERATE_SERVICE);
+    if (scm == nullptr)
+    {
+        data.notes.push_back(yz::Format(L"点名服务未采集：OpenSCManager 失败 err=%u", GetLastError()));
+        return;
+    }
+    for (size_t i = 0; i < sizeof(kNames) / sizeof(kNames[0]); ++i)
+    {
+        ProbeVendorService v;
+        v.name = kNames[i];
+        v.state = 0;
+        v.exists = false;
+        v.fileExists = false;
+
+        SC_HANDLE svc = OpenServiceW(scm, v.name.c_str(), SERVICE_QUERY_STATUS | SERVICE_QUERY_CONFIG);
+        if (svc == nullptr)
+        {
+            data.vendorServices.push_back(v);
+            continue;
+        }
+        v.exists = true;
+
+        SERVICE_STATUS_PROCESS sp;
+        ZeroMemory(&sp, sizeof(sp));
+        DWORD needed = 0;
+        if (QueryServiceStatusEx(svc, SC_STATUS_PROCESS_INFO, reinterpret_cast<LPBYTE>(&sp),
+                                 sizeof(sp), &needed))
+            v.state = sp.dwCurrentState;
+
+        DWORD cfgSize = 0;
+        QueryServiceConfigW(svc, nullptr, 0, &cfgSize);
+        if (cfgSize > 0)
+        {
+            std::vector<BYTE> buf(cfgSize);
+            if (QueryServiceConfigW(svc, reinterpret_cast<LPQUERY_SERVICE_CONFIGW>(buf.data()),
+                                    cfgSize, &cfgSize))
+            {
+                const QUERY_SERVICE_CONFIGW* cfg =
+                    reinterpret_cast<const QUERY_SERVICE_CONFIGW*>(buf.data());
+                if (cfg->lpBinaryPathName != nullptr)
+                    v.imagePath = ResolveServicePath(cfg->lpBinaryPathName);
+            }
+        }
+        CloseServiceHandle(svc);
+
+        if (!v.imagePath.empty())
+        {
+            const DWORD attr = GetFileAttributesW(v.imagePath.c_str());
+            v.fileExists = (attr != INVALID_FILE_ATTRIBUTES);
+            if (v.fileExists)
+            {
+                v.company     = FileVersionValue(v.imagePath, L"CompanyName");
+                v.fileVersion = FileVersionValue(v.imagePath, L"FileVersion");
+            }
+        }
+        data.vendorServices.push_back(v);
+    }
+    CloseServiceHandle(scm);
+}
+
 bool ProbeCollect(ProbeData& data, bool includeAllModules)
 {
     data.generatedAt = yz::NowStampEx();
@@ -1264,6 +1345,7 @@ bool ProbeCollect(ProbeData& data, bool includeAllModules)
     CollectServices(data);
     CollectThirdPartyDrivers(data);
     CollectVendorDevices(data);   /* v0.6.72：远志设备驱动句柄探测（只读） */
+    CollectVendorServices(data);  /* v0.6.74：按名字点名的服务/驱动（ProcessProtect 等） */
     CollectNet(data);
     return true;
 }

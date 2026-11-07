@@ -1813,6 +1813,14 @@ try {
     } else {
         $result.Add('FAIL  设备表里没有 ProcessProtect 一行')
     }
+    # v0.6.74：按名字点名的服务/驱动表。设备表只能说明"驱动对象在不在"，
+    # 服务表才能说明"服务注册了没有、是不是 RUNNING、ImagePath 指向哪个文件、哪个版本"——
+    # ProcessProtect 的 ImagePath 是纯 system32\drivers，按远志路径过滤的旧表会整条漏掉。
+    if ($protTxt -match '点名的远志服务') {
+        $result.Add('PASS  YZProbe 报告含"点名的远志服务 / 驱动"表（按名字查，不依赖安装路径）')
+    } else {
+        $result.Add('FAIL  YZProbe 报告缺少"点名的远志服务 / 驱动"表')
+    }
 }
 finally {
     if ($protSim -and -not $protSim.HasExited) { Stop-Process -Id $protSim.Id -Force -ErrorAction SilentlyContinue }
