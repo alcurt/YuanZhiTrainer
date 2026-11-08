@@ -43,6 +43,11 @@
 param([switch]$Fail, [switch]$NoMessages)
 
 $ErrorActionPreference = 'Stop'
+# v0.6.76 fix: this script decodes git output via [Console]::OutputEncoding. If the console
+# is not UTF-8 (e.g. pwsh started from bash / a non-UTF-8 terminal), CJK filenames come out as
+# mojibake, Test-Path fails, and the gate falsely reports "unreadable". Force UTF-8 here so the
+# result does not depend on the caller's console.
+try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
 $root = Split-Path -Parent $PSScriptRoot
 
 $hits        = New-Object System.Collections.Generic.List[object]
@@ -82,12 +87,12 @@ function Test-Text([string]$text, [string]$where, [string]$lineLabel = '行') {
                                  ($first -eq 172 -and $second -ge 16 -and $second -le 31) -or
                                  ($first -eq 169 -and $second -eq 254)
                     if ($isPrivate) {
-                        $found.Add([pscustomobject]@{ Where=$where; Line=$lineNo; LineLabel=$lineLabel; Rule=$r.Name; Mask=$r.Mask })
+                        $found.Add([pscustomobject]@{ Where=$where; Line=$lineNo; LineLabel=$lineLabel; Rule=$r.Name; Mask=$r.Mask; Value=$mm.Value })
                     } else {
                         $script:hints.Add(('{0}:{1}  四段串（可能是版本号，不拦）' -f $where, $lineNo))
                     }
                 } else {
-                    $found.Add([pscustomobject]@{ Where=$where; Line=$lineNo; LineLabel=$lineLabel; Rule=$r.Name; Mask=$r.Mask })
+                    $found.Add([pscustomobject]@{ Where=$where; Line=$lineNo; LineLabel=$lineLabel; Rule=$r.Name; Mask=$r.Mask; Value=$mm.Value })
                 }
             }
         }
@@ -106,6 +111,33 @@ if (Test-Path -LiteralPath $wlPath) {
         $f = $ln -split "`t"
         if ($f.Count -ge 2) { $allowSet[($f[0].Trim() + '|' + $f[1].Trim())] = $(if ($f.Count -ge 3) { $f[2].Trim() } else { '' }) }
     }
+}
+
+# Already-published check (added in v0.6.76): if a hit's value can be found verbatim in
+# origin/master, it was public long ago => report as a hint, not as a blocking hit. Rationale:
+# the gate exists to keep *new* leaks out of public history; "moving an already-public line"
+# (one deletion + one addition) otherwise trips the patch scan forever and the gate gets ignored.
+$published = New-Object System.Collections.Generic.List[object]
+$publishedCache = @{}
+$hasPublishedBase = $false
+Push-Location -LiteralPath $root
+try { git rev-parse --verify --quiet origin/master 2>$null | Out-Null; $hasPublishedBase = ($LASTEXITCODE -eq 0) } finally { Pop-Location }
+
+function Test-Published([string]$value) {
+    if ([string]::IsNullOrEmpty($value) -or -not $script:hasPublishedBase) { return $false }
+    if ($script:publishedCache.ContainsKey($value)) { return $script:publishedCache[$value] }
+    Push-Location -LiteralPath $script:root
+    try {
+        git grep -q -F -- $value origin/master 2>$null | Out-Null
+        $r = ($LASTEXITCODE -eq 0)
+    } finally { Pop-Location }
+    $script:publishedCache[$value] = $r
+    return $r
+}
+
+# B/C/D hits go through here: value already public => hint; otherwise => blocking
+function Add-NewHit($h) {
+    if (Test-Published $h.Value) { $script:published.Add($h) } else { $script:hits.Add($h) }
 }
 
 Push-Location -LiteralPath $root
@@ -142,14 +174,14 @@ if (-not $NoMessages) {
             $short = $sha.Substring(0,7)
             $msg = (git log -1 --format='%B' $sha 2>$null) -join [Environment]::NewLine
             $msgScanned++
-            foreach ($h in (Test-Text $msg ('提交信息 ' + $short) '行')) { $hits.Add($h) }
+            foreach ($h in (Test-Text $msg ('提交信息 ' + $short) '行')) { Add-NewHit $h }
             $changed = @(git -c core.quotepath=false show --name-only --format= $sha 2>$null) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
             foreach ($cf in $changed) {
                 if ($cf -eq 'tools/check-sanitize.ps1') { continue }
                 $patch = (git -c core.quotepath=false show --format= --patch $sha -- $cf 2>$null) -join [Environment]::NewLine
                 if ([string]::IsNullOrWhiteSpace($patch)) { continue }
                 $msgScanned++
-                foreach ($h in (Test-Text $patch ('补丁 ' + $short + ' ' + $cf) '补丁行 ')) { $hits.Add($h) }
+                foreach ($h in (Test-Text $patch ('补丁 ' + $short + ' ' + $cf) '补丁行 ')) { Add-NewHit $h }
             }
         }
         foreach ($tg in @(git tag --list)) {
@@ -163,7 +195,7 @@ if (-not $NoMessages) {
             $msgScanned++
             $tagHits = @(Test-Text (($body -join [Environment]::NewLine)) ('tag ' + $tg) '行')
             if ($tagHits.Count -eq 0) { continue }
-            if ($isPublic) { $publicTagHits += $tagHits.Count } else { foreach ($h in $tagHits) { $hits.Add($h) } }
+            if ($isPublic) { $publicTagHits += $tagHits.Count } else { foreach ($h in $tagHits) { Add-NewHit $h } }
         }
     } finally { Pop-Location }
 }
@@ -182,6 +214,10 @@ if ($publicTagHits -gt 0)     { Write-Host ('提示: 已公开的 tag 正文里�
 if ($allowed.Count -gt 0) {
     Write-Host ('已登记的历史遗留 {0} 处（白名单 tools\sanitize-allowlist.txt，不拦）：' -f $allowed.Count)
     $allowed | ForEach-Object { Write-Host ('  ' + (Format-Hit $_)) }
+}
+if ($published.Count -gt 0) {
+    Write-Host ('提示: {0} 处命中的值已在 origin/master 里出现过（不是新增泄露，不拦）：' -f $published.Count)
+    $published | ForEach-Object { Write-Host ('  ' + (Format-Hit $_)) }
 }
 if ($hits.Count -eq 0) {
     Write-Host '拦截级结果: 无命中（当前树 + 未推送补丁/提交信息/tag 正文）'
