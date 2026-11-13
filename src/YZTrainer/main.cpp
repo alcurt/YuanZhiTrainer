@@ -181,6 +181,9 @@ int WINAPI wWinMain(HINSTANCE hinst, HINSTANCE, LPWSTR, int)
     if (cursorThread != nullptr)
         CloseHandle(cursorThread);
 
+    /* v0.6.79：盯 KillMain.exe（教师端锁键鼠工具）并做 ClipCursor 守夜 */
+    StartLockToolWatch();
+
     MSG msg;
     while (GetMessageW(&msg, nullptr, 0, 0) > 0)
     {

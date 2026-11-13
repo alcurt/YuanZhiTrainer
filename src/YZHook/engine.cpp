@@ -666,13 +666,29 @@ void EngineThreadProc()
         YZLOGI(L"抓屏子进程宿主：只装采集钩子（省掉窗口/键鼠/审计/策略四组，安装更快）");
     }
 
+    /* v0.6.79：锁屏工具（KillMain.exe）只装输入钩子。现场证据（2026-11-12）：教师端"锁定鼠标"
+       由遥控拉起 KillMain.exe 触发，而它从未进过我们的注入列表 ⇒ 它做什么我们看不见；
+       与此同时 Yistart 内的 SetCursorPos 已 150/150 全丢、光标仍被拽 ⇒ 动光标的另有其人。 */
+    std::wstring selfLower = SelfExeName();
+    for (size_t i = 0; i < selfLower.size(); ++i)
+    {
+        if (selfLower[i] >= L'A' && selfLower[i] <= L'Z')
+            selfLower[i] = static_cast<wchar_t>(selfLower[i] - L'A' + L'a');
+    }
+    const bool lockToolHost = (!g_observeOnly) && (selfLower.find(L"killmain") != std::wstring::npos);
+    if (lockToolHost)
+    {
+        yzhook::InputHooksInstall(true);
+        YZLOGI(L"锁屏工具宿主：只装输入钩子（KillMain 的键鼠调用会进我们的钩子）");
+    }
+
     if (g_observeOnly)
     {
         yzhook::InputHooksInstall(true);
         YZLOGI(L"[输入观测] 只观测模式启用（pid=%u exe=%s）：只记录不拦截，供现场点名调用者",
                (unsigned)GetCurrentProcessId(), SelfExeName().c_str());
     }
-    else if (!captureChildHost)
+    else if (!captureChildHost && !lockToolHost)
     {
         yzhook::WindowHooksInstall(true);
         yzhook::InputHooksInstall(true);

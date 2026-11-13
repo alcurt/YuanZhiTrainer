@@ -9,6 +9,7 @@
 #include "winfix.h"
 
 #include <tlhelp32.h>
+#include <set>
 #include <string.h>
 
 namespace
@@ -815,6 +816,105 @@ static DWORD WINAPI CaptureChildInjectThread(LPVOID param)
     return 0;
 }
 
+/* v0.6.79：锁屏工具（KillMain.exe）注入 + 鼠标锁定守夜。
+   现场证据（2026-11-12）：
+     · 教师端"锁定鼠标"是遥控拉起 `KillMain.exe -d:set`（恢复是 `-k:recovery`）；
+     · 但注入列表里只有 Yistart / Ycdclient(Remote,ycdinfo) / 抓屏子进程(rundll32)，
+       **KillMain 的四个 pid（1748/15068/12496/2476）一个都没进过** ⇒ 它做什么我们看不见；
+     · 与此同时 Yistart 内的 SetCursorPos 已 150/150 全丢，光标却仍被拽 ⇒ 动光标的另有其人。
+   所以这里做两件事：
+     1) 每 200 ms 扫一次进程名，发现 KillMain.exe 立刻注入（引擎侧按进程名只装输入钩子）；
+     2) 只要 0x4（键鼠解锁）开着，每 200 ms 调一次 ClipCursor(NULL) —— 这是**会话级**解除
+        鼠标矩形锁定，不管是谁设的都会被清掉；每 10 秒汇总一行日志。 */
+static std::set<DWORD> g_lockToolSeen;
+static volatile LONG   g_clipGuardCount = 0;
+
+static DWORD WINAPI LockToolInjectThread(LPVOID param)
+{
+    const DWORD pid = static_cast<DWORD>(reinterpret_cast<ULONG_PTR>(param));
+    const std::wstring dll = ResolveHookDllPath();
+    if (dll.empty())
+    {
+        YZLOGW(L"锁屏工具 pid=%u：拿不到 Hook DLL 路径，跳过注入", pid);
+        return 0;
+    }
+    std::wstring err;
+    if (InjectHookDll(pid, dll, &err))
+        YZLOGI(L"锁屏工具 pid=%u：已注入（它的 SetCursorPos/ClipCursor/mouse_event 现在会进我们的钩子）", pid);
+    else
+        YZLOGW(L"锁屏工具 pid=%u：注入失败: %s", pid, err.c_str());
+    return 0;
+}
+
+static void OnLockToolSeen(DWORD pid)
+{
+    YZLOGI(L"锁屏工具出现: pid=%u（KillMain.exe：教师端的「锁定鼠标/键盘」由它执行）", pid);
+    UiAppendLog(yz::kLogWarn,
+                yz::Format(L"检测到锁屏工具 KillMain.exe（pid=%u），已尝试注入以接管它的鼠标锁定", pid));
+    HANDLE th = CreateThread(nullptr, 0, LockToolInjectThread,
+                             reinterpret_cast<LPVOID>(static_cast<ULONG_PTR>(pid)), 0, nullptr);
+    if (th != nullptr)
+        CloseHandle(th);
+}
+
+DWORD WINAPI LockToolWatchEntry(LPVOID)
+{
+    /* 注意：g_stop 在 main.cpp 的匿名命名空间里（内部链接），这里取不到；
+       本线程随进程退出即可，不需要单独的停止标志——进程结束时内核直接回收。 */
+    ULONGLONG lastLog = GetTickCount64();
+    for (;;)
+    {
+        HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if (snap != INVALID_HANDLE_VALUE)
+        {
+            PROCESSENTRY32W pe;
+            ZeroMemory(&pe, sizeof(pe));
+            pe.dwSize = sizeof(pe);
+            if (Process32FirstW(snap, &pe))
+            {
+                do
+                {
+                    if (_wcsicmp(pe.szExeFile, L"KillMain.exe") == 0)
+                    {
+                        const DWORD pid = pe.th32ProcessID;
+                        if (g_lockToolSeen.find(pid) == g_lockToolSeen.end())
+                        {
+                            g_lockToolSeen.insert(pid);
+                            OnLockToolSeen(pid);
+                        }
+                    }
+                } while (Process32NextW(snap, &pe));
+            }
+            CloseHandle(snap);
+        }
+
+        if ((g_app.cfg.flags & YZ_FLAG_INPUT_UNLOCK) != 0)
+        {
+            ClipCursor(nullptr);
+            InterlockedIncrement(&g_clipGuardCount);
+        }
+
+        const ULONGLONG now = GetTickCount64();
+        if (now - lastLog >= 10000)
+        {
+            const LONG n = InterlockedExchange(&g_clipGuardCount, 0);
+            if (n > 0)
+                YZLOGI(L"鼠标锁定守夜: 最近 10 秒主动解除 ClipCursor %ld 次（会话级，不管是谁设的都清）", n);
+            lastLog = now;
+        }
+        Sleep(200);
+    }
+    return 0;
+}
+
+void StartLockToolWatch()
+{
+    HANDLE th = CreateThread(nullptr, 0, LockToolWatchEntry, nullptr, 0, nullptr);
+    if (th != nullptr)
+        CloseHandle(th);
+    else
+        YZLOGW(L"锁屏工具看护线程启动失败 err=%u", GetLastError());
+}
 void OnCaptureChildSeen(DWORD pid, const std::wstring& line)
 {
     YZLOGI(L"抓屏子进程出现: pid=%u —— 厂商的 DXGI 桌面复制在它里面（%s）", pid, line.c_str());
