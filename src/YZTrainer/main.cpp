@@ -9,6 +9,9 @@
 #include "yz_log.h"
 #include "yz_util.h"
 
+#include <map>
+#include <string>
+
 AppRuntime g_app;
 
 namespace
@@ -23,6 +26,67 @@ void LogSinkProc(int level, const wchar_t* text, void*)
         UiAppendLog(level, std::wstring(text));
 }
 
+/* v0.6.77：光标跳变追踪。
+   现场（2026-11-12）：注入进程内的 SetCursorPos 已被丢弃 150/150（其中归位类 150 次），
+   光标却仍被拽 ⇒ 元凶不在那个进程里。这里用 60 Hz 采样 GetCursorPos，每秒聚合一次：
+   只报"同一秒内多次落在同一点"的情况（被反复摁回去的特征），既能给出时间线，
+   又不会把日志刷爆。配合"锁屏事件"那条日志，就能把"谁在动光标"缩到很小范围。 */
+DWORD WINAPI CursorTraceEntry(LPVOID)
+{
+    POINT last;
+    if (!GetCursorPos(&last))
+        return 0;
+    std::map<std::wstring, int> landings;
+    int moves = 0;
+    int jumps = 0;
+    ULONGLONG secStart = GetTickCount64();
+
+    while (InterlockedCompareExchange(&g_stop, 0, 0) == 0)
+    {
+        POINT p;
+        if (GetCursorPos(&p))
+        {
+            if (p.x != last.x || p.y != last.y)
+            {
+                ++moves;
+                const long dx = p.x - last.x;
+                const long dy = p.y - last.y;
+                if (dx * dx + dy * dy > 200 * 200)
+                    ++jumps;
+                landings[yz::Format(L"%d,%d", p.x, p.y)] += 1;
+                last = p;
+            }
+        }
+        const ULONGLONG now = GetTickCount64();
+        if (now - secStart >= 1000)
+        {
+            if (moves > 0)
+            {
+                std::wstring topKey;
+                int topN = 0;
+                for (std::map<std::wstring, int>::iterator it = landings.begin(); it != landings.end(); ++it)
+                {
+                    if (it->second > topN)
+                    {
+                        topN = it->second;
+                        topKey = it->first;
+                    }
+                }
+                if (topN >= 3)
+                    YZLOGW(L"[光标跳变] 本秒位移 %d 次（大幅跳变 %d 次），最高频落点 %s 命中 %d 次",
+                           moves, jumps, topKey.c_str(), topN);
+                else
+                    YZLOGD(L"[光标跳变] 本秒位移 %d 次（未形成固定落点）", moves);
+            }
+            landings.clear();
+            moves = 0;
+            jumps = 0;
+            secStart = now;
+        }
+        Sleep(16);
+    }
+    return 0;
+}
 DWORD WINAPI WatchdogEntry(LPVOID)
 {
     YZLOGI(L"看门狗线程启动");
@@ -111,6 +175,11 @@ int WINAPI wWinMain(HINSTANCE hinst, HINSTANCE, LPWSTR, int)
 
     g_watchdogStop   = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     g_watchdogThread = CreateThread(nullptr, 0, WatchdogEntry, nullptr, 0, nullptr);
+
+    /* v0.6.77：光标跳变追踪线程（60 Hz 采样，1 秒聚合） */
+    HANDLE cursorThread = CreateThread(nullptr, 0, CursorTraceEntry, nullptr, 0, nullptr);
+    if (cursorThread != nullptr)
+        CloseHandle(cursorThread);
 
     MSG msg;
     while (GetMessageW(&msg, nullptr, 0, 0) > 0)

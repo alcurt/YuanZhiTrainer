@@ -196,6 +196,10 @@ HRESULT STDMETHODCALLTYPE TraceAcquireNextFrame(IDXGIOutputDuplication* self, UI
         Sleep(waitMs);
         InterlockedIncrement(&g_acquireCalls);
         InterlockedIncrement(&g_acquireTimeouts);
+        /* v0.6.77：冻结期间原来不统计，于是"到底是在持续取帧还是已经停了"没有数据。
+           现场（2026-11-12）教师端缩略图变黑，怀疑是"冻结后不再交付新帧"造成的 starving，
+           这条统计就是用来证实/否证它的。 */
+        MaybeSummarize(L"冻结");
         LeaveHook();
         return DXGI_ERROR_WAIT_TIMEOUT;
     }

@@ -166,6 +166,22 @@ void AuditEvent(const wchar_t* kind, const std::wstring& exe, const std::wstring
     InterlockedIncrement(&g_auditCount);
     AppendAuditFile(line);
 
+    /* v0.6.77：KillMain.exe 是远志的"锁屏"工具（它打开 \\.\LCD 设备）。教师端按下
+       鼠标/键盘锁定开关时，遥控拉起的正是 `KillMain.exe -d:set`，恢复是 `-k:recovery`。
+       单独留一条显眼日志，便于和"光标跳变"的时间线对照——现场实测（2026-11-12）
+       注入进程内的 SetCursorPos 已被丢光 150/150，光标却仍被拽，元凶在别处，
+       这条日志就是排除法的第一步。 */
+    if (cmdLine.find(L"KillMain") != std::wstring::npos)
+    {
+        const wchar_t* what = L"未知动作";
+        if (cmdLine.find(L"-d:set") != std::wstring::npos)
+            what = L"锁定（-d:set）";
+        else if (cmdLine.find(L"-k:recovery") != std::wstring::npos)
+            what = L"恢复（-k:recovery）";
+        yzhook::SendLogToHost(YZ_LOG_WARN,
+            yz::Format(L"锁屏事件: 教师端执行 KillMain %s（键鼠被锁/解锁的分界点）", what).c_str());
+    }
+
     /* 界面日志只报"疑似教师端下发"的，避免客户端自己拉辅助进程时刷屏 */
     if (!selfCall)
     {
