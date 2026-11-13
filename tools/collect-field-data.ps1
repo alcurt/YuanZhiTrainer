@@ -62,6 +62,27 @@ $roots = @(
     (Split-Path -Parent $MyInvocation.MyCommand.Path)
 ) | Sort-Object -Unique
 
+# v0.6.78（2026-11-12 现场教训，用户当场发现）：包内布局是 <包根>\tools\ 与 <包根>\Win32\、<包根>\x64\。
+# 现场往往**在 tools\ 里**跑本脚本，于是 Win32\（探针报告、diag-*、YSysRun 日志的真正落点）
+# 是**兄弟目录**而不是子目录，下面"只扫当前目录的直接子目录"的逻辑完全看不到它——
+# 那一轮因此丢了 5 份 YZProbe-report、2 个 diag-*、2 份 YZSysRun 日志，清单里还写着"diag 0 个"。
+# 这里按"当前目录 / 脚本所在目录 / 它们的父目录"分别补上 Win32、x64 与父目录本身。
+$nearRoots = @()
+foreach ($base in @((Get-Location).Path, (Split-Path -Parent $MyInvocation.MyCommand.Path))) {
+    if ([string]::IsNullOrEmpty($base)) { continue }
+    $nearRoots += $base
+    $nearRoots += (Join-Path $base 'Win32')
+    $nearRoots += (Join-Path $base 'x64')
+    $parent = Split-Path -Parent $base
+    if (-not [string]::IsNullOrEmpty($parent)) {
+        $nearRoots += $parent
+        $nearRoots += (Join-Path $parent 'Win32')
+        $nearRoots += (Join-Path $parent 'x64')
+    }
+}
+$nearRoots = @($nearRoots | Where-Object { -not [string]::IsNullOrEmpty($_) } | Sort-Object -Unique)
+$roots = @($roots + $nearRoots) | Sort-Object -Unique
+
 # v0.6.40 修订（2026-10-15 现场教训）：只在"当前目录"扫是不够的——把工具放在 YZ\tools、
 # 从 YZ\ 里运行脚本时，诊断包与探针报告其实都在 YZ\Win32\ （exe 所在目录）⇒ 会把它们漏掉。
 # 所以这里再把**直接子目录**里"看起来像 exe 目录"的（含 YZTrainer.exe 或任何 diag-*）也纳入扫描。
@@ -113,7 +134,7 @@ M '---- 日志（含轮转档）----'
 foreach ($r in $roots) {
     if (-not (Test-DirSafe $r)) { M ("  （跳过，无权限或无此目录: {0}）" -f $r); continue }
     $tag = ($r -replace '[:\\]', '_')
-    foreach ($pat in 'yzt*.log', 'remote-exec*.log', 'exam-debug.txt') {
+    foreach ($pat in 'yzt*.log', 'remote-exec*.log', 'exam-debug.txt', 'YZSysRun-*.txt') {
         Get-ChildItem -LiteralPath $r -Filter $pat -File -ErrorAction SilentlyContinue |
             ForEach-Object { Copy-Into $_.FullName (Join-Path 'logs' $tag) }
     }
@@ -131,7 +152,7 @@ M ''
 M '---- 探针产物（watch / report / 输入探针）----'
 foreach ($r in $roots) {
     if (-not (Test-DirSafe $r)) { M ("  （跳过，无权限或无此目录: {0}）" -f $r); continue }
-    foreach ($pat in 'YZProbe-report-*.*', 'YZProbe-watch-*.log', 'input-probe-*.txt', 'probe-*.log', '现场备注*.*', '备注*.*', '清单*.txt') {
+    foreach ($pat in 'YZProbe-report-*.*', 'YZProbe-watch-*.log', 'input-probe-*.txt', 'probe-*.log', 'snapshot.txt', '现场备注*.*', '备注*.*', '清单*.txt') {
         Get-ChildItem -LiteralPath $r -Filter $pat -File -ErrorAction SilentlyContinue |
             ForEach-Object { Copy-Into $_.FullName 'probe' }
     }
@@ -182,6 +203,14 @@ if ($diagCount -eq 0) {
     Write-Host ("已收到 {0} 个诊断包（期望含 广播 / 采集 / 退出 三份，按现场实际发生的取）。" -f $diagCount) -ForegroundColor Cyan
 }
 Write-Host '带回前请确认：manifest.txt 里"日志（含轮转档）"至少 1 份、诊断包数与你现场触发的次数对得上。' -ForegroundColor Cyan
+# v0.6.78：探针报告是判读 ProcessProtect/访问掩码/内核模块的唯一来源，缺了等于白跑一趟。
+$probeCount = @(Get-ChildItem -LiteralPath (Join-Path $dest 'probe') -Filter 'YZProbe-report-*.md' -File -ErrorAction SilentlyContinue).Count
+if ($probeCount -eq 0) {
+    Write-Host '警告：一份 YZProbe 报告都没收到！下次务必在 Win32\ 里跑 x64\YZProbe.exe --watch，' -ForegroundColor Red
+    Write-Host '      并在收工时让本脚本能扫到 exe 所在目录（从包根或 tools\ 运行都行，脚本已自动补扫 Win32\x64）。' -ForegroundColor Red
+} else {
+    Write-Host ("已收到 {0} 份 YZProbe 报告（判读 ProcessProtect / 访问掩码 / 内核模块全靠它）。" -f $probeCount) -ForegroundColor Cyan
+}
 # ---- v0.6.49：回收前的固定提醒（不做自动判定，避免误报）----
 Write-Host ''
 Write-Host '提醒：现场备注请写成单独文件（清单第四节四问）。没有它，判读只能靠日志。' -ForegroundColor Yellow
