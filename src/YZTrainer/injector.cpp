@@ -846,7 +846,7 @@ static DWORD WINAPI LockToolInjectThread(LPVOID param)
     return 0;
 }
 
-static void OnLockToolSeen(DWORD pid)
+void TryInjectLockTool(DWORD pid)
 {
     YZLOGI(L"锁屏工具出现: pid=%u（KillMain.exe：教师端的「锁定鼠标/键盘」由它执行）", pid);
     UiAppendLog(yz::kLogWarn,
@@ -880,7 +880,7 @@ DWORD WINAPI LockToolWatchEntry(LPVOID)
                         if (g_lockToolSeen.find(pid) == g_lockToolSeen.end())
                         {
                             g_lockToolSeen.insert(pid);
-                            OnLockToolSeen(pid);
+                            TryInjectLockTool(pid);
                         }
                     }
                 } while (Process32NextW(snap, &pe));

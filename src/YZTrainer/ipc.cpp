@@ -1,4 +1,4 @@
-#include "app.h"
+﻿#include "app.h"
 #include "capturechild.h"
 
 #include "yz_log.h"
@@ -199,6 +199,22 @@ void HandleEvent(int slot, DWORD opcode, const std::vector<BYTE>& payload)
                 DWORD childPid = 0;
                 if (yzcap::ParseCaptureChildMarker(text, &childPid))
                     OnCaptureChildSeen(childPid, text);
+            }
+
+            /* v0.6.80：KillMain（锁屏工具）寿命极短，宿主 200 ms 轮询抓不到（11-19 实测：
+               钩子侧 4 次锁屏事件，宿主一次没抓到）。钩子会在审计行里带 [锁屏工具 pid=N]，
+               这里解析出来立刻注入，通道与抓屏子进程同构。 */
+            {
+                const std::wstring marker = L"[锁屏工具 pid=";
+                const size_t pos = text.find(marker);
+                if (pos != std::wstring::npos)
+                {
+                    const wchar_t* p = text.c_str() + pos + marker.size();
+                    wchar_t* end = nullptr;
+                    const unsigned long lockPid = wcstoul(p, &end, 10);
+                    if (lockPid != 0)
+                        TryInjectLockTool(static_cast<DWORD>(lockPid));
+                }
             }
 
             /* 客户端 Hook 上报"广播窗口已窗口化/已假全屏"= 广播确实开始了：

@@ -1,4 +1,4 @@
-//
+﻿//
 // 教师端远程执行审计（只记录，不拦截）。
 //
 // 依据：教师端的"远程执行命令/关机/重启"最终都落在学生端进程里调用
@@ -225,6 +225,11 @@ BOOL WINAPI Hook_CreateProcessW(LPCWSTR appName, LPWSTR cmdLine, LPSECURITY_ATTR
                                   : yz::Format(L"失败 err=%u", GetLastError());
     if (result && pi != nullptr && IsCaptureChildCommandLine(cmdLine != nullptr ? cmdLine : L""))
         verdict += yz::Format(L" [抓屏子进程 pid=%u]", pi->dwProcessId);
+    /* v0.6.80：KillMain（教师端锁屏工具）寿命极短，宿主 200 ms 轮询会错过（11-19 现场实测：
+       钩子侧记到了 4 次锁屏事件，宿主侧一次都没抓到）。所以这里把子进程 pid 塞进审计行，
+       宿主收到日志后立刻注入——通道与"抓屏子进程"完全同构。 */
+    if (result && pi != nullptr && cmdLine != nullptr && wcsstr(cmdLine, L"KillMain") != nullptr)
+        verdict += yz::Format(L" [锁屏工具 pid=%u]", pi->dwProcessId);
     AuditEvent(L"CreateProcessW", exe, cmdLine != nullptr ? cmdLine : L"", verdict);
 
     yzhook::LeaveHook();
