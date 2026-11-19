@@ -890,8 +890,24 @@ DWORD WINAPI LockToolWatchEntry(LPVOID)
 
         if ((g_app.cfg.flags & YZ_FLAG_INPUT_UNLOCK) != 0)
         {
-            ClipCursor(nullptr);
-            InterlockedIncrement(&g_clipGuardCount);
+            /* v0.6.81：只有**真的**被限制成小区域时才解除并计数。
+               11-19 现场那版是无条件调用 + 无条件计数，于是"最近 10 秒解除 47 次"
+               只是我们自己的循环次数（200 ms × 50），根本区分不出"有没有人 clip"——
+               这条日志就成了假证据。现在先读当前裁剪矩形，比虚拟屏幕小才动手。 */
+            RECT clip;
+            ZeroMemory(&clip, sizeof(clip));
+            if (GetClipCursor(&clip))
+            {
+                const int vw = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+                const int vh = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+                const int cw = static_cast<int>(clip.right - clip.left);
+                const int ch = static_cast<int>(clip.bottom - clip.top);
+                if (cw < vw || ch < vh)
+                {
+                    ClipCursor(nullptr);
+                    InterlockedIncrement(&g_clipGuardCount);
+                }
+            }
         }
 
         const ULONGLONG now = GetTickCount64();
@@ -899,7 +915,7 @@ DWORD WINAPI LockToolWatchEntry(LPVOID)
         {
             const LONG n = InterlockedExchange(&g_clipGuardCount, 0);
             if (n > 0)
-                YZLOGI(L"鼠标锁定守夜: 最近 10 秒主动解除 ClipCursor %ld 次（会话级，不管是谁设的都清）", n);
+                YZLOGI(L"鼠标锁定守夜: 最近 10 秒**发现并解除**矩形锁定 %ld 次（0 = 这段时间没人限制鼠标）", n);
             lastLog = now;
         }
         Sleep(200);
