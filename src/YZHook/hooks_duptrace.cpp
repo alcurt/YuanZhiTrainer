@@ -323,6 +323,16 @@ bool DupTraceInstall(bool enableNow)
     return g_installed;
 }
 
+bool DupTraceInstalled()
+{
+    return g_installed;
+}
+
+long DupTraceCreated()
+{
+    return InterlockedCompareExchange(&g_dupCreated, 0, 0);
+}
+
 void DupTraceShutdown()
 {
     /* 只计数不改变行为，所以退出时不必须摘钩；这里仅把统计打一条尾巴便于现场看总账。 */

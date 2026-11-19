@@ -456,6 +456,24 @@ void SweepTick()
         if (yzhook::CaptureFreeze())
             YZLOGI(L"冻结底图惰性补齐成功（此前钩子未就绪，本轮补上）");
     }
+    /* v0.6.83：冻结开着、进程里确实有采集组件、DXGI 钩子也装上了，却始终没看到 DuplicateOutput——
+       说明这个进程的抓屏根本不走 DXGI（多半是镜像驱动），冻结只能靠 GDI。
+       现场两次都只看到"建立复制 0 次"却没有任何解释，这条把沉默变成证据。 */
+    if (g_wantFrozen && yzhook::ProcessLoadedCaptureComponent() &&
+        yzhook::DupTraceInstalled() && yzhook::DupTraceCreated() == 0)
+    {
+        static LONG64 s_frozenSince = 0;
+        static bool   s_logged = false;
+        const ULONGLONG nowTick = GetTickCount64();
+        if (s_frozenSince == 0)
+            s_frozenSince = static_cast<LONG64>(nowTick);
+        else if (!s_logged && (nowTick - static_cast<ULONGLONG>(s_frozenSince)) >= 10000)
+        {
+            s_logged = true;
+            YZLOGI(L"DXGI 结论: 冻结已 10 秒，但本进程内从未出现 DuplicateOutput —— 抓屏不走 DXGI（多半是镜像驱动），冻结只能靠 GDI");
+        }
+    }
+
     yzhook::WindowSweepTick();
     yzhook::InputEnforceTick();
 

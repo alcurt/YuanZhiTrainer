@@ -17,7 +17,9 @@ void DupTraceShutdown();
    返回 DXGI_ERROR_WAIT_TIMEOUT —— 调用方拿不到新帧，画面就停在最后一帧（§27 本机排练过：
    忙等会打到 3.5M 次/秒，诚实等待后降到 ~32 次/秒而冻结仍有效）。 */
 void DupTraceSetFreeze(bool on);
-bool DupTraceIsFrozen();   /* v0.6.36：供补充通道判断"是否已经冻着"，避免每轮重复打日志 */
+bool DupTraceIsFrozen();   /* 补充通道判断是否已经冻结，避免每次重复打日志 */
+bool DupTraceInstalled();  /* v0.6.83：DXGI 取证钩子是否已装上 */
+long DupTraceCreated();    /* v0.6.83：本进程内建立桌面复制的次数（0 = 从来没建过） */
 } /* namespace yzhook */
 
 #endif /* YZ_HOOKS_DUPTRACE_H */
