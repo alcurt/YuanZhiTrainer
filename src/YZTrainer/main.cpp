@@ -39,6 +39,7 @@ DWORD WINAPI CursorTraceEntry(LPVOID)
     std::map<std::wstring, int> landings;
     int moves = 0;
     int jumps = 0;
+    long maxJumpPx = 0;          /* v0.6.82：本秒内单次位移的最大值（像素） */
     ULONGLONG secStart = GetTickCount64();
 
     while (InterlockedCompareExchange(&g_stop, 0, 0) == 0)
@@ -53,6 +54,15 @@ DWORD WINAPI CursorTraceEntry(LPVOID)
                 const long dy = p.y - last.y;
                 if (dx * dx + dy * dy > 200 * 200)
                     ++jumps;
+                /* v0.6.82：记录最大单次位移。16 ms 一次采样，手正常移动也就几十像素；
+                   一下子几百像素基本只能是"被人设到某个点"（拽光标）。 */
+                {
+                    long adx = dx < 0 ? -dx : dx;
+                    long ady = dy < 0 ? -dy : dy;
+                    const long big = adx > ady ? adx : ady;
+                    if (big > maxJumpPx)
+                        maxJumpPx = big;
+                }
                 landings[yz::Format(L"%d,%d", p.x, p.y)] += 1;
                 last = p;
             }
@@ -72,15 +82,19 @@ DWORD WINAPI CursorTraceEntry(LPVOID)
                         topKey = it->first;
                     }
                 }
-                if (topN >= 3)
-                    YZLOGW(L"[光标跳变] 本秒位移 %d 次（大幅跳变 %d 次），最高频落点 %s 命中 %d 次",
-                           moves, jumps, topKey.c_str(), topN);
+                /* v0.6.82：判据从"同一点 ≥3 次"放宽到"≥2 次"，并新增"单次位移 ≥400 像素"这条——
+                   16 ms 采样下手不可能一下跳 400 像素，那基本就是被 SetCursorPos 拽走。
+                   11-19 现场按旧判据只捞到 3 条 WARN，样本太少，没法判读。 */
+                if (topN >= 2 || maxJumpPx >= 400)
+                    YZLOGW(L"[光标跳变] 本秒位移 %d 次（大幅跳变 %d 次，最大单次 %ld 像素），最高频落点 %s 命中 %d 次",
+                           moves, jumps, maxJumpPx, topKey.c_str(), topN);
                 else
-                    YZLOGD(L"[光标跳变] 本秒位移 %d 次（未形成固定落点）", moves);
+                    YZLOGD(L"[光标跳变] 本秒位移 %d 次（未形成固定落点，最大单次 %ld 像素）", moves, maxJumpPx);
             }
             landings.clear();
             moves = 0;
             jumps = 0;
+            maxJumpPx = 0;
             secStart = now;
         }
         Sleep(16);
