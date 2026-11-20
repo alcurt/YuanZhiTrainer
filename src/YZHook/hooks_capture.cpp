@@ -464,11 +464,22 @@ void CaptureHooksShutdown()
    只在"文件较新（<=120 秒）且尺寸与虚拟屏幕一致"时采用，避免用到过期或错尺寸的画面。 */
 static bool LoadCleanFrozenFrame(int vx, int vy, int vw, int vh)
 {
-    const std::wstring path = L"C:\ProgramData\YZTrainer\frozen.bmp";
+    /* v0.6.84：这里原来是 L"C:\ProgramData\..." —— **单反斜杠**，C++ 里 \P \Y 只是被当成字母，
+       于是实际字符串是 "C:ProgramDataYZTrainer\frozen.bmp"，一个**驱动器相对路径**：
+       主程序写到了它自己当前盘当前目录下，钩子进程按自己的当前目录去解析，两边根本对不上，
+       所以"干净底图"这条通道从来没生效过（11-12/11-19/11-20 三次现场全靠自抓）。
+       本机复现：C:\ProgramDataYZTrainer\frozen.bmp 有 32 MB，而 C:\ProgramData\YZTrainer 里只有
+       capture-state.txt。改成正确的转义，并顺手把失败原因打出来（原来失败是静默的）。 */
+    const std::wstring path = L"C:\\ProgramData\\YZTrainer\\frozen.bmp";
     HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
                            nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (h == INVALID_HANDLE_VALUE)
+    {
+        static LONG s_openFailedLogged = 0;
+        if (InterlockedExchange(&s_openFailedLogged, 1) == 0)
+            YZLOGI(L"干净底图: 打不开 %s（err=%u），冻结回退到自抓", path.c_str(), GetLastError());
         return false;
+    }
 
     FILETIME ftWrite;
     if (!GetFileTime(h, nullptr, nullptr, &ftWrite)) { CloseHandle(h); return false; }
@@ -479,7 +490,14 @@ static bool LoadCleanFrozenFrame(int vx, int vy, int vw, int vh)
     nowTimeU.LowPart  = ftNow.dwLowDateTime;   nowTimeU.HighPart  = ftNow.dwHighDateTime;
     const ULONGLONG ageMs = (nowTimeU.QuadPart > fileTimeU.QuadPart)
                             ? (nowTimeU.QuadPart - fileTimeU.QuadPart) / 10000ULL : 0;
-    if (ageMs > 120000ULL) { CloseHandle(h); return false; }
+    if (ageMs > 120000ULL)
+    {
+        static LONG s_staleLogged = 0;
+        if (InterlockedExchange(&s_staleLogged, 1) == 0)
+            YZLOGI(L"干净底图: %s 太旧（%llu 秒前），冻结回退到自抓", path.c_str(), ageMs / 1000ULL);
+        CloseHandle(h);
+        return false;
+    }
 
     BITMAPFILEHEADER fh;
     BITMAPINFOHEADER ih;
@@ -489,7 +507,15 @@ static bool LoadCleanFrozenFrame(int vx, int vy, int vw, int vh)
     if (ih.biBitCount != 32 || ih.biCompression != BI_RGB) { CloseHandle(h); return false; }
     const int bmpW = ih.biWidth;
     const int bmpH = (ih.biHeight < 0) ? -ih.biHeight : ih.biHeight;
-    if (bmpW != vw || bmpH != vh) { CloseHandle(h); return false; }
+    if (bmpW != vw || bmpH != vh)
+    {
+        static LONG s_sizeLogged = 0;
+        if (InterlockedExchange(&s_sizeLogged, 1) == 0)
+            YZLOGI(L"干净底图: 尺寸不符（文件 %dx%d，虚拟屏幕 %dx%d），冻结回退到自抓",
+                   bmpW, bmpH, vw, vh);
+        CloseHandle(h);
+        return false;
+    }
     SetFilePointer(h, static_cast<LONG>(fh.bfOffBits), nullptr, FILE_BEGIN);
 
     BITMAPINFO bmi;

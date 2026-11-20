@@ -1037,7 +1037,9 @@ void CaptureCleanFrozenFrame()
     for (size_t i = 0; i < total; ++i)
         px[i * 4 + 3] = 0xFF;            /* GDI 不写 alpha；不给 0xFF 对方合成链会当全透明 */
 
-    const std::wstring dir = L"C:\ProgramData\YZTrainer";
+    /* v0.6.84：原来是单反斜杠（"C:ProgramDataYZTrainer" = 驱动器相对路径），
+       与钩子侧原路径一样错，两边写入/读取对不上。见 hooks_capture.cpp 同处注释。 */
+    const std::wstring dir = L"C:\\ProgramData\\YZTrainer";
     yz::EnsureDirectory(dir);
     const std::wstring path = yz::JoinPath(dir, L"frozen.bmp");
     BITMAPFILEHEADER fh;
