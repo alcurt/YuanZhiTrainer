@@ -5,6 +5,8 @@
 #include "yz_util.h"
 
 #include <vector>
+#include <mutex>
+#include <map>
 
 /* 命名管道服务端。
  *
@@ -95,6 +97,13 @@ void SyncPrimaryLocked()
 }
 
 /* 某个 pid 是否已经有一个连上的客户端（注入判定用：连上了就别再重复注入）。 */
+/* v0.6.86：记录"某个 pid 最近一次连上管道的时间"。注入判定要它——引擎里的 NativeUnhook
+   会把我们自己的 DLL 一起卸掉（本地实测：连接建立 3 秒后开始 NativeUnhook，紧接着连接结束、
+   模块也没了），只看模块在不在会误判成可重注，于是每 4 秒重注一次形成循环。 */
+static std::mutex     g_connMtx;
+static std::map<DWORD, ULONGLONG> g_lastConnectTick;
+
+
 bool IsPidConnectedLocked(DWORD pid)
 {
     for (int i = 0; i < kMaxClients; i++)
@@ -271,6 +280,7 @@ DWORD WINAPI ClientThreadEntry(LPVOID param)
     pid     = g_clients[idx].pid;
     LeaveCriticalSection(&g_app.cs);
 
+    IpcNotePidConnected(pid);   /* v0.6.86：注入判定用（见 IpcRecentlyConnected 的说明） */
     YZLOGI(L"Hook DLL 已连接: pid=%u", pid);
     UiAppendLog(yz::kLogInfo, yz::Format(L"Hook DLL 已连接 (PID=%u)", pid));
     PostStatusToUi();
@@ -543,4 +553,26 @@ bool IpcSendFlagCommand(DWORD opcode, bool on)
 bool IpcSendUnload()
 {
     return IpcSend(YZ_CMD_UNLOAD, nullptr, 0);
+}
+
+/* v0.6.86：这两个必须放在匿名命名空间之外，否则 injector.cpp 链接不到（LNK2019）。
+   内部数据 g_connMtx / g_lastConnectTick 仍在上面那个匿名命名空间里，同 TU 可见。 */
+void IpcNotePidConnected(DWORD pid)
+{
+    if (pid == 0)
+        return;
+    std::lock_guard<std::mutex> lock(g_connMtx);
+    g_lastConnectTick[pid] = GetTickCount64();
+    if (g_lastConnectTick.size() > 512)
+        g_lastConnectTick.clear();
+}
+
+bool IpcRecentlyConnected(DWORD pid, DWORD withinMs)
+{
+    std::lock_guard<std::mutex> lock(g_connMtx);
+    std::map<DWORD, ULONGLONG>::const_iterator it = g_lastConnectTick.find(pid);
+    if (it == g_lastConnectTick.end())
+        return false;
+    const ULONGLONG now = GetTickCount64();
+    return now >= it->second && (now - it->second) <= withinMs;
 }

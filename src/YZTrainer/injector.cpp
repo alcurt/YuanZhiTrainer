@@ -9,8 +9,13 @@
 #include "winfix.h"
 
 #include <tlhelp32.h>
+
+/* v0.6.86：抓屏子进程去重的判据，定义在文件后半段；主目标注入路径（更靠前）也要用它记账。 */
+static bool ClaimCaptureChildPid(DWORD pid);
 #include <set>
 #include <mutex>
+#include <map>
+#include <utility>
 #include <string.h>
 
 namespace
@@ -716,6 +721,7 @@ void WatchdogTick()
         {
             g_app.injectHook = hook;
             g_app.injectCount++;
+            ClaimCaptureChildPid(pid);
             YZLOGI(L"已通过消息钩子注入 HHOOK=%p pid=%u", hook, pid);
             UiAppendLog(yz::kLogInfo, yz::Format(L"已通过消息钩子注入目标进程 PID=%u", pid));
         }
@@ -727,11 +733,114 @@ void WatchdogTick()
         return;
     }
 
+    /* v0.6.86（正式修复）：目标进程里 **YZHook.dll 还挂着** 就不要再注入。
+       本地回归实测到完整的循环：注入 → 连接 → 引擎执行 NativeUnhook（剥离远志自带钩子）
+       → 连接被这条路径弄断（"Hook DLL 连接结束"）→ 宿主以为它死了，4 秒后又注入一遍
+       → 又跑一次 NativeUnhook …… 于是同一个进程里堆了多份引擎。
+       现在先看一眼模块表：DLL 在就跳过；真需要重注时（模块已卸载）行为不变。 */
+    {
+        HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid);
+        bool loaded = false;
+        if (snap != INVALID_HANDLE_VALUE)
+        {
+            MODULEENTRY32W me;
+            ZeroMemory(&me, sizeof(me));
+            me.dwSize = sizeof(me);
+            if (Module32FirstW(snap, &me))
+            {
+                do
+                {
+                    if (_wcsicmp(me.szModule, L"YZHook.dll") == 0)
+                    {
+                        loaded = true;
+                        break;
+                    }
+                } while (Module32NextW(snap, &me));
+            }
+            CloseHandle(snap);
+        }
+        if (loaded)
+        {
+            static DWORD s_lastLoggedPid = 0;
+            static ULONGLONG s_lastLoggedTick = 0;
+            const ULONGLONG nowTick2 = GetTickCount64();
+            if (s_lastLoggedPid != pid || nowTick2 - s_lastLoggedTick > 60000ULL)
+            {
+                s_lastLoggedPid  = pid;
+                s_lastLoggedTick = nowTick2;
+                YZLOGI(L"pid=%u 里 YZHook.dll 仍然加载着，跳过重复注入（v0.6.86：NativeUnhook 会弄断管道，"
+                       L"否则每 4 秒重注一次）", pid);
+            }
+            return;
+        }
+    }
+
+    /* v0.6.86：120 秒内这个 pid 连上过管道，就不再注入。引擎执行 NativeUnhook 时会卸掉我们的
+       DLL、顺带断开管道，只看模块是否加载会把"刚连上又断开"误判成需要重注，于是每 4 秒重注一次。 */
+    if (IpcRecentlyConnected(pid, 120000))
+    {
+        static DWORD s_lastSkipPid = 0;
+        static ULONGLONG s_lastSkipTick = 0;
+        const ULONGLONG nowSkip = GetTickCount64();
+        if (s_lastSkipPid != pid || nowSkip - s_lastSkipTick > 60000ULL)
+        {
+            s_lastSkipPid  = pid;
+            s_lastSkipTick = nowSkip;
+            YZLOGI(L"pid=%u 最近连上过管道，跳过重复注入（v0.6.86：NativeUnhook 会弄断连接，120 秒内不重注）", pid);
+        }
+        return;
+    }
+
     std::wstring err;
+    /* v0.6.86：先记一笔"这次到底是不是重复注入"。本地回归里出现过同一 pid 在 4 秒内连上两次
+       （前一次已经打出 "Hook DLL 已连接" 与 "应用配置"），说明 IpcIsClientPidConnected 在那个时刻
+       返回了 false——要么连接记录被后一个实例顶掉，要么客户端在两次之间断过。
+       这里只做取证，不改行为：距上次成功注入 < 30 秒就补一条 WARN，把间隔和当时的连接状态记下来。 */
+    {
+        /* 关键：pid 会被系统复用（回归脚本里尤其频繁），只按 pid 记账会把"另一个进程"
+           误判成"重复注入"。所以身份用 (pid + 创建时间) —— 同一个进程才叫重复。 */
+        ULONGLONG createTime = 0;
+        {
+            HANDLE hp = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+            if (hp != nullptr)
+            {
+                FILETIME ftCreate, ftExit, ftKernel, ftUser;
+                if (GetProcessTimes(hp, &ftCreate, &ftExit, &ftKernel, &ftUser))
+                {
+                    ULARGE_INTEGER u;
+                    u.LowPart = ftCreate.dwLowDateTime;
+                    u.HighPart = ftCreate.dwHighDateTime;
+                    createTime = u.QuadPart;
+                }
+                CloseHandle(hp);
+            }
+        }
+        static std::mutex s_mtx;
+        static std::map<DWORD, std::pair<ULONGLONG, ULONGLONG> > s_last;   /* pid -> (createTime, tick) */
+        std::lock_guard<std::mutex> lock(s_mtx);
+        const ULONGLONG nowTick = GetTickCount64();
+        std::map<DWORD, std::pair<ULONGLONG, ULONGLONG> >::iterator it = s_last.find(pid);
+        if (it != s_last.end() && it->second.first == createTime &&
+            nowTick > it->second.second && (nowTick - it->second.second) < 30000ULL)
+        {
+            YZLOGW(L"重复注入: pid=%u **同一个进程**（创建时间一致）距上次成功注入仅 %llu ms"
+                   L"（注入前 IpcIsClientPidConnected=%d，退避计数=%u）",
+                   pid, nowTick - it->second.second,
+                   IpcIsClientPidConnected(pid) ? 1 : 0, g_app.injectBackoffCount);
+        }
+        s_last[pid] = std::make_pair(createTime, nowTick);
+        if (s_last.size() > 256)
+            s_last.clear();
+    }
+
     if (InjectHookDll(pid, ResolveHookDllPath(), &err))
     {
         g_app.injectFailStreak = 0;
         g_app.injectCount++;
+        /* v0.6.86：把主目标也记进"已注入"集合。否则 Yistart 之后被 capturewatch 认成抓屏子进程时，
+           抓屏子进程去重表里没有它，又会被注入一遍（本地回归实测：pid 先按目标注入，4 秒后
+           又以"抓屏子进程"身份注入一次）。 */
+        ClaimCaptureChildPid(pid);
         YZLOGI(L"已注入目标进程 pid=%u (第 %u 次)", pid, g_app.injectCount);
         UiAppendLog(yz::kLogInfo, yz::Format(L"已注入目标进程 PID=%u", pid));
     }
@@ -952,7 +1061,7 @@ void OnCaptureChildSeen(DWORD pid, const std::wstring& line)
     YZLOGI(L"抓屏子进程出现: pid=%u —— 厂商的 DXGI 桌面复制在它里面（%s）", pid, line.c_str());
     if (!ClaimCaptureChildPid(pid))
     {
-        YZLOGI(L"抓屏子进程 pid=%u：此前已经注入过，跳过重复注入（v0.6.85 去重）", pid);
+        YZLOGI(L"抓屏子进程 pid=%u：已注入过（跳过重复注入，v0.6.85 去重）", pid);
         return;
     }
     /* v0.6.85（第二刀）：**主目标自己也会加载 ExdDtDup.dll**（Yistart 既要 GDI 抓屏也要做桌面复制），
@@ -961,7 +1070,7 @@ void OnCaptureChildSeen(DWORD pid, const std::wstring& line)
        主目标本来就是全量钩子（含采集组），这里直接跳过。 */
     if (pid == g_app.targetPid)
     {
-        YZLOGI(L"抓屏子进程 pid=%u：它就是主目标进程（Yistart 自己也加载 ExdDtDup），跳过重复注入", pid);
+        YZLOGI(L"抓屏子进程 pid=%u：已注入（它就是主目标进程，Yistart 自己也加载 ExdDtDup；跳过重复注入）", pid);
         return;
     }
     UiAppendLog(yz::kLogInfo,
