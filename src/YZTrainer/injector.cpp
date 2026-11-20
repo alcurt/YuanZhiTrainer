@@ -10,6 +10,7 @@
 
 #include <tlhelp32.h>
 #include <set>
+#include <mutex>
 #include <string.h>
 
 namespace
@@ -931,9 +932,38 @@ void StartLockToolWatch()
     else
         YZLOGW(L"锁屏工具看护线程启动失败 err=%u", GetLastError());
 }
+/* v0.6.85：同一个 pid 只注入一次。两条路径会同时命中同一个进程——
+   ① IPC 日志里的 `[抓屏子进程 pid=N]` 标记（CreateProcessW 钩子即时通知）；
+   ② capturewatch 每 3 秒的扫描（按模块名发现）。
+   11-20 现场四个 pid（10520/10616/10768/11748）都出现了两次"Hook DLL 已连接"，
+   同一进程跑两套引擎状态，冻结标记与取帧统计会互相覆盖——必须去重。 */
+static bool ClaimCaptureChildPid(DWORD pid)
+{
+    static std::mutex mtx;
+    static std::set<DWORD> seen;
+    std::lock_guard<std::mutex> lock(mtx);
+    if (seen.size() > 512)
+        seen.clear();          /* pid 会被回收，攒太多就清一次 */
+    return seen.insert(pid).second;
+}
+
 void OnCaptureChildSeen(DWORD pid, const std::wstring& line)
 {
     YZLOGI(L"抓屏子进程出现: pid=%u —— 厂商的 DXGI 桌面复制在它里面（%s）", pid, line.c_str());
+    if (!ClaimCaptureChildPid(pid))
+    {
+        YZLOGI(L"抓屏子进程 pid=%u：此前已经注入过，跳过重复注入（v0.6.85 去重）", pid);
+        return;
+    }
+    /* v0.6.85（第二刀）：**主目标自己也会加载 ExdDtDup.dll**（Yistart 既要 GDI 抓屏也要做桌面复制），
+       于是 capturewatch 的模块扫描会把它当成"抓屏子进程"再注入一次——本地回归实测：
+       pid 先以"目标进程"注入、几秒后又以"抓屏子进程"注入，同一进程两套引擎。
+       主目标本来就是全量钩子（含采集组），这里直接跳过。 */
+    if (pid == g_app.targetPid)
+    {
+        YZLOGI(L"抓屏子进程 pid=%u：它就是主目标进程（Yistart 自己也加载 ExdDtDup），跳过重复注入", pid);
+        return;
+    }
     UiAppendLog(yz::kLogInfo,
                 yz::Format(L"识别到抓屏子进程 pid=%u（教师监视/缩略图时由学生端自己拉起）", pid));
     if (!g_app.cfg.injectCaptureChild)
