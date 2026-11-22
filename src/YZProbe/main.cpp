@@ -362,6 +362,47 @@ std::wstring ProbeToMarkdown(const ProbeData& data)
         m += L"```\n\n";
     }
 
+    /* v0.6.90：一句话结论——"镜像驱动/采集组件到底被谁加载了"。
+       现场判"教师端点开查看的画面是谁喂的"时，先看这一节：
+       如果 ExdMirr.dll 出现在某个进程里，说明镜像驱动（显示驱动接口那一半）已被挂上，
+       应用层的 GDI/DXGI 钩子够不到它；如果只有 ExdDtDup.dll，那就是普通桌面复制，能冻。
+       只做归并、不再枚举进程，代价可以忽略。 */
+    m += L"### 运行时关键模块汇总（镜像驱动 / 采集组件挂在谁身上）\n\n";
+    {
+        struct ModHit { const wchar_t* key; const wchar_t* label; };
+        const ModHit keys[] = {
+            { L"ExdMirr",   L"ExdMirr.dll（镜像驱动用户态一半，挂上后看画面走显示栈）" },
+            { L"ExdDtDup",  L"ExdDtDup.dll（桌面复制采集）" },
+            { L"ExdElite",  L"ExdElite.dll（采集）" },
+            { L"ExdPaint",  L"ExdPaint.dll（绘制/采集）" },
+            { L"ExdHooks",  L"ExdHooks.dll（远志自己的钩子）" },
+            { L"videfake",  L"videfake（虚拟显示设备用户态）" }
+        };
+        for (size_t k = 0; k < sizeof(keys) / sizeof(keys[0]); k++)
+        {
+            std::wstring who;
+            for (size_t i = 0; i < data.processes.size(); i++)
+            {
+                const ProbeProcess& p = data.processes[i];
+                for (size_t j = 0; j < p.modules.size(); j++)
+                {
+                    if (yz::ContainsNoCase(p.modules[j].name, keys[k].key))
+                    {
+                        if (!who.empty())
+                            who += L"、";
+                        who += yz::Format(L"PID %u(%s)", p.pid, p.name.c_str());
+                        break;
+                    }
+                }
+            }
+            m += L"- " + std::wstring(keys[k].label) + L"：" +
+                 (who.empty() ? std::wstring(L"**未见**") : who) + L"\n";
+        }
+        m += L"\n判读：**ExdMirr 出现** ⇒ 镜像驱动已挂上，教师端\"点开查看\"可能是显示栈直出，"
+             L"应用层钩子拦不住（此时冻结只能覆盖那些走 GDI/DXGI 的路径）；\n"
+             L"**只有 ExdDtDup/ExdElite** ⇒ 走的是普通桌面复制，冻结应当生效。\n\n";
+    }
+
     m += L"### 远志模块导出表（可用于确认可直接调用的入口）\n\n";
     for (size_t i = 0; i < data.processes.size(); i++)
     {
