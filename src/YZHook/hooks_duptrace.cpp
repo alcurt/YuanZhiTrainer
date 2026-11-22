@@ -223,6 +223,7 @@ HRESULT STDMETHODCALLTYPE TraceDuplicateOutput(IDXGIOutput1* self, IUnknown* dev
     const HRESULT hr = g_realDuplicate(self, device, out);
     if (SUCCEEDED(hr) && out != nullptr && *out != nullptr)
     {
+        RememberDevice(device);   /* v0.6.88：槽 22 这条同样要记设备，否则交付模式用不了 */
         const LONG n = InterlockedIncrement(&g_dupCreated);
         PatchDuplicationObject(*out);
         if (n <= 3)

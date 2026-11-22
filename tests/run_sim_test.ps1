@@ -3170,6 +3170,87 @@ if ($script:hardKilled -eq 0) {
     $result.Add(('FAIL  本轮有 {0} 次"改强杀" ⇒ 任务栏会留下同等数量的死图标（查 Close-TrainerGracefully 的窗口枚举）' -f $script:hardKilled))
 }
 if ($script:stageName -ne '(开始)') { Write-Host ('  [计时] {0} 用时 {1} 秒' -f $script:stageName, [Math]::Round(((Get-Date) - $script:stageStart).TotalSeconds,1)) }
+# ---------------------------------------------------------------------------
+# 阶段二十八：冻结期"持续交付同一帧"（v0.6.89，DeliverFrozenFrame=1）
+#   为什么要有这一阶段：这段 D3D 代码跑在厂商进程里，主回归其它阶段都没有真实桌面复制，
+#   等于"从没被执行过"。这里让模拟目标自己建复制、连取 40 帧，并在冻结 + 交付开关打开下跑完。
+#   日志要有"已记住 D3D11 设备"与"冻结交付 取帧统计"，且模拟端取到帧 ≥ 30、无"本次写回失败"。
+# ---------------------------------------------------------------------------
+Start-Stage '==== 阶段二十八：冻结期持续交付同一帧（默认关的开关）===='
+
+$phase28Ini = @(
+    '[General]',
+    'AutoExportOnExit=0',
+    'Flags=13',
+    'WindowPercent=60',
+    'LogLevel=3',
+    'AutoInject=1',
+    'InjectMethod=0',
+    'EnableExamGuard=1',
+    'ExternalWindowFix=0',
+    'TraceDesktopDuplication=1',
+    'DeliverFrozenFrame=1',
+    'ProcessNames=Yistart.exe;TEACHCMD.exe;PlayerGUI.exe;ExdPaintHelper.exe;YZSimTarget.exe'
+)
+Set-Content -LiteralPath $iniFile -Value $phase28Ini -Encoding utf8
+
+$d28Dir = Join-Path $env:TEMP 'yzt-deliver'
+$d28Sim = Join-Path $d28Dir 'YZSimTarget.exe'
+$d28Log = Join-Path $d28Dir 'sim_log.txt'
+New-Item -ItemType Directory -Force -Path $d28Dir | Out-Null
+Copy-Item -LiteralPath $sim -Destination $d28Sim -Force
+# 假 ExdDtDup.dll：32 位系统 DLL 改名，只为让"进程里加载了采集组件"成立（模拟目标是 x86）
+$d28Dll = Join-Path $d28Dir 'ExdDtDup.dll'
+Copy-Item -LiteralPath (Join-Path $env:SystemRoot 'SysWOW64\version.dll') -Destination $d28Dll -Force
+if (Test-Path -LiteralPath $d28Log) { Move-Item -LiteralPath $d28Log -Destination "$d28Log.bak28-$stamp" -Force }
+
+$sim28Proc = $null
+$app28Proc = $null
+
+try {
+    $sim28Proc = Start-Process -FilePath $d28Sim `
+        -ArgumentList ("--dup 40 --dup-delay 10 --load `"" + $d28Dll + "`"") -PassThru
+    Start-Sleep -Seconds 2
+    $mark28 = Get-LogLength $appLog
+    $app28Proc = Start-Trainer
+
+    $deadline28 = (Get-Date).AddSeconds(45)
+    while ((Get-Date) -lt $deadline28) {
+        if (Test-Path -LiteralPath $d28Log) {
+            $t28 = Get-Content -LiteralPath $d28Log -Raw
+            if ($t28 -match 'dup: 完成') { break }
+        }
+        Start-Sleep -Milliseconds 500
+    }
+
+    $seg28   = Read-LogTail $appLog $mark28
+    $sim28   = if (Test-Path -LiteralPath $d28Log) { Get-Content -LiteralPath $d28Log -Raw } else { '' }
+    $done28  = ([regex]::Match($sim28, 'dup: 完成[^\r\n]*')).Value
+    $frames28 = 0
+    if ($done28 -match '取到帧=(\d+)') { $frames28 = [int]$Matches[1] }
+    $dev28     = $seg28 -match '\[DXGI 交付\] 已记住 D3D11 设备'
+    $deliver28 = $seg28 -match '冻结交付 取帧统计'
+    $noFail28  = ($seg28 -notmatch '本次写回失败')
+
+    Write-Host ("交付: 记住设备=" + $dev28 + " 交付分支被执行=" + $deliver28 + " 无写回失败=" + $noFail28 +
+                " 模拟端: " + $done28)
+    if ($dev28) {
+        $result.Add('PASS  交付模式下记住了 D3D11 设备（槽 22 的 DuplicateOutput 路径也生效）')
+    } else {
+        $result.Add('FAIL  没记住 D3D11 设备，交付模式等于空转（只可能走回拒帧）')
+    }
+    if ($deliver28 -and $frames28 -ge 30 -and $noFail28) {
+        $result.Add(('PASS  冻结期持续交付同一帧：交付分支执行且模拟端取到 {0}/40 帧' -f $frames28))
+    } else {
+        $result.Add(('FAIL  交付没生效（分支={0} 取到帧={1} 无失败={2}）' -f $deliver28, $frames28, $noFail28))
+    }
+}
+finally {
+    if ($sim28Proc -and -not $sim28Proc.HasExited) { Stop-Process -Id $sim28Proc.Id -Force -ErrorAction SilentlyContinue }
+    Start-Sleep -Milliseconds 500
+    [void](Close-TrainerGracefully $app28Proc 8)
+}
+
 $script:sw.Stop()
 Write-Host ("==== 测试结果（总用时 " + [Math]::Round($script:sw.Elapsed.TotalSeconds, 1) + " 秒）====")
 $result | ForEach-Object { Write-Host $_ }
