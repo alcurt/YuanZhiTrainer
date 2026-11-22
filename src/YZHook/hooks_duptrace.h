@@ -20,6 +20,7 @@ void DupTraceSetFreeze(bool on);
 bool DupTraceIsFrozen();   /* 补充通道判断是否已经冻结，避免每次重复打日志 */
 bool DupTraceInstalled();  /* v0.6.83：DXGI 取证钩子是否已装上 */
 long DupTraceCreated();    /* v0.6.83：本进程内建立桌面复制的次数（0 = 从来没建过） */
+long DupTraceAcquiredFrames();  /* v0.6.87：成功取到的帧数 */
 } /* namespace yzhook */
 
 #endif /* YZ_HOOKS_DUPTRACE_H */

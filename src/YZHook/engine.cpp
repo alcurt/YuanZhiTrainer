@@ -474,6 +474,43 @@ void SweepTick()
         }
     }
 
+    /* v0.6.87：画面交付统计（每 30 秒）。现场用它回答"点开查看的画面到底是谁喂的"：
+       · 屏幕源 BitBlt 一直是 0，而教师端画面仍在动 ⇒ 走镜像驱动（应用层钩子够不到）；
+       · DXGI 已建立复制但取到帧一直是 0 ⇒ 冻结把对方饿死了（缩略图变黑的候选解释）。
+       只在这些数有变化、或冻结开着时打，避免刷屏。 */
+    {
+        static ULONGLONG s_lastTick  = 0;
+        static long s_lastBlt   = 0;
+        static long s_lastRedir = 0;
+        static long s_lastFrame = 0;
+        const ULONGLONG nowTick = GetTickCount64();
+        if (s_lastTick == 0)
+        {
+            s_lastTick  = nowTick;
+            s_lastBlt   = yzhook::CaptureScreenBltCalls();
+            s_lastRedir = static_cast<long>(yzhook::CaptureRedirectCount());
+            s_lastFrame = yzhook::DupTraceAcquiredFrames();
+        }
+        else if (nowTick - s_lastTick >= 15000)
+        {
+            const long blt   = yzhook::CaptureScreenBltCalls();
+            const long redir = static_cast<long>(yzhook::CaptureRedirectCount());
+            const long frame = yzhook::DupTraceAcquiredFrames();
+            const long dBlt   = blt   - s_lastBlt;
+            const long dRedir = redir - s_lastRedir;
+            const long dFrame = frame - s_lastFrame;
+            if (dBlt != 0 || dRedir != 0 || dFrame != 0 || g_wantFrozen)
+            {
+                YZLOGI(L"画面交付统计: 屏幕源 BitBlt +%ld（其中冻结替换 +%ld）/ DXGI 取到帧 +%ld / 冻结=%d",
+                       dBlt, dRedir, dFrame, g_wantFrozen ? 1 : 0);
+            }
+            s_lastTick  = nowTick;
+            s_lastBlt   = blt;
+            s_lastRedir = redir;
+            s_lastFrame = frame;
+        }
+    }
+
     yzhook::WindowSweepTick();
     yzhook::InputEnforceTick();
 

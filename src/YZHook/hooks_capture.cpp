@@ -224,10 +224,18 @@ BOOL WINAPI Hook_DeleteDC(HDC dc)
     return result;
 }
 
+/* v0.6.87：屏幕源抓取调用计数。现场要回答"点开查看的画面到底是谁喂的"——
+   这三类钩子在整个查看窗口里一次都没被调用，就说明 GDI 这条路没参与，
+   画面只能来自镜像驱动（应用层钩子够不到）。 */
+static volatile LONG g_screenBltCalls = 0;
+
 BOOL WINAPI Hook_BitBlt(HDC hdc, int x, int y, int cx, int cy, HDC hdcSrc, int x1, int y1, DWORD rop)
 {
     if (!yzhook::TryEnterHook())
         return g_realBitBlt(hdc, x, y, cx, cy, hdcSrc, x1, y1, rop);
+
+    if (IsScreenDC(hdcSrc) || IsWindowDC(hdcSrc))
+        InterlockedIncrement(&g_screenBltCalls);
 
     BOOL result = FALSE;
     bool redirected = false;
@@ -697,6 +705,12 @@ void CaptureUnfreeze()
     ReleaseFrozen();
     YZLOGI(L"已恢复实时画面");
 }
+
+long CaptureScreenBltCalls()
+{
+    return InterlockedCompareExchange(&g_screenBltCalls, 0, 0);
+}
+
 
 bool CaptureIsFrozen()
 {
