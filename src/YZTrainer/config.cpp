@@ -1,4 +1,4 @@
-#include "app.h"
+﻿#include "app.h"
 
 #include "yz_log.h"
 #include "yz_util.h"
@@ -80,6 +80,7 @@ void ConfigEnsureExists(const std::wstring& iniPath)
         L"; 现场要【取到帧/超时】这类量化证据时改成 1（只计数、不改行为），改完重启程序生效\n"
         L"TraceDesktopDuplication=0\n"
         L"InjectCaptureChild=1\n"
+    L"DeliverFrozenFrame=0\n"
         L"CaptureScanIntervalMs=30000\n"
         L"TargetDir=\n"
         L"HookDllPath=\n"
@@ -116,7 +117,8 @@ void ConfigApplyDefaults(AppConfig& cfg)
     cfg.blockMessageHooks = true;
     cfg.traceDesktopDuplication = false;      /* 取证默认关：开了也只计数，不影响任何行为 */
     cfg.captureScanIntervalMs = 30000;   /* v0.6.40：采集栈监控扫描周期（默认 30 秒；回归里调小以省时间） */
-    cfg.injectCaptureChild = true;   /* 抓屏子进程自动注入（v0.6.32，默认开）：教师监视/缩略图时
+    cfg.injectCaptureChild = true;
+    cfg.deliverFrozenFrame = false;   /* v0.6.88：默认关，见 README 已知限制 */   /* 抓屏子进程自动注入（v0.6.32，默认开）：教师监视/缩略图时
     SyncExamGuardBit(cfg);
     SyncBlockMessageHooksBit(cfg);
     SyncTraceDuplicationBit(cfg);
@@ -158,6 +160,7 @@ void ConfigLoad(AppConfig& cfg, const std::wstring& iniPath)
     cfg.blockMessageHooks = ReadInt(iniPath, L"BlockMessageHooks", cfg.blockMessageHooks ? 1 : 0) != 0;
     cfg.traceDesktopDuplication = ReadInt(iniPath, L"TraceDesktopDuplication", cfg.traceDesktopDuplication ? 1 : 0) != 0;
     cfg.injectCaptureChild = ReadInt(iniPath, L"InjectCaptureChild", cfg.injectCaptureChild ? 1 : 0) != 0;
+    cfg.deliverFrozenFrame = ReadInt(iniPath, L"DeliverFrozenFrame", cfg.deliverFrozenFrame ? 1 : 0) != 0;
     cfg.captureScanIntervalMs = ReadInt(iniPath, L"CaptureScanIntervalMs", cfg.captureScanIntervalMs);
     SyncBlockMessageHooksBit(cfg);
     SyncTraceDuplicationBit(cfg);
@@ -198,6 +201,7 @@ void ConfigSave(const AppConfig& cfg, const std::wstring& iniPath)
     WriteInt(iniPath, L"BlockMessageHooks", cfg.blockMessageHooks ? 1 : 0);
     WriteInt(iniPath, L"TraceDesktopDuplication", cfg.traceDesktopDuplication ? 1 : 0);
     WriteInt(iniPath, L"InjectCaptureChild", cfg.injectCaptureChild ? 1 : 0);
+    WriteInt(iniPath, L"DeliverFrozenFrame", cfg.deliverFrozenFrame ? 1 : 0);
     WriteInt(iniPath, L"CaptureScanIntervalMs", cfg.captureScanIntervalMs);
     WritePrivateProfileStringW(kSection, L"TargetDir", cfg.targetDir.c_str(), iniPath.c_str());
     WritePrivateProfileStringW(kSection, L"HookDllPath", cfg.hookDllPath.c_str(), iniPath.c_str());

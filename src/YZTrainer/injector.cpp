@@ -1099,8 +1099,11 @@ void WriteCaptureStateFile()
     yz::EnsureDirectory(dir);
     const std::wstring path = yz::JoinPath(dir, L"capture-state.txt");
     const DWORD anti = (g_app.cfg.flags & YZ_FLAG_ANTI_MONITOR) ? 1 : 0;
-    const std::wstring text = yz::Format(L"AntiMonitor=%u\r\nFlags=0x%08X\r\nWriter=%u\r\n",
-                                         anti, g_app.cfg.flags, GetCurrentProcessId());
+    /* v0.6.88：把"冻结期持续交付同一帧"也写进补充通道。钩子那边每 2 秒读一次，
+       这样开关不用重启也能改（改 ini 后托盘里重开一次防监视即可）。 */
+    const std::wstring text = yz::Format(L"AntiMonitor=%u\r\nFlags=0x%08X\r\nWriter=%u\r\nDeliverFrozenFrame=%u\r\n",
+                                         anti, g_app.cfg.flags, GetCurrentProcessId(),
+                                         g_app.cfg.deliverFrozenFrame ? 1 : 0);
     HANDLE h = CreateFileW(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr,
                            CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (h == INVALID_HANDLE_VALUE)

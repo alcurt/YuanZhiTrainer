@@ -706,6 +706,23 @@ void CaptureUnfreeze()
     YZLOGI(L"已恢复实时画面");
 }
 
+bool CaptureGetFrozenBits(const void** bits, int* w, int* h)
+{
+    if (bits == nullptr || w == nullptr || h == nullptr)
+        return false;
+    bool ok = false;
+    Lock();
+    if (g_frozen && g_frozenBits != nullptr && g_vw > 0 && g_vh > 0)
+    {
+        *bits = g_frozenBits;
+        *w    = g_vw;
+        *h    = g_vh;
+        ok    = true;
+    }
+    Unlock();
+    return ok;
+}
+
 long CaptureScreenBltCalls()
 {
     return InterlockedCompareExchange(&g_screenBltCalls, 0, 0);

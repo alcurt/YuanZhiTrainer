@@ -21,6 +21,11 @@ bool DupTraceIsFrozen();   /* 补充通道判断是否已经冻结，避免每�
 bool DupTraceInstalled();  /* v0.6.83：DXGI 取证钩子是否已装上 */
 long DupTraceCreated();    /* v0.6.83：本进程内建立桌面复制的次数（0 = 从来没建过） */
 long DupTraceAcquiredFrames();  /* v0.6.87：成功取到的帧数 */
+
+/* v0.6.88：冻结时不再"拒帧"，改为把预抓底图写回取到的纹理（默认关闭）。
+   现场用 capture-state.txt 里的 DeliverFrozenFrame=1 打开；任何一步失败都退回拒帧。 */
+void DupTraceSetDeliver(bool on);
+bool DupTraceIsDeliver();
 } /* namespace yzhook */
 
 #endif /* YZ_HOOKS_DUPTRACE_H */

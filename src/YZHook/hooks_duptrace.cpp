@@ -18,14 +18,27 @@
 #include "hooks_duptrace.h"
 
 #include "yz_hook_state.h"
+#include "hooks_capture.h"   /* v0.6.88：冻结交付要拿冻结位图 */
 
 #include <dxgi1_2.h>
 #include <dxgi1_5.h>   /* v0.6.50：IDXGIOutput5::DuplicateOutput1 */
+#include <d3d11.h>     /* v0.6.88：冻结交付要往取到的纹理里写像素 */
 
 namespace yzhook
 {
 /* 冻结开关（v0.6.33）：变量放最前，AcquireNextFrame 桩与引擎侧共用 */
 volatile LONG g_freezeDup = 0;
+
+/* v0.6.88：冻结期"持续交付同一帧"。默认关（g_deliverFrozen=0 时行为与以前完全一致）。
+   打开后：照常取帧 → 把预抓底图写回纹理 → 返回 S_OK；任何一步失败都归还帧并退回拒帧。 */
+volatile LONG        g_deliverFrozen = 0;
+ID3D11Device*        g_d3dDev  = nullptr;
+ID3D11DeviceContext* g_d3dCtx  = nullptr;
+ID3D11Texture2D*     g_d3dStag = nullptr;
+UINT                 g_stagW   = 0;
+UINT                 g_stagH   = 0;
+DXGI_FORMAT          g_stagFmt = DXGI_FORMAT_UNKNOWN;
+volatile LONG        g_deliverFails = 0;
 namespace
 {
 /* ---- 真函数指针（从真 vtable 里取） ---- */
@@ -89,6 +102,87 @@ void MaybeSummarize(const wchar_t* why)
 }
 
 /* 按对象换 vtable：拷贝真表、只替换槽 8/14。真表是进程内共享的，所以只取一次原指针。 */
+
+/* 记住 D3D11 设备/上下文（DuplicateOutput 时给的那个 IUnknown 就是它）。
+   故意不释放：钩子活在目标进程里，一直要用。 */
+static void RememberDevice(IUnknown* device)
+{
+    if (device == nullptr || g_d3dDev != nullptr)
+        return;
+    ID3D11Device* dev = nullptr;
+    if (FAILED(device->QueryInterface(__uuidof(ID3D11Device), reinterpret_cast<void**>(&dev))) ||
+        dev == nullptr)
+        return;
+    ID3D11DeviceContext* ctx = nullptr;
+    dev->GetImmediateContext(&ctx);
+    if (ctx == nullptr)
+    {
+        dev->Release();
+        return;
+    }
+    g_d3dDev = dev;
+    g_d3dCtx = ctx;
+    YZLOGI(L"[DXGI 交付] 已记住 D3D11 设备（featureLevel=0x%X）", static_cast<unsigned>(dev->GetFeatureLevel()));
+}
+
+/* 把冻结位图写进这张纹理。只在格式/尺寸都对得上时才动手。 */
+static bool OverwriteTextureWithFrozen(ID3D11Texture2D* tex)
+{
+    if (tex == nullptr || g_d3dDev == nullptr || g_d3dCtx == nullptr)
+        return false;
+
+    const void* bits = nullptr;
+    int bw = 0;
+    int bh = 0;
+    if (!yzhook::CaptureGetFrozenBits(&bits, &bw, &bh) || bits == nullptr || bw <= 0 || bh <= 0)
+        return false;
+
+    D3D11_TEXTURE2D_DESC td;
+    tex->GetDesc(&td);
+    if (td.Format != DXGI_FORMAT_B8G8R8A8_UNORM)
+        return false;
+    if (static_cast<int>(td.Width) != bw || static_cast<int>(td.Height) != bh)
+        return false;
+
+    if (g_d3dStag == nullptr || g_stagW != td.Width || g_stagH != td.Height || g_stagFmt != td.Format)
+    {
+        if (g_d3dStag != nullptr)
+        {
+            g_d3dStag->Release();
+            g_d3dStag = nullptr;
+        }
+        D3D11_TEXTURE2D_DESC sd = td;
+        sd.Usage          = D3D11_USAGE_STAGING;
+        sd.BindFlags      = 0;
+        sd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+        sd.MiscFlags      = 0;
+        sd.MipLevels      = 1;
+        sd.ArraySize      = 1;
+        sd.SampleDesc.Count   = 1;
+        sd.SampleDesc.Quality = 0;
+        if (FAILED(g_d3dDev->CreateTexture2D(&sd, nullptr, &g_d3dStag)) || g_d3dStag == nullptr)
+            return false;
+        g_stagW   = td.Width;
+        g_stagH   = td.Height;
+        g_stagFmt = td.Format;
+    }
+
+    D3D11_MAPPED_SUBRESOURCE ms;
+    ZeroMemory(&ms, sizeof(ms));
+    if (FAILED(g_d3dCtx->Map(g_d3dStag, 0, D3D11_MAP_WRITE, 0, &ms)) || ms.pData == nullptr)
+        return false;
+
+    const BYTE* src = reinterpret_cast<const BYTE*>(bits);
+    BYTE* dst = reinterpret_cast<BYTE*>(ms.pData);
+    const size_t rowBytes = static_cast<size_t>(bw) * 4;
+    for (int y = 0; y < bh; ++y)
+        memcpy(dst + static_cast<size_t>(y) * ms.RowPitch, src + static_cast<size_t>(y) * rowBytes, rowBytes);
+    g_d3dCtx->Unmap(g_d3dStag, 0);
+
+    g_d3dCtx->CopyResource(tex, g_d3dStag);
+    return true;
+}
+
 void PatchDuplicationObject(IDXGIOutputDuplication* obj)
 {
     if (obj == nullptr)
@@ -164,6 +258,7 @@ HRESULT STDMETHODCALLTYPE TraceDuplicateOutput1(IDXGIOutput5* self, IUnknown* de
     {
         const LONG n = InterlockedIncrement(&g_dupCreated);
         PatchDuplicationObject(*out);
+        RememberDevice(device);   /* v0.6.88：交付模式要用它往纹理里写像素 */
         if (n <= 3)
             YZLOGI(L"[DXGI 取证] 建立桌面复制成功(1)（第 %d 次，duplication=%p）", n, *out);
     }
@@ -188,6 +283,44 @@ HRESULT STDMETHODCALLTYPE TraceAcquireNextFrame(IDXGIOutputDuplication* self, UI
 
     if (InterlockedCompareExchange(&g_freezeDup, 0, 0) != 0)
     {
+        /* v0.6.88：交付模式——照常取帧，但把冻结底图写进它，返回 S_OK。
+           这样对方收到的是"一直是那张冻结图"，而不是"一直没有新帧"。
+           任何一步失败都归还帧并退回下面的拒帧路径（默认关闭，现场用 DeliverFrozenFrame=1 打开）。 */
+        if (InterlockedCompareExchange(&g_deliverFrozen, 0, 0) != 0 && g_d3dDev != nullptr &&
+            info != nullptr && res != nullptr)
+        {
+            DXGI_OUTDUPL_FRAME_INFO fi;
+            ZeroMemory(&fi, sizeof(fi));
+            IDXGIResource* got = nullptr;
+            const HRESULT hrAcq = g_realAcquire(self, timeout, &fi, &got);
+            if (SUCCEEDED(hrAcq) && got != nullptr)
+            {
+                ID3D11Texture2D* tex = nullptr;
+                bool delivered = false;
+                if (SUCCEEDED(got->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&tex))) &&
+                    tex != nullptr)
+                {
+                    delivered = OverwriteTextureWithFrozen(tex);
+                    if (!delivered)
+                        tex->Release();
+                }
+                if (delivered)
+                {
+                    *info = fi;
+                    *res  = got;              /* 所有权交给调用方 */
+                    InterlockedIncrement(&g_acquireCalls);
+                    InterlockedIncrement(&g_acquireFrames);
+                    MaybeSummarize(L"冻结交付");
+                    LeaveHook();
+                    return S_OK;
+                }
+                g_realRelease(self);          /* 取到了却写不进去：立刻归还，再按拒帧处理 */
+                got->Release();
+                const LONG f = InterlockedIncrement(&g_deliverFails);
+                if (f <= 3)
+                    YZLOGI(L"[DXGI 交付] 本次写回失败（第 %d 次，多半是格式/尺寸对不上），已退回拒帧", f);
+            }
+        }
         /* 冻结中：**诚实等待**再回 WAIT_TIMEOUT（不伪造帧、不排空）。等待长度按调用方 timeout 取，
            0 时给 8 毫秒——不然调用方会变成忙等（§27 实测 3.54M 次/秒）。 */
         DWORD waitMs = (timeout == 0) ? 8 : timeout;
@@ -366,6 +499,16 @@ void DupTraceSetFreeze(bool on)
     /* 镜像回宿主（v0.6.33）：现场在 yzt.log 里就能一眼看到冻结何时开、何时关，
        不必再去目标进程的日志目录里翻。 */
     yzhook::SendLogToHost(YZ_LOG_INFO, yz::Format(L"DXGI 冻结: %s", on ? L"已开启" : L"已关闭").c_str());
+}
+
+void DupTraceSetDeliver(bool on)
+{
+    InterlockedExchange(&g_deliverFrozen, on ? 1 : 0);
+}
+
+bool DupTraceIsDeliver()
+{
+    return InterlockedCompareExchange(&g_deliverFrozen, 0, 0) != 0;
 }
 
 } /* namespace yzhook */

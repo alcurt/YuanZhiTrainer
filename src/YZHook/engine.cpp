@@ -408,6 +408,21 @@ void RefreshCaptureFreezeFromFile()
     int anti = -1;
     if (const char* p = strstr(buf, "AntiMonitor="))
         anti = (p[12] == '1') ? 1 : 0;
+    /* v0.6.88：冻结期间"持续交付同一帧"的开关（默认关）。放在同一个补充通道里，
+       这样不动机器间协议（YZ_CONFIG 的 16 字节布局与版本号都不用动）。 */
+    {
+        static int s_lastDeliver = -1;
+        int deliver = 0;
+        if (const char* q = strstr(buf, "DeliverFrozenFrame="))
+            deliver = (q[19] == '1') ? 1 : 0;
+        if (deliver != s_lastDeliver)
+        {
+            s_lastDeliver = deliver;
+            yzhook::DupTraceSetDeliver(deliver != 0);
+            YZLOGI(L"DXGI 交付: 冻结期持续交付同一帧 = %s（默认关；打开后失败仍会退回拒帧）",
+                   deliver ? L"开" : L"关");
+        }
+    }
     if (reported != 1)
     {
         reported = 1;
