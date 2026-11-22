@@ -80,6 +80,7 @@ foreach ($p in $platforms) {
         'AutoExportOnCapture=1',
         'BlockMessageHooks=1',
         'TraceDesktopDuplication=0',
+        'DeliverFrozenFrame=0',
         'InjectCaptureChild=1',
         'CaptureScanIntervalMs=30000',
         'TargetDir=',
