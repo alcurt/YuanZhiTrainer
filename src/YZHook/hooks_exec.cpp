@@ -211,6 +211,86 @@ bool IsCaptureChildCommandLine(const std::wstring& cmdLine)
     }
     return false;
 }
+/* v0.6.91：锁屏工具（KillMain.exe）**就地注入**。
+   现场（2026-11-26）实测：宿主经管道收到标记再注入，虽然日志写"已注入"，但那个进程一条钩子日志都没有
+   ——它活的时间比"管道往返 + 注入"还短，我们等于什么都没抓到。这里改成在**本钩子里**立刻做一次
+   最小化远程注入（OpenProcess → VirtualAllocEx → WriteProcessMemory → CreateRemoteThread(LoadLibraryW)），
+   省掉管道往返；DLL 路径直接取"我们自己这个模块"，所以不用问宿主。
+   注入线程单独起，绝不在钩子里阻塞。 */
+DWORD WINAPI LockToolInjectThread(LPVOID param)
+{
+    const DWORD pid = static_cast<DWORD>(reinterpret_cast<ULONG_PTR>(param));
+    const ULONGLONG t0 = GetTickCount64();
+
+    HMODULE self = nullptr;
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                            GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                            reinterpret_cast<LPCWSTR>(&LockToolInjectThread), &self) ||
+        self == nullptr)
+    {
+        YZLOGW(L"锁屏工具 pid=%u：就地注入拿不到自身模块句柄 err=%u", pid, GetLastError());
+        return 0;
+    }
+    wchar_t dll[MAX_PATH] = { 0 };
+    if (GetModuleFileNameW(self, dll, MAX_PATH) == 0)
+    {
+        YZLOGW(L"锁屏工具 pid=%u：就地注入取自身路径失败 err=%u", pid, GetLastError());
+        return 0;
+    }
+
+    HANDLE hp = OpenProcess(PROCESS_CREATE_THREAD | PROCESS_VM_OPERATION | PROCESS_VM_WRITE |
+                            PROCESS_VM_READ | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (hp == nullptr)
+    {
+        YZLOGW(L"锁屏工具 pid=%u：就地注入 OpenProcess 失败 err=%u（可能已被保护/已退出）",
+               pid, GetLastError());
+        return 0;
+    }
+
+    const size_t bytes = (wcslen(dll) + 1) * sizeof(wchar_t);
+    void* remote = VirtualAllocEx(hp, nullptr, bytes, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    bool ok = false;
+    if (remote != nullptr)
+    {
+        SIZE_T written = 0;
+        if (WriteProcessMemory(hp, remote, dll, bytes, &written) && written == bytes)
+        {
+            HMODULE k32 = GetModuleHandleW(L"kernel32.dll");
+            FARPROC loadLib = (k32 != nullptr) ? GetProcAddress(k32, "LoadLibraryW") : nullptr;
+            if (loadLib != nullptr)
+            {
+                HANDLE th = CreateRemoteThread(hp, nullptr, 0,
+                                               reinterpret_cast<LPTHREAD_START_ROUTINE>(loadLib),
+                                               remote, 0, nullptr);
+                if (th != nullptr)
+                {
+                    WaitForSingleObject(th, 800);   /* 最多等 0.8 秒，不拖住别的东西 */
+                    CloseHandle(th);
+                    ok = true;
+                }
+                else
+                {
+                    YZLOGW(L"锁屏工具 pid=%u：就地注入 CreateRemoteThread 失败 err=%u", pid, GetLastError());
+                }
+            }
+        }
+        else
+        {
+            YZLOGW(L"锁屏工具 pid=%u：就地注入写内存失败 err=%u", pid, GetLastError());
+        }
+        /* 故意不 VirtualFreeEx：远端线程可能还在跑，释放会踩到悬空路径 */
+    }
+    else
+    {
+        YZLOGW(L"锁屏工具 pid=%u：就地注入 VirtualAllocEx 失败 err=%u", pid, GetLastError());
+    }
+    CloseHandle(hp);
+
+    YZLOGI(L"锁屏工具 pid=%u：就地注入%s（耗时 %llu ms，DLL=%s）",
+           pid, ok ? L"已下达" : L"失败", GetTickCount64() - t0, dll);
+    return 0;
+}
+
 BOOL WINAPI Hook_CreateProcessW(LPCWSTR appName, LPWSTR cmdLine, LPSECURITY_ATTRIBUTES procAttr,
                                 LPSECURITY_ATTRIBUTES threadAttr, BOOL inherit, DWORD flags,
                                 LPVOID env, LPCWSTR cwd, LPSTARTUPINFOW si, LPPROCESS_INFORMATION pi)
@@ -229,7 +309,16 @@ BOOL WINAPI Hook_CreateProcessW(LPCWSTR appName, LPWSTR cmdLine, LPSECURITY_ATTR
        钩子侧记到了 4 次锁屏事件，宿主侧一次都没抓到）。所以这里把子进程 pid 塞进审计行，
        宿主收到日志后立刻注入——通道与"抓屏子进程"完全同构。 */
     if (result && pi != nullptr && cmdLine != nullptr && wcsstr(cmdLine, L"KillMain") != nullptr)
+    {
         verdict += yz::Format(L" [锁屏工具 pid=%u]", pi->dwProcessId);
+        /* v0.6.91：立刻就地注入（宿主那条路保留作兜底）。线程化，绝不阻塞钩子本身。 */
+        HANDLE th = CreateThread(nullptr, 0, LockToolInjectThread,
+                                 reinterpret_cast<LPVOID>(static_cast<ULONG_PTR>(pi->dwProcessId)), 0, nullptr);
+        if (th != nullptr)
+            CloseHandle(th);
+        else
+            YZLOGW(L"锁屏工具 pid=%u：就地注入线程起不来 err=%u", pi->dwProcessId, GetLastError());
+    }
     AuditEvent(L"CreateProcessW", exe, cmdLine != nullptr ? cmdLine : L"", verdict);
 
     yzhook::LeaveHook();

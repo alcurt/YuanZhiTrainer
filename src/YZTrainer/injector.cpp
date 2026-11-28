@@ -939,20 +939,92 @@ static DWORD WINAPI CaptureChildInjectThread(LPVOID param)
 static std::set<DWORD> g_lockToolSeen;
 static volatile LONG   g_clipGuardCount = 0;
 
+/* v0.6.91：宿主这里从"抢先注入"改成"兜底 + 量寿命"。
+   现场（2026-11-26）实测：宿主经管道收到标记再注入，日志写"已注入"，但那个进程一条钩子日志都没有
+   ——它活的时间比"管道往返 + 注入"还短。真正抢时间的那一手挪进了钩子（hooks_exec.cpp 就地注入）。
+   这里负责三件事：
+     1) 等 600 ms，看那个进程还在不在（不在就说明它本来就短命，把寿命记下来）；
+     2) 还在、但里面没有 YZHook.dll ⇒ 钩子侧没抢到，宿主补注一次；
+     3) 持续观察它退出，打一条"存活 N ms"——这条是判"KillMain 到底有没有机会被钩到"的直接依据。 */
+static bool HookDllLoadedInPid(DWORD pid)
+{
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid);
+    if (snap == INVALID_HANDLE_VALUE)
+        return false;
+    bool found = false;
+    MODULEENTRY32W me;
+    ZeroMemory(&me, sizeof(me));
+    me.dwSize = sizeof(me);
+    if (Module32FirstW(snap, &me))
+    {
+        do
+        {
+            /* 注意：注入用的文件是 cache 里的 YZHook_x86_<hash>.dll / YZHook_x64_<hash>.dll，
+               模块名**不是**干净的 "YZHook.dll"。只比对前缀，否则这里永远判"没注入"，
+               宿主就会对同一个进程再补注一次（本地实测到重复注入）。 */
+            if (_wcsnicmp(me.szModule, L"YZHook", 6) == 0)
+            {
+                found = true;
+                break;
+            }
+        } while (Module32NextW(snap, &me));
+    }
+    CloseHandle(snap);
+    return found;
+}
+
 static DWORD WINAPI LockToolInjectThread(LPVOID param)
 {
     const DWORD pid = static_cast<DWORD>(reinterpret_cast<ULONG_PTR>(param));
-    const std::wstring dll = ResolveHookDllPath();
-    if (dll.empty())
+    const ULONGLONG t0 = GetTickCount64();
+
+    Sleep(600);   /* 给钩子侧的就地注入留出时间窗 */
+
+    HANDLE hp = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (hp == nullptr)
     {
-        YZLOGW(L"锁屏工具 pid=%u：拿不到 Hook DLL 路径，跳过注入", pid);
+        YZLOGI(L"锁屏工具 pid=%u：600 ms 内已消失（OpenProcess err=%u）——它比注入还短命，钩不到属预期",
+               pid, GetLastError());
         return 0;
     }
-    std::wstring err;
-    if (InjectHookDll(pid, dll, &err))
-        YZLOGI(L"锁屏工具 pid=%u：已注入（它的 SetCursorPos/ClipCursor/mouse_event 现在会进我们的钩子）", pid);
+
+    if (WaitForSingleObject(hp, 0) == WAIT_OBJECT_0)
+    {
+        YZLOGI(L"锁屏工具 pid=%u：600 ms 内已退出（存活不足 600 ms）——所以它自己不可能动光标",
+               pid);
+        CloseHandle(hp);
+        return 0;
+    }
+
+    if (HookDllLoadedInPid(pid))
+    {
+        YZLOGI(L"锁屏工具 pid=%u：钩子侧已在里面（不重复注入），继续观察它的寿命", pid);
+    }
     else
-        YZLOGW(L"锁屏工具 pid=%u：注入失败: %s", pid, err.c_str());
+    {
+        const std::wstring dll = ResolveHookDllPath();
+        if (dll.empty())
+        {
+            YZLOGW(L"锁屏工具 pid=%u：拿不到 Hook DLL 路径，跳过补注", pid);
+        }
+        else
+        {
+            std::wstring err;
+            if (InjectHookDll(pid, dll, &err))
+                YZLOGI(L"锁屏工具 pid=%u：钩子侧没抢到，宿主补注成功（它的键鼠调用现在会进钩子）", pid);
+            else
+                YZLOGW(L"锁屏工具 pid=%u：宿主补注也失败: %s", pid, err.c_str());
+        }
+    }
+
+    /* 观察退出，量出存活时长（最多等 30 秒；KillMain 正常是"发完指令就退"） */
+    const DWORD waitMs = WaitForSingleObject(hp, 30000);
+    const ULONGLONG lived = GetTickCount64() - t0;
+    if (waitMs == WAIT_OBJECT_0)
+        YZLOGI(L"锁屏工具 pid=%u：存活 %llu ms 后退出", pid, lived);
+    else
+        YZLOGI(L"锁屏工具 pid=%u：至少存活 %llu ms 仍未退出（观察窗 30 秒到）", pid, lived);
+    CloseHandle(hp);
     return 0;
 }
 

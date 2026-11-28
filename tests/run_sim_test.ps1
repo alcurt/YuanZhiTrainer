@@ -3251,6 +3251,102 @@ finally {
     [void](Close-TrainerGracefully $app28Proc 8)
 }
 
+# ---------------------------------------------------------------------------
+# 阶段二十九：锁屏工具（KillMain.exe）就地注入（v0.6.91）
+#   背景（2026-11-26 现场）：教师端按锁定会拉起 KillMain.exe -d:set；v0.6.80 让钩子把 pid 报给宿主、
+#   宿主再注入，日志写"已注入"却**一条钩子日志都没有** —— 那个进程活的时间比"管道往返 + 注入"还短。
+#   本版改成在 Yistart 的钩子里**立刻**做最小化远程注入（15 ms 量级），宿主只负责兜底与量寿命。
+#   本阶段用一个放在 "GZYZ" 路径下、改名成 KillMain.exe 的替身来跑通整条链
+#   （引擎门禁按"远志安装路径"放行，现场 KillMain 本来就在厂商目录里）。
+#   43. 日志出现"锁屏事件"（钩子认出了 KillMain 的命令行）
+#   44. 日志出现"就地注入已下达"（钩子侧抢时间那一手真的执行了）
+#   45. 日志出现"锁屏工具宿主：只装输入钩子"（替身内的引擎门禁放行 + 只装输入组）
+#   46. 日志出现"Hook DLL 已连接: pid=…" 第二条（说明 KillMain 真的连上了）
+#   47. 日志出现"钩子侧已在里面（不重复注入）"（宿主的模块名前缀判据生效，不重复注入）
+#   48. 杀掉替身后日志出现"存活 … ms 后退出"（寿命度量可用）
+# ---------------------------------------------------------------------------
+Start-Stage '==== 阶段二十九：锁屏工具就地注入（KillMain）===='
+
+$phase29Ini = @(
+    '[General]',
+    'AutoExportOnExit=0',
+    'Flags=5',
+    'WindowPercent=60',
+    'LogLevel=3',
+    'AutoInject=1',
+    'InjectMethod=0',
+    'EnableExamGuard=1',
+    'ExternalWindowFix=0',
+    'DeliverFrozenFrame=0',
+    'ProcessNames=Yistart.exe;TEACHCMD.exe;PlayerGUI.exe;ExdPaintHelper.exe;YZSimTarget.exe'
+)
+Set-Content -LiteralPath $iniFile -Value $phase29Ini -Encoding utf8
+
+$d29Dir = Join-Path $env:TEMP 'GZYZ-yzt-killmain'
+$d29Sim = Join-Path $d29Dir 'YZSimTarget.exe'
+$d29Km  = Join-Path $d29Dir 'KillMain.exe'
+New-Item -ItemType Directory -Force -Path $d29Dir | Out-Null
+Copy-Item -LiteralPath $sim -Destination $d29Sim -Force
+Copy-Item -LiteralPath $sim -Destination $d29Km -Force
+
+$sim29Proc = $null
+$app29Proc = $null
+
+try {
+    $sim29Proc = Start-Process -FilePath $d29Sim -ArgumentList ("--exec-cmd `"" + $d29Km + "`"") -PassThru
+    Start-Sleep -Milliseconds 600
+    $mark29 = Get-LogLength $appLog
+    $app29Proc = Start-Trainer
+
+    $deadline29 = (Get-Date).AddSeconds(30)
+    while ((Get-Date) -lt $deadline29) {
+        $seg29now = Read-LogTail $appLog $mark29
+        if ($seg29now -match '钩子侧已在里面（不重复注入）') { break }
+        Start-Sleep -Milliseconds 500
+    }
+
+    $seg29 = Read-LogTail $appLog $mark29
+    $hasLock    = $seg29 -match '锁屏事件'
+    $hasInject  = $seg29 -match '就地注入已下达'
+    $hasHost    = $seg29 -match '锁屏工具宿主：只装输入钩子'
+    $connCount  = @([regex]::Matches($seg29, 'Hook DLL 已连接: pid=')).Count
+    $hasDedupe  = $seg29 -match '钩子侧已在里面（不重复注入）'
+
+    Write-Host ("锁屏链路: 事件=" + $hasLock + " 就地注入=" + $hasInject + " 宿主门禁放行=" + $hasHost +
+                " 连接数=" + $connCount + " 宿主不重复注入=" + $hasDedupe)
+    if ($hasLock -and $hasInject) {
+        $result.Add('PASS  KillMain 出现时钩子当场就地注入（不再只靠宿主管道往返）')
+    } else {
+        $result.Add('FAIL  锁屏工具没有就地注入（现场仍会"日志说注入成功、实际一条钩子日志都没有"）')
+    }
+    if ($hasHost) {
+        $result.Add('PASS  KillMain 里的引擎按"只装输入钩子"启用（门禁对远志安装路径放行）')
+    } else {
+        $result.Add('FAIL  KillMain 里的引擎没启用（门禁拒了，或注入没落进去）')
+    }
+    if ($connCount -ge 2 -and $hasDedupe) {
+        $result.Add(('PASS  KillMain 连上了钩子（连接 {0} 次）且宿主识别"已在里面"不重复注入' -f $connCount))
+    } else {
+        $result.Add(('FAIL  KillMain 连接异常（连接 {0} 次，宿主判重={1}）' -f $connCount, $hasDedupe))
+    }
+
+    # 杀掉替身，验证"寿命度量"能落一行
+    Get-Process -Name KillMain -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Milliseconds 1500
+    $seg29b = Read-LogTail $appLog $mark29
+    if ($seg29b -match '存活 \d+ ms 后退出') {
+        $result.Add('PASS  锁屏工具寿命度量生效（退出时记下存活毫秒数）')
+    } else {
+        $result.Add('FAIL  锁屏工具退出时没有记录存活时长（下次还是判不出它到底活多久）')
+    }
+}
+finally {
+    Get-Process -Name KillMain -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    if ($sim29Proc -and -not $sim29Proc.HasExited) { Stop-Process -Id $sim29Proc.Id -Force -ErrorAction SilentlyContinue }
+    Start-Sleep -Milliseconds 500
+    [void](Close-TrainerGracefully $app29Proc 8)
+}
+
 $script:sw.Stop()
 Write-Host ("==== 测试结果（总用时 " + [Math]::Round($script:sw.Elapsed.TotalSeconds, 1) + " 秒）====")
 $result | ForEach-Object { Write-Host $_ }

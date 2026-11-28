@@ -1,4 +1,4 @@
-//
+﻿//
 // YZSimTarget.exe —— 模拟远志学生端的测试目标（仅用于本地验证 YZTrainer）。
 //
 // 模拟行为：
@@ -29,6 +29,9 @@ HHOOK g_keyHook = nullptr;
 int   g_frame = 0;
 bool  g_examRequested = false;
 bool  g_execRequested = false;
+/* v0.6.91：--exec-cmd "<路径>" 让替身拉起指定子进程（回归用它造一个 KillMain.exe，
+   验证"锁屏工具就地注入"那条链；默认仍是 cmd.exe /c echo）。 */
+static std::wstring g_execCustom;
 /* --yank [毫秒]：周期性把光标移到 (400,300)、随后拽回 (0,0)，模拟机房"全屏广播/锁键鼠时鼠标能动
    几百毫秒就被拽回左上角"的现象（2026-10-15 用户描述）。用于**验证输入取证**（YZHook 的
    [输入取证] 只记录不拦截）：学生端/模拟目标是被允许挂钩子的宿主，所以必须用它来验。 */
@@ -434,8 +437,18 @@ void SpawnChildOnce()
     if (GetSystemDirectoryW(sysDir, MAX_PATH) == 0)
         return;
 
-    const std::wstring exe = yz::JoinPath(sysDir, L"cmd.exe");
-    std::wstring cmdLine = L"cmd.exe /c echo yztrainer-audit";
+    std::wstring exe;
+    std::wstring cmdLine;
+    if (!g_execCustom.empty())
+    {
+        exe = g_execCustom;
+        cmdLine = L"\"" + g_execCustom + L"\"";
+    }
+    else
+    {
+        exe = yz::JoinPath(sysDir, L"cmd.exe");
+        cmdLine = L"cmd.exe /c echo yztrainer-audit";
+    }
 
     STARTUPINFOW si;
     ZeroMemory(&si, sizeof(si));
@@ -644,6 +657,25 @@ if (cmdLine != nullptr && wcsstr(cmdLine, L"--yank") != nullptr)
     }
 }
     g_execRequested = (cmdLine != nullptr) && (wcsstr(cmdLine, L"--exec") != nullptr);
+    if (cmdLine != nullptr && wcsstr(cmdLine, L"--exec-cmd ") != nullptr)
+    {
+        std::wstring raw(cmdLine);
+        std::wstring v = raw.substr(raw.find(L"--exec-cmd ") + 11);
+        const size_t q1 = v.find(L'"');
+        if (q1 != std::wstring::npos)
+        {
+            const size_t q2 = v.find(L'"', q1 + 1);
+            if (q2 != std::wstring::npos)
+                v = v.substr(q1 + 1, q2 - q1 - 1);
+        }
+        else
+        {
+            const size_t sp = v.find(L' ');
+            if (sp != std::wstring::npos)
+                v = v.substr(0, sp);
+        }
+        g_execCustom = v;
+    }
     if (cmdLine != nullptr)
     {
         /* --spawn-child（v0.6.32）：本机替身，见 SpawnCaptureChildOnce()。
